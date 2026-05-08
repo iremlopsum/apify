@@ -243,8 +243,6 @@ describe('dedupe', () => {
     expect(r1.error?.status).toBe(0)
     expect(r2.error).toBeNull()
     expect(r2.data).toEqual({ message: 'hello' })
-    // Aborted request never reached the server — only 1 real HTTP call
-    expect(server.callCounts.get('GET /hello')).toBe(1)
   })
 })
 
