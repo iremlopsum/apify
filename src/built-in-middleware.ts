@@ -202,7 +202,7 @@ export const logMiddleware: Middleware = async (ctx, next) => {
 // cacheMiddleware
 // -----------------------------------------------------------------------------
 
-type CacheMiddleware = Middleware & { clear(): void }
+export type CacheMiddleware = Middleware & { clear(): void }
 
 /**
  * Creates a middleware that caches successful responses in memory, keyed by

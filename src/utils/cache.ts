@@ -74,7 +74,7 @@ export class CacheStore {
   /**
    * Retrieves a cached value if it exists and hasn't expired.
    *
-   * Returns `null` if the key is not found or if the entry's age exceeds
+   * Returns `null` if the key is not found or if the entry's age reaches or exceeds
    * the configured TTL. Expired entries are deleted from the store on access
    * rather than on a background timer.
    */

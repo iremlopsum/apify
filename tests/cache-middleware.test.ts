@@ -330,8 +330,8 @@ describe('cacheMiddleware', () => {
     const api = createApi({ baseUrl: '', requests: { search } })
 
     await api.search({ q: 'hello', page: 1 })
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await api.search({ page: 1, q: 'hello' } as any)
+    const altOrderParams: { q: string; page: number } = { page: 1, q: 'hello' }
+    await api.search(altOrderParams)
 
     expect(callCount).toBe(1)
   })
