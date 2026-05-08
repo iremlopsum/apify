@@ -38,4 +38,9 @@ describe('gql', () => {
     const query = gql`query { user { ${fields} } }`
     expect(query).toBe('query { user { id name } }')
   })
+
+  it('preserves backslash escape sequences (String.raw behavior)', () => {
+    const query = gql`query { user(filter: "\\w+") { id } }`
+    expect(query).toBe('query { user(filter: "\\w+") { id } }')
+  })
 })
