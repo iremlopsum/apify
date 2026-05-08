@@ -1,4 +1,3 @@
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function mergeHeaders(...sources: (HeadersInit | undefined)[]): Headers {
   const merged = new Headers()
   for (const source of sources) {
