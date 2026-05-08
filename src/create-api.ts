@@ -41,6 +41,7 @@ import { composeMiddleware } from './middleware.js'
 import { buildUrl } from './utils/path-params.js'
 import { serializeBody } from './utils/serialize.js'
 import { DedupeTracker } from './utils/dedupe.js'
+import { mergeHeaders } from './utils/headers.js'
 import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
 
 // =============================================================================
@@ -122,57 +123,6 @@ type Api<TRequests extends Record<string, Request<any, any>>> = {
 // =============================================================================
 // Internal helpers
 // =============================================================================
-
-/**
- * Merges headers from multiple sources, where later sources override earlier ones.
- *
- * This implements the header precedence chain:
- *   global headers < per-request headers < per-call headers
- *
- * Each source can be any valid HeadersInit (plain object, Headers instance,
- * or [key, value] tuple array). Sources that are undefined are skipped.
- *
- * The merge uses `Headers.set()` (not `append()`), so a key in a later source
- * completely replaces the same key from an earlier source. This is intentional —
- * we want per-call headers to override global headers, not duplicate them.
- *
- * @param sources - Variadic list of header sources to merge, in order of
- *   increasing priority. Undefined entries are safely skipped.
- * @returns A new Headers object containing the merged result.
- *
- * @example
- * ```ts
- * mergeHeaders(
- *   { 'X-Layer': 'global', 'X-Global': 'yes' },     // lowest priority
- *   { 'X-Layer': 'request', 'X-Request': 'yes' },    // overrides global X-Layer
- *   { 'X-Layer': 'call', 'X-Call': 'yes' },           // overrides request X-Layer
- * )
- * // Result: X-Layer=call, X-Global=yes, X-Request=yes, X-Call=yes
- * ```
- */
-function mergeHeaders(...sources: (HeadersInit | undefined)[]): Headers {
-  const merged = new Headers()
-
-  for (const source of sources) {
-    // Skip undefined sources — this happens when a layer doesn't define headers
-    if (!source) continue
-
-    // Normalize the source into iterable [key, value] pairs.
-    // Headers has .entries(), arrays are already iterable, plain objects
-    // need Object.entries(). This handles all valid HeadersInit shapes.
-    const entries: Iterable<[string, string]> =
-      source instanceof Headers ? (source as any).entries() : Array.isArray(source) ? source : Object.entries(source)
-
-    // Use set() instead of append() so later sources override earlier ones.
-    // append() would create duplicate headers (e.g., two X-Layer values),
-    // which is not what we want for the override cascade.
-    for (const [key, value] of entries) {
-      merged.set(key, value)
-    }
-  }
-
-  return merged
-}
 
 /**
  * Parses the response body according to the configured response type.
