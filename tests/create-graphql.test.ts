@@ -464,9 +464,12 @@ describe('createGraphQL — retry()', () => {
       })
     }))
 
+    const mw = vi.fn(async (_ctx: unknown, next: () => Promise<unknown>) => next())
+
     const client = createGraphQL({
       endpoint: 'https://api.example.com/graphql',
       operations: { getUser: op },
+      middleware: [mw],
     })
 
     const firstResult = await client.getUser({ id: '1' })
@@ -476,5 +479,6 @@ describe('createGraphQL — retry()', () => {
     expect(retryResult.data).toEqual({ id: '1' })
     expect(retryResult.error).toBeNull()
     expect(callCount).toBe(2)
+    expect(mw).toHaveBeenCalledTimes(2)
   })
 })
