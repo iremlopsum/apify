@@ -243,6 +243,8 @@ describe('dedupe', () => {
     expect(r1.error?.status).toBe(0)
     expect(r2.error).toBeNull()
     expect(r2.data).toEqual({ message: 'hello' })
+    // Aborted request never reached the server — only 1 real HTTP call
+    expect(server.callCounts.get('GET /hello')).toBe(1)
   })
 })
 
@@ -264,7 +266,7 @@ describe('logMiddleware', () => {
 
       expect(consoleSpy).toHaveBeenCalledTimes(2)
       // Format: "[apify] → GET hello http://127.0.0.1:PORT/hello"
-      expect(consoleSpy.mock.calls[0][0]).toMatch(/\[apify\] → GET hello/)
+      expect(consoleSpy.mock.calls[0][0]).toMatch(/\[apify\] → GET hello http:\/\/127\.0\.0\.1:\d+\/hello/)
       // Format: "[apify] ← hello OK (Xms)"
       expect(consoleSpy.mock.calls[1][0]).toMatch(/\[apify\] ← hello OK \(\d+ms\)/)
     } finally {
