@@ -47,6 +47,7 @@ describe('GraphQL — flat client (operations)', () => {
 
     expect(error).toBeNull()
     expect(data?.user).toEqual({ id: '7', name: 'User 7' })
+    expect(server.callCounts.get('POST /graphql')).toBe(1)
   })
 
   it('GraphQL errors in response body (HTTP 200) are returned as error Result', async () => {
@@ -109,5 +110,7 @@ describe('GraphQL — split client (queries + mutations)', () => {
     const { data: mData, error: mError } = await client.mutation.createUser({ name: 'Bob' })
     expect(mError).toBeNull()
     expect(mData?.createUser).toEqual({ id: '99', name: 'Bob' })
+    // Two real HTTP requests: one for the query, one for the mutation
+    expect(server.callCounts.get('POST /graphql')).toBe(2)
   })
 })
