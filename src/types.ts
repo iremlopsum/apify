@@ -412,3 +412,44 @@ export interface ApiConfig<TRequests extends Record<string, unknown>> {
    */
   onError?: (error: ApiError) => void
 }
+
+// ---------------------------------------------------------------------------
+// GraphQL Types
+// ---------------------------------------------------------------------------
+
+/**
+ * Configuration object for the `Operation` class constructor.
+ *
+ * The `operation` field holds the GraphQL document string. It is sent to the
+ * server under the key `"query"` (per the GraphQL over HTTP spec), but is
+ * named `operation` here to make clear it can be a query or mutation.
+ */
+export interface OperationConfig {
+  /** The GraphQL document string. Sent as `{ query: ... }` on the wire. */
+  operation: string
+  middleware?: Middleware[]
+  headers?: HeadersInit
+  dedupe?: boolean
+}
+
+/**
+ * A single GraphQL error as returned by the server in `{ errors: [...] }`.
+ * Mirrors the GraphQL spec error shape.
+ */
+export interface GraphQLError {
+  message: string
+  locations?: Array<{ line: number; column: number }>
+  path?: Array<string | number>
+  extensions?: Record<string, unknown>
+}
+
+/**
+ * Base configuration shared by both `createGraphQL` overloads.
+ */
+export interface GraphQLBaseConfig {
+  /** The full URL of the GraphQL endpoint, e.g. `'https://api.example.com/graphql'`. */
+  endpoint: string
+  middleware?: Middleware[]
+  headers?: HeadersInit
+  onError?: (error: ApiError) => void
+}
