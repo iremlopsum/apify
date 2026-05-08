@@ -37,5 +37,10 @@ export type {
   MiddlewareNext
 } from './types.js'
 
+// ---------------------------------------------------------------------------
+// GraphQL — typed GraphQL client, exported from the core entry point
+// ---------------------------------------------------------------------------
+
+/** Factory and primitives for building a typed GraphQL client. */
 export { createGraphQL, Operation, gql } from './graphql.js'
 export type { GraphQLError, OperationConfig, GraphQLBaseConfig } from './types.js'
