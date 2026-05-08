@@ -41,7 +41,12 @@ export function startServer(): Promise<TestServer> {
 
         } else if (method === 'GET' && pathname.startsWith('/users/')) {
           const id = pathname.split('/')[2]
-          sendJson(res, 200, { id, name: `User ${id}` })
+          if (!id) {
+            res.writeHead(404)
+            res.end()
+          } else {
+            sendJson(res, 200, { id, name: `User ${id}` })
+          }
 
         } else if (method === 'GET' && pathname === '/search') {
           const params: Record<string, string> = {}
@@ -50,7 +55,15 @@ export function startServer(): Promise<TestServer> {
 
         } else if (method === 'POST' && pathname === '/echo') {
           const raw = await readBody(req)
-          const body = raw ? (JSON.parse(raw) as unknown) : null
+          let body: unknown = null
+          if (raw) {
+            try {
+              body = JSON.parse(raw) as unknown
+            } catch {
+              sendJson(res, 400, { error: 'Invalid JSON' })
+              return
+            }
+          }
           sendJson(res, 200, { body, contentType: req.headers['content-type'] ?? null })
 
         } else if (method === 'GET' && pathname === '/headers') {
@@ -62,9 +75,9 @@ export function startServer(): Promise<TestServer> {
           res.end()
 
         } else if (method === 'GET' && pathname === '/flaky') {
-          // callCounts is already incremented for this call before we get here
+          const FLAKY_FAIL_COUNT = 2 // fail this many times, then succeed
           const count = callCounts.get('GET /flaky') ?? 0
-          if (count < 3) {
+          if (count <= FLAKY_FAIL_COUNT) {
             res.writeHead(503)
             res.end()
           } else {
@@ -104,13 +117,17 @@ export function startServer(): Promise<TestServer> {
   })
 
   return new Promise((resolve, reject) => {
-    server.on('error', reject)
+    server.once('error', reject)
     server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', reject)
       const addr = server.address() as { address: string; port: number }
       resolve({
         baseUrl: `http://${addr.address}:${addr.port}`,
         callCounts,
-        close: () => new Promise<void>((r, rj) => server.close((err) => (err ? rj(err) : r()))),
+        close: () => new Promise<void>((r, rj) => {
+          server.closeAllConnections()
+          server.close((err) => (err ? rj(err) : r()))
+        }),
       })
     })
   })
