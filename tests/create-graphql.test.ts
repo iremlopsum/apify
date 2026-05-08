@@ -175,3 +175,194 @@ describe('createGraphQL — split queries/mutations', () => {
     expect(data).toEqual({ id: '1' })
   })
 })
+
+describe('createGraphQL — GraphQL errors (HTTP 200 with { errors })', () => {
+  it('maps GraphQL errors to result.error, result.data is null', async () => {
+    const getUser = new Operation<{ id: string }, { id: string }>({
+      operation: gql`query GetUser($id: String!) { user(id: $id) { id } }`,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers(),
+      text: () => Promise.resolve(JSON.stringify({
+        data: null,
+        errors: [{ message: 'User not found' }],
+      })),
+    }))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { getUser },
+    })
+
+    const { data, error, response } = await client.getUser({ id: '99' })
+
+    expect(data).toBeNull()
+    expect(error).not.toBeNull()
+    expect(error?.status).toBe(200)
+    expect(error?.statusText).toBe('GraphQL Error')
+    expect(error?.body).toEqual([{ message: 'User not found' }])
+    expect(response).not.toBeNull()
+  })
+})
+
+describe('createGraphQL — HTTP errors (4xx/5xx)', () => {
+  it('maps a 404 response to result.error', async () => {
+    const getUser = new Operation<{ id: string }, { id: string }>({
+      operation: gql`query GetUser($id: String!) { user(id: $id) { id } }`,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      statusText: 'Not Found',
+      headers: new Headers(),
+      text: () => Promise.resolve(JSON.stringify({ message: 'Not found' })),
+    }))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { getUser },
+    })
+
+    const { data, error, response } = await client.getUser({ id: '99' })
+
+    expect(data).toBeNull()
+    expect(error?.status).toBe(404)
+    expect(error?.body).toEqual({ message: 'Not found' })
+    expect(response?.status).toBe(404)
+  })
+
+  it('maps a 500 response to result.error with null body when response is empty', async () => {
+    const op = new Operation<Record<string, never>, { ok: boolean }>({
+      operation: gql`query { health }`,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      headers: new Headers(),
+      text: () => Promise.resolve(''),
+    }))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { health: op },
+    })
+
+    const { data, error } = await client.health()
+
+    expect(data).toBeNull()
+    expect(error?.status).toBe(500)
+    expect(error?.body).toBeNull()
+  })
+})
+
+describe('createGraphQL — network errors', () => {
+  it('maps a network failure to result.error with status 0, response is null', async () => {
+    const op = new Operation<Record<string, never>, { ok: boolean }>({
+      operation: gql`query { health }`,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { health: op },
+    })
+
+    const { data, error, response } = await client.health()
+
+    expect(data).toBeNull()
+    expect(error?.status).toBe(0)
+    expect(error?.body).toBeInstanceOf(TypeError)
+    expect(response).toBeNull()
+  })
+})
+
+describe('createGraphQL — onError callback', () => {
+  it('fires onError for GraphQL errors', async () => {
+    const op = new Operation<{ id: string }, { id: string }>({
+      operation: gql`query GetUser($id: String!) { user(id: $id) { id } }`,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+      text: () => Promise.resolve(JSON.stringify({ data: null, errors: [{ message: 'Oops' }] })),
+    }))
+
+    const onError = vi.fn()
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { getUser: op },
+      onError,
+    })
+
+    await client.getUser({ id: '1' })
+
+    expect(onError).toHaveBeenCalledOnce()
+    expect(onError.mock.calls[0][0].status).toBe(200)
+  })
+
+  it('fires onError for HTTP errors', async () => {
+    const op = new Operation<{ id: string }, { id: string }>({
+      operation: gql`query GetUser($id: String!) { user(id: $id) { id } }`,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false, status: 401, statusText: 'Unauthorized', headers: new Headers(),
+      text: () => Promise.resolve(''),
+    }))
+
+    const onError = vi.fn()
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { getUser: op },
+      onError,
+    })
+
+    await client.getUser({ id: '1' })
+
+    expect(onError).toHaveBeenCalledOnce()
+    expect(onError.mock.calls[0][0].status).toBe(401)
+  })
+
+  it('fires onError for network errors', async () => {
+    const op = new Operation<Record<string, never>, { ok: boolean }>({
+      operation: gql`query { health }`,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+    const onError = vi.fn()
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { health: op },
+      onError,
+    })
+
+    await client.health()
+
+    expect(onError).toHaveBeenCalledOnce()
+    expect(onError.mock.calls[0][0].status).toBe(0)
+  })
+
+  it('does NOT fire onError on success', async () => {
+    const op = new Operation<Record<string, never>, { ok: boolean }>({
+      operation: gql`query { health }`,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+      text: () => Promise.resolve(JSON.stringify({ data: { ok: true } })),
+    }))
+
+    const onError = vi.fn()
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { health: op },
+      onError,
+    })
+
+    const { error } = await client.health()
+
+    expect(error).toBeNull()
+    expect(onError).not.toHaveBeenCalled()
+  })
+})
