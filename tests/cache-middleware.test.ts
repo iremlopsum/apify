@@ -12,8 +12,12 @@ describe('stableStringify', () => {
     expect(stableStringify(null)).toBe('null')
   })
 
-  it('returns null for undefined', () => {
-    expect(stableStringify(undefined)).toBe('null')
+  it('returns [undefined] for undefined', () => {
+    expect(stableStringify(undefined)).toBe('[undefined]')
+  })
+
+  it('distinguishes null and undefined in objects', () => {
+    expect(stableStringify({ a: null })).not.toBe(stableStringify({ a: undefined }))
   })
 
   it('sorts object keys alphabetically', () => {
@@ -22,6 +26,10 @@ describe('stableStringify', () => {
 
   it('sorts nested object keys', () => {
     expect(stableStringify({ z: { b: 2, a: 1 }, a: 0 })).toBe('{"a":0,"z":{"a":1,"b":2}}')
+  })
+
+  it('escapes special characters in object keys', () => {
+    expect(stableStringify({ 'a"b': 1 })).toBe('{"a\\"b":1}')
   })
 
   it('preserves array element order', () => {
@@ -66,6 +74,15 @@ describe('CacheStore', () => {
     expect(store.get('key')).toBeNull()
     // confirm the entry was removed (not merely skipped)
     dateSpy.mockReturnValue(500) // back inside what would have been TTL
+    expect(store.get('key')).toBeNull()
+  })
+
+  it('returns null exactly at TTL boundary', () => {
+    const dateSpy = vi.spyOn(Date, 'now')
+    dateSpy.mockReturnValue(0)
+    const store = new CacheStore({ ttl: 1000, maxSize: 10 })
+    store.set('key', 'value')
+    dateSpy.mockReturnValue(1000) // exactly at TTL
     expect(store.get('key')).toBeNull()
   })
 
