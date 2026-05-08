@@ -544,6 +544,83 @@ import type {
 } from '@iremlopsum/apify'
 ```
 
+## GraphQL Client
+
+Use `createGraphQL` when your backend speaks GraphQL. It shares the same `Result<T>` shape, middleware model, and error contract as `createApi` — `result.data`, `result.error`, `result.retry` work identically.
+
+```ts
+import { createGraphQL, Operation, gql } from '@iremlopsum/apify'
+
+interface Category {
+  id: string
+  name: string
+  status: string
+}
+
+const GET_CATEGORY = gql`
+  query GetCategory($id: String!) {
+    category(id: $id) {
+      id
+      name
+      status
+    }
+  }
+`
+
+const getCategory = new Operation<{ id: string }, Category>({
+  operation: GET_CATEGORY,
+})
+
+const graphql = createGraphQL({
+  endpoint: 'https://api.example.com/graphql',
+  operations: { getCategory },
+  onError: (error) => console.error(error.status, error.body),
+})
+
+const { data, error } = await graphql.getCategory({ id: '123' })
+```
+
+### Queries and mutations
+
+When you want to distinguish queries from mutations in the client structure, use the `queries` and `mutations` keys instead of `operations`. The two shapes are mutually exclusive — TypeScript enforces this at compile time.
+
+```ts
+const graphql = createGraphQL({
+  endpoint: 'https://api.example.com/graphql',
+  queries: {
+    getCategory: new Operation<{ id: string }, Category>({ operation: GET_CATEGORY }),
+  },
+  mutations: {
+    updateCategory: new Operation<{ id: string; name: string }, Category>({
+      operation: gql`
+        mutation UpdateCategory($id: String!, $name: String!) {
+          updateCategory(id: $id, name: $name) { id name status }
+        }
+      `,
+    }),
+  },
+})
+
+graphql.query.getCategory({ id: '123' })
+graphql.mutation.updateCategory({ id: '123', name: 'New Name' })
+```
+
+### GraphQL errors
+
+GraphQL errors (HTTP 200 with `{ errors: [...] }`) surface as `result.error` with `status: 200` and `body` set to the errors array — no special handling needed. The same `if (error) { ... }` check covers GraphQL errors, HTTP errors, and network errors uniformly.
+
+### Middleware
+
+`createGraphQL` accepts the same middleware options as `createApi` — global, per-operation, and per-call — and the `MiddlewareContext` shape is identical, so middleware written for `createApi` works here too.
+
+```ts
+const graphql = createGraphQL({
+  endpoint: 'https://api.example.com/graphql',
+  operations: { getCategory },
+  middleware: [authMiddleware, logMiddleware],
+})
+```
+
 ## Philosophy
 
 ### Never throws
@@ -582,6 +659,12 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 | `Middleware`    | type     | Middleware function signature: `(ctx, next) => Promise<Result>`    |
 | `MiddlewareContext` | type | Request context passed to middleware                               |
 | `MiddlewareNext` | type    | The `next` function passed to middleware                           |
+| `createGraphQL`     | function | Creates a typed GraphQL client from a config of Operation definitions   |
+| `Operation`         | class    | Typed operation definition — one instance per GraphQL operation         |
+| `gql`               | function | Tagged template literal for GraphQL documents (editor tooling support)  |
+| `OperationConfig`   | type     | Config object for the `Operation` constructor                           |
+| `GraphQLBaseConfig` | type     | Config object for `createGraphQL`                                       |
+| `GraphQLError`      | type     | Shape of a single GraphQL error from `{ errors: [...] }`               |
 
 ### Built-in middleware (`@iremlopsum/apify/middleware`)
 
