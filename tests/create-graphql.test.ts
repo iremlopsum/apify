@@ -367,3 +367,114 @@ describe('createGraphQL — onError callback', () => {
     expect(onError).not.toHaveBeenCalled()
   })
 })
+
+describe('createGraphQL — middleware', () => {
+  it('runs global → per-operation → per-call middleware in order', async () => {
+    const order: string[] = []
+    const globalMw = vi.fn(async (_ctx: unknown, next: () => Promise<unknown>) => { order.push('global'); return next() })
+    const opMw = vi.fn(async (_ctx: unknown, next: () => Promise<unknown>) => { order.push('operation'); return next() })
+    const callMw = vi.fn(async (_ctx: unknown, next: () => Promise<unknown>) => { order.push('call'); return next() })
+
+    const op = new Operation<Record<string, never>, { ok: boolean }>({
+      operation: gql`query { health }`,
+      middleware: [opMw],
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+      text: () => Promise.resolve(JSON.stringify({ data: { ok: true } })),
+    }))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { health: op },
+      middleware: [globalMw],
+    })
+
+    await client.health({}, { middleware: [callMw] })
+
+    expect(order).toEqual(['global', 'operation', 'call'])
+  })
+
+  it('middleware can modify request headers', async () => {
+    const op = new Operation<Record<string, never>, { ok: boolean }>({
+      operation: gql`query { health }`,
+    })
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+      text: () => Promise.resolve(JSON.stringify({ data: { ok: true } })),
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const authMw = vi.fn(async (ctx: { request: { headers: Headers } }, next: () => Promise<unknown>) => {
+      ctx.request.headers.set('Authorization', 'Bearer token123')
+      return next()
+    })
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { health: op },
+      middleware: [authMw],
+    })
+
+    await client.health()
+
+    const headers: Headers = mockFetch.mock.calls[0][1].headers
+    expect(headers.get('Authorization')).toBe('Bearer token123')
+  })
+
+  it('skipMiddleware excludes middleware by reference', async () => {
+    const mw = vi.fn(async (_ctx: unknown, next: () => Promise<unknown>) => next())
+    const op = new Operation<Record<string, never>, { ok: boolean }>({
+      operation: gql`query { health }`,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+      text: () => Promise.resolve(JSON.stringify({ data: { ok: true } })),
+    }))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { health: op },
+      middleware: [mw],
+    })
+
+    await client.health({}, { skipMiddleware: [mw] })
+
+    expect(mw).not.toHaveBeenCalled()
+  })
+})
+
+describe('createGraphQL — retry()', () => {
+  it('retry() re-enters the full execution pipeline', async () => {
+    const op = new Operation<{ id: string }, { id: string }>({
+      operation: gql`query GetUser($id: String!) { user(id: $id) { id } }`,
+    })
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => {
+      callCount++
+      if (callCount === 1) {
+        return Promise.resolve({
+          ok: false, status: 503, statusText: 'Service Unavailable', headers: new Headers(),
+          text: () => Promise.resolve(''),
+        })
+      }
+      return Promise.resolve({
+        ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+        text: () => Promise.resolve(JSON.stringify({ data: { id: '1' } })),
+      })
+    }))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { getUser: op },
+    })
+
+    const firstResult = await client.getUser({ id: '1' })
+    expect(firstResult.error?.status).toBe(503)
+
+    const retryResult = await firstResult.retry()
+    expect(retryResult.data).toEqual({ id: '1' })
+    expect(retryResult.error).toBeNull()
+    expect(callCount).toBe(2)
+  })
+})
