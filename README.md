@@ -546,7 +546,7 @@ import type {
 
 ## GraphQL Client
 
-Use `createGraphQL` when your backend speaks GraphQL. It shares the same `Result<T>` shape, middleware model, and error contract as `createApi` — `result.data`, `result.error`, `result.retry` work identically.
+Use `createGraphQL` when your backend speaks GraphQL; use `createApi` for REST. Both share the same `Result<T>` shape, middleware model, and error contract — `result.data`, `result.error`, `result.retry` work identically.
 
 ```ts
 import { createGraphQL, Operation, gql } from '@iremlopsum/apify'
@@ -582,7 +582,7 @@ const { data, error } = await graphql.getCategory({ id: '123' })
 
 ### Queries and mutations
 
-When you want to distinguish queries from mutations in the client structure, use the `queries` and `mutations` keys instead of `operations`. The two shapes are mutually exclusive — TypeScript enforces this at compile time.
+When you want to distinguish queries from mutations in the client structure, use the `queries` and `mutations` keys instead of `operations`. The `operations` flat shape and the `queries`/`mutations` split are mutually exclusive — TypeScript enforces this at compile time.
 
 ```ts
 const graphql = createGraphQL({
@@ -609,6 +609,8 @@ graphql.mutation.updateCategory({ id: '123', name: 'New Name' })
 
 GraphQL errors (HTTP 200 with `{ errors: [...] }`) surface as `result.error` with `status: 200` and `body` set to the errors array — no special handling needed. The same `if (error) { ... }` check covers GraphQL errors, HTTP errors, and network errors uniformly.
 
+Operations support `dedupe: true` in the same way `Request` does — see [dedupe](#dedupe).
+
 ### Middleware
 
 `createGraphQL` accepts the same middleware options as `createApi` — global, per-operation, and per-call — and the `MiddlewareContext` shape is identical, so middleware written for `createApi` works here too.
@@ -617,7 +619,7 @@ GraphQL errors (HTTP 200 with `{ errors: [...] }`) surface as `result.error` wit
 const graphql = createGraphQL({
   endpoint: 'https://api.example.com/graphql',
   operations: { getCategory },
-  middleware: [authMiddleware, logMiddleware],
+  middleware: [authMiddleware],
 })
 ```
 
@@ -661,7 +663,7 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 | `MiddlewareNext` | type    | The `next` function passed to middleware                           |
 | `createGraphQL`     | function | Creates a typed GraphQL client from a config of Operation definitions   |
 | `Operation`         | class    | Typed operation definition — one instance per GraphQL operation         |
-| `gql`               | function | Tagged template literal for GraphQL documents (editor tooling support)  |
+| `gql`               | const    | Tagged template literal for GraphQL documents (editor tooling support)  |
 | `OperationConfig`   | type     | Config object for the `Operation` constructor                           |
 | `GraphQLBaseConfig` | type     | Config object for `createGraphQL`                                       |
 | `GraphQLError`      | type     | Shape of a single GraphQL error from `{ errors: [...] }`               |
