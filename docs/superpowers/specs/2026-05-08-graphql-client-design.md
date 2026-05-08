@@ -32,16 +32,16 @@ const gql = (strings: TemplateStringsArray, ...values: unknown[]): string =>
 A typed config container — mirrors `Request` but strips out REST-specific fields. No `method` (always POST), no `path` (always the endpoint), no `bodyAs`, no `responseType`.
 
 ```ts
-interface QueryConfig {
-  query: string
+interface OperationConfig {
+  operation: string     // the GraphQL document string (sent as { query: ... } on the wire)
   middleware?: Middleware[]
   headers?: HeadersInit
   dedupe?: boolean
 }
 
 class Operation<TVariables extends object, TData> {
-  readonly config: QueryConfig
-  constructor(config: QueryConfig) { this.config = config }
+  readonly config: OperationConfig
+  constructor(config: OperationConfig) { this.config = config }
 }
 ```
 
@@ -120,7 +120,7 @@ Steps per call:
 2. **Compute abort signal:** routes through `DedupeTracker` if `operation.config.dedupe` is true
 3. **Define `core`:** the innermost fetch layer (see GraphQL Error Handling below)
 4. **Merge headers:** global < per-operation < per-call; auto-set `Content-Type: application/json` if not already set
-5. **Serialize body:** `JSON.stringify({ query: operation.config.query, variables })` — always JSON, no dispatch needed
+5. **Serialize body:** `JSON.stringify({ query: operation.config.operation, variables })` — field is named `operation` in config but sent as `query` on the wire (GraphQL spec)
 6. **Build `MiddlewareContext`:** `{ method: 'POST', url: endpoint, path: endpoint, params: variables, headers, body: serializedBody }`
 7. **`composeMiddleware` → run**
 8. **Post-execution:** clear dedupe tracker, fire `onError` if final result has an error
@@ -162,10 +162,10 @@ interface GraphQLError {
 ```
 src/
   graphql.ts    ← NEW: Operation, createGraphQL, gql
-  types.ts      ← ADD: QueryConfig, GraphQLError, GraphQLBaseConfig,
+  types.ts      ← ADD: OperationConfig, GraphQLError, GraphQLBaseConfig,
                         WithOperations, WithSplit, FlatClient, SplitClient, GraphQLMethod
   index.ts      ← ADD: export { createGraphQL, Operation, gql } from './graphql.js'
-                        export type { GraphQLError, QueryConfig } from './types.js'
+                        export type { GraphQLError, OperationConfig } from './types.js'
 ```
 
 ## Tests
@@ -185,6 +185,20 @@ src/
 - `retry()` re-enters full pipeline
 - `dedupe` cancels previous in-flight request for same operation
 - `gql` tag returns correct string
+
+## README Documentation
+
+`README.md` already has sections for `createApi`, `Request`, middleware, and error handling. The GraphQL additions should slot in as a peer section, not an afterthought.
+
+**New section: "GraphQL Client"** — added after the existing REST client sections, before the middleware section. Should cover:
+
+1. **When to use it** — one sentence: use `createGraphQL` when your backend speaks GraphQL; use `createApi` for REST. Both share the same `Result<T>` shape, middleware, and error model.
+2. **Basic usage** — `gql` tag, `Operation` class, `createGraphQL` with `operations`
+3. **Queries vs mutations** — show the `queries`/`mutations` split and the namespaced API
+4. **Error handling** — note that GraphQL errors (HTTP 200 with `{ errors }`) surface as `result.error`, same as REST errors — no special handling needed
+5. **Middleware** — one example showing a global auth middleware applied to `createGraphQL` (identical pattern to `createApi`)
+
+The section should match the existing README's tone: concise examples first, brief explanation after. No new top-level heading style — use the same `##` level as existing sections.
 
 ## Consumer Usage Example
 
@@ -207,8 +221,8 @@ const UPDATE_CATEGORY = gql`
 const client = createGraphQL({
   endpoint: 'https://api.example.com/graphql',
   operations: {
-    getCategory: new Operation<{ id: string }, Category>({ query: GET_CATEGORY }),
-    updateCategory: new Operation<{ id: string; name: string }, Category>({ query: UPDATE_CATEGORY }),
+    getCategory: new Operation<{ id: string }, Category>({ operation: GET_CATEGORY }),
+    updateCategory: new Operation<{ id: string; name: string }, Category>({ operation: UPDATE_CATEGORY }),
   },
   onError: (error) => console.error(error.status, error.body),
 })
@@ -220,10 +234,10 @@ client.updateCategory({ id: '123', name: 'New Name' })
 const client2 = createGraphQL({
   endpoint: 'https://api.example.com/graphql',
   queries: {
-    getCategory: new Operation<{ id: string }, Category>({ query: GET_CATEGORY }),
+    getCategory: new Operation<{ id: string }, Category>({ operation: GET_CATEGORY }),
   },
   mutations: {
-    updateCategory: new Operation<{ id: string; name: string }, Category>({ query: UPDATE_CATEGORY }),
+    updateCategory: new Operation<{ id: string; name: string }, Category>({ operation: UPDATE_CATEGORY }),
   },
 })
 
