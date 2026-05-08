@@ -580,7 +580,7 @@ const graphql = createGraphQL({
 const { data, error, response, retry } = await graphql.getCategory({ id: '123' })
 ```
 
-Operations with no variables can be called without arguments:
+Operations with no variables can be called without arguments. Use `{}` as `TVariables` to mark an operation as variable-free:
 
 ```ts
 const getViewer = new Operation<{}, ViewerData>({ operation: GET_VIEWER })
@@ -618,7 +618,7 @@ graphql.mutation.updateCategory({ id: '123', name: 'New Name' })
 
 GraphQL errors (HTTP 200 with `{ errors: [...] }`) surface as `result.error` with `status: 200` and `error.body` typed as `GraphQLError[]` — no special handling needed. The same `if (error) { ... }` check covers GraphQL errors, HTTP errors, and network errors uniformly.
 
-Operations support `dedupe: true` in the same way `Request` does — see [dedupe](#dedupe).
+Operations support `dedupe: true` in the same way `Request` does — see [Auto-cancel via `dedupe`](#auto-cancel-via-dedupe).
 
 ### Middleware
 
@@ -637,7 +637,7 @@ const graphql = createGraphQL({
 | Export              | Kind     | Description                                                            |
 | ------------------- | -------- | ---------------------------------------------------------------------- |
 | `createGraphQL`     | function | Creates a typed GraphQL client from a config of Operation definitions  |
-| `Operation`         | class    | Typed operation definition — one instance per GraphQL operation        |
+| `Operation`         | class    | Typed operation definition -- one instance per GraphQL operation       |
 | `gql`               | const    | Tagged template literal for GraphQL documents (editor tooling support) |
 | `OperationConfig`   | type     | Config object for the `Operation` constructor                          |
 | `GraphQLBaseConfig` | type     | Config object for `createGraphQL`                                      |
@@ -681,12 +681,12 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 | `Middleware`    | type     | Middleware function signature: `(ctx, next) => Promise<Result>`    |
 | `MiddlewareContext` | type | Request context passed to middleware                               |
 | `MiddlewareNext` | type    | The `next` function passed to middleware                           |
-| `createGraphQL`     | function | Creates a typed GraphQL client from a config of Operation definitions   |
-| `Operation`         | class    | Typed operation definition — one instance per GraphQL operation         |
-| `gql`               | const    | Tagged template literal for GraphQL documents (editor tooling support)  |
-| `OperationConfig`   | type     | Config object for the `Operation` constructor                           |
-| `GraphQLBaseConfig` | type     | Config object for `createGraphQL`                                       |
-| `GraphQLError`      | type     | Shape of a single GraphQL error from `{ errors: [...] }`               |
+| `createGraphQL`     | function | Creates a typed GraphQL client from a config of Operation definitions  |
+| `Operation`         | class    | Typed operation definition -- one instance per GraphQL operation       |
+| `gql`               | const    | Tagged template literal for GraphQL documents (editor tooling support) |
+| `OperationConfig`   | type     | Config object for the `Operation` constructor                          |
+| `GraphQLBaseConfig` | type     | Config object for `createGraphQL`                                      |
+| `GraphQLError`      | type     | Shape of a single GraphQL error from `{ errors: [...] }`              |
 
 ### Built-in middleware (`@iremlopsum/apify/middleware`)
 
