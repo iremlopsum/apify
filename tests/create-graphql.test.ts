@@ -151,6 +151,8 @@ describe('createGraphQL — split queries/mutations', () => {
 
     expect(client).toHaveProperty('query.getUser')
     expect(client).not.toHaveProperty('mutation')
+    const { data } = await client.query.getUser({ id: '1' })
+    expect(data).toEqual({ id: '1' })
   })
 
   it('exposes only client.mutation when only mutations are provided', async () => {
@@ -169,5 +171,7 @@ describe('createGraphQL — split queries/mutations', () => {
 
     expect(client).toHaveProperty('mutation.deleteUser')
     expect(client).not.toHaveProperty('query')
+    const { data } = await client.mutation.deleteUser({ id: '1' })
+    expect(data).toEqual({ id: '1' })
   })
 })

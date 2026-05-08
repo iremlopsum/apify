@@ -2,7 +2,7 @@ import { ApiError, createSuccessResult, createErrorResult, createNetworkErrorRes
 import { composeMiddleware } from './middleware.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
-import type { CallOptions, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig } from './types.js'
+import type { CallOptions, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
 
 // ---------------------------------------------------------------------------
 // Operation — typed config container for GraphQL operations
@@ -44,9 +44,9 @@ type FlatClient<TOperations> = {
 
 type SplitClient<TQ, TM> =
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (TQ extends Record<string, Operation<any, any>> ? { query: FlatClient<TQ> } : object) &
+  (TQ extends Record<string, Operation<any, any>> ? { query: FlatClient<TQ> } : {}) &
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (TM extends Record<string, Operation<any, any>> ? { mutation: FlatClient<TM> } : object)
+  (TM extends Record<string, Operation<any, any>> ? { mutation: FlatClient<TM> } : {})
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type WithOperations<T> = GraphQLBaseConfig & {
@@ -132,7 +132,7 @@ export function createGraphQL(config: any): any {
 
               const text = await response.text()
               const gqlBody = text
-                ? (JSON.parse(text) as { data?: unknown; errors?: unknown[] })
+                ? (JSON.parse(text) as { data?: unknown; errors?: GraphQLError[] })
                 : null
 
               if (gqlBody?.errors?.length) {
