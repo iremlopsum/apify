@@ -546,7 +546,7 @@ import type {
 
 ## GraphQL Client
 
-Use `createGraphQL` when your backend speaks GraphQL; use `createApi` for REST. Both share the same `Result<T>` shape, middleware model, and error contract — `result.data`, `result.error`, `result.retry` work identically.
+Use `createGraphQL` when your backend speaks GraphQL; use `createApi` for REST. Both share the same `Result<T>` shape, middleware model, and error contract — `result.data`, `result.error`, `result.response`, `result.retry` work identically.
 
 ```ts
 import { createGraphQL, Operation, gql } from '@iremlopsum/apify'
@@ -577,7 +577,16 @@ const graphql = createGraphQL({
   onError: (error) => console.error(error.status, error.body),
 })
 
-const { data, error } = await graphql.getCategory({ id: '123' })
+const { data, error, response, retry } = await graphql.getCategory({ id: '123' })
+```
+
+Operations with no variables can be called without arguments:
+
+```ts
+const getViewer = new Operation<{}, ViewerData>({ operation: GET_VIEWER })
+const graphql = createGraphQL({ endpoint, operations: { getViewer } })
+
+const { data } = await graphql.getViewer() // params argument is optional
 ```
 
 ### Queries and mutations
@@ -607,7 +616,7 @@ graphql.mutation.updateCategory({ id: '123', name: 'New Name' })
 
 ### GraphQL errors
 
-GraphQL errors (HTTP 200 with `{ errors: [...] }`) surface as `result.error` with `status: 200` and `body` set to the errors array — no special handling needed. The same `if (error) { ... }` check covers GraphQL errors, HTTP errors, and network errors uniformly.
+GraphQL errors (HTTP 200 with `{ errors: [...] }`) surface as `result.error` with `status: 200` and `error.body` typed as `GraphQLError[]` — no special handling needed. The same `if (error) { ... }` check covers GraphQL errors, HTTP errors, and network errors uniformly.
 
 Operations support `dedupe: true` in the same way `Request` does — see [dedupe](#dedupe).
 
