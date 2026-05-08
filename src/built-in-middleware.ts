@@ -2,23 +2,20 @@
 // built-in-middleware.ts — Optional, pre-built middleware utilities for apify
 // =============================================================================
 //
-// This file ships two ready-to-use middleware functions that cover the most
+// This file ships three ready-to-use middleware functions that cover the most
 // common cross-cutting concerns for HTTP clients:
 //
 //   1. retryMiddleware — automatically retries failed requests on server errors
 //   2. logMiddleware   — logs request/response lifecycle to the console
+//   3. cacheMiddleware — caches successful responses in memory with TTL
 //
 // These are intentionally decoupled from the core library. They are optional
 // utilities that consumers can import if they want them, but the core
 // (`createApi`, `Request`, `composeMiddleware`) works perfectly without them.
-//
-// A cacheMiddleware was considered but intentionally deferred. Cache
-// invalidation and TTL management add significant complexity, and the
-// middleware system makes it trivial for consumers to write their own
-// cache layer tailored to their specific needs.
 // =============================================================================
 
 import type { Middleware, Result } from './types.js'
+import { CacheStore, stableStringify } from './utils/cache.js'
 
 // -----------------------------------------------------------------------------
 // retryMiddleware
@@ -199,4 +196,122 @@ export const logMiddleware: Middleware = async (ctx, next) => {
   // Return the result unchanged. This middleware is purely observational —
   // it never modifies the request or the response.
   return result
+}
+
+// -----------------------------------------------------------------------------
+// cacheMiddleware
+// -----------------------------------------------------------------------------
+
+type CacheMiddleware = Middleware & { clear(): void }
+
+/**
+ * Creates a middleware that caches successful responses in memory, keyed by
+ * request name and params. Identical calls within the TTL window are served
+ * from cache without hitting the network.
+ *
+ * **Cache key:**
+ *
+ * The key is built from `ctx.requestName` and a stable JSON serialization of
+ * `ctx.request.params` (object keys sorted recursively so `{ b: 2, a: 1 }`
+ * and `{ a: 1, b: 2 }` are treated as the same call). This means the cache
+ * key is always derived from the original params object, not the processed URL.
+ *
+ * **What is cached:**
+ *
+ * Only successful results are stored. If the response has an error (4xx, 5xx,
+ * network error, or GraphQL error), the result is not cached and the next call
+ * will hit the network again.
+ *
+ * The full `Result` object is cached, including `response` (headers, status)
+ * and `retry`. Calling `retry()` on a cached result re-enters the middleware
+ * chain — if the TTL is still valid it returns the cached value; if expired,
+ * it makes a fresh network call. To force a network call on a specific
+ * invocation, use `skipMiddleware: [myCache]` in the call options.
+ *
+ * **Isolation:**
+ *
+ * Each call to `cacheMiddleware()` creates an independent store. Two separate
+ * instances on two different endpoints never share entries, regardless of
+ * request name or params shape.
+ *
+ * **Eviction:**
+ *
+ * When the store reaches `maxSize`, the oldest entry by insertion time is
+ * evicted before the new one is added. Expired entries are removed on access
+ * rather than on a background timer.
+ *
+ * **Debugging:**
+ *
+ * Set `debug: true` to log cache hits and misses to the console:
+ * ```
+ * [apify cache] HIT  getUser {"id":"42"}
+ * [apify cache] MISS getUser {"id":"42"}
+ * ```
+ *
+ * @param options.ttl - Time-to-live in milliseconds. Defaults to 5 minutes.
+ * @param options.maxSize - Maximum number of entries. Defaults to 50.
+ * @param options.debug - Log hits and misses to console. Defaults to false.
+ * @returns A middleware function with an attached `clear()` method.
+ *
+ * @example
+ * ```ts
+ * import { cacheMiddleware } from '@iremlopsum/apify/middleware'
+ *
+ * const getUserCache = cacheMiddleware({ ttl: 5 * 60_000, maxSize: 100 })
+ *
+ * const getUser = new Request<{ id: string }, User>({
+ *   method: 'GET',
+ *   path: '/users/:id',
+ *   middleware: [getUserCache],
+ * })
+ *
+ * // Force a network call for a single invocation:
+ * const { data } = await api.getUser({ id: '42' }, { skipMiddleware: [getUserCache] })
+ * ```
+ *
+ * @example
+ * ```ts
+ * // Clear all cached entries on logout so the next user gets fresh data:
+ * const getUserCache = cacheMiddleware({ ttl: 5 * 60_000 })
+ *
+ * function onLogout() {
+ *   getUserCache.clear()
+ * }
+ * ```
+ */
+export function cacheMiddleware(options?: {
+  ttl?: number
+  maxSize?: number
+  debug?: boolean
+}): CacheMiddleware {
+  const store = new CacheStore({
+    ttl: options?.ttl ?? 5 * 60_000,
+    maxSize: options?.maxSize ?? 50,
+  })
+  const debug = options?.debug ?? false
+
+  const mw: Middleware = async (ctx, next) => {
+    const paramsStr = stableStringify(ctx.request.params)
+    const key = `${ctx.requestName}|${paramsStr}`
+
+    const cached = store.get<Result<unknown>>(key)
+    if (cached !== null) {
+      if (debug) console.log(`[apify cache] HIT  ${ctx.requestName} ${paramsStr}`)
+      return cached
+    }
+
+    if (debug) console.log(`[apify cache] MISS ${ctx.requestName} ${paramsStr}`)
+
+    const result = await next()
+
+    if (!result.error) {
+      store.set(key, result)
+    }
+
+    return result
+  }
+
+  const fn = mw as CacheMiddleware
+  fn.clear = () => store.clear()
+  return fn
 }
