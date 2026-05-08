@@ -379,10 +379,10 @@ const sentryMiddleware: Middleware = async (ctx, next) => {
 
 #### Built-in middleware
 
-The library ships two optional middleware functions, importable from a separate entry point:
+The library ships three optional middleware functions, importable from a separate entry point:
 
 ```ts
-import { retryMiddleware, logMiddleware } from '@iremlopsum/apify/middleware'
+import { retryMiddleware, logMiddleware, cacheMiddleware } from '@iremlopsum/apify/middleware'
 ```
 
 **`retryMiddleware(maxRetries?: number)`**
@@ -420,6 +420,28 @@ const api = createApi({
   middleware: [logMiddleware]
 })
 ```
+
+**`cacheMiddleware(options?)`**
+
+Caches successful responses in memory, keyed by request name and params. Calls with identical params within the TTL window are served from cache without hitting the network. Each `cacheMiddleware()` call creates an isolated store — different endpoints never share entries.
+
+```ts
+const getUserCache = cacheMiddleware({ ttl: 5 * 60_000, maxSize: 100 })
+
+const getUser = new Request<{ id: string }, User>({
+  method: 'GET',
+  path: '/users/:id',
+  middleware: [getUserCache],
+})
+
+// On logout — clear all cached entries:
+getUserCache.clear()
+
+// Bypass cache for a single call:
+const { data } = await api.getUser({ id: '42' }, { skipMiddleware: [getUserCache] })
+```
+
+Options: `ttl` (milliseconds, default 5 min), `maxSize` (max entries, default 50), `debug` (log hits/misses to console, default false). Only successful results are cached — errors always hit the network again.
 
 ### Content types
 
@@ -694,6 +716,7 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 | ----------------- | -------- | ------------------------------------------------------------- |
 | `retryMiddleware` | function | Factory that returns middleware to retry on 5xx server errors  |
 | `logMiddleware`   | const    | Middleware that logs request lifecycle to the console          |
+| `cacheMiddleware` | function | Factory that returns a per-request in-memory cache with `clear()` |
 
 ## License
 
