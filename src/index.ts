@@ -36,3 +36,6 @@ export type {
   MiddlewareContext,
   MiddlewareNext
 } from './types.js'
+
+export { createGraphQL, Operation, gql } from './graphql.js'
+export type { GraphQLError, OperationConfig, GraphQLBaseConfig } from './types.js'
