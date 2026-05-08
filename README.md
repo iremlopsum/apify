@@ -580,10 +580,10 @@ const graphql = createGraphQL({
 const { data, error, response, retry } = await graphql.getCategory({ id: '123' })
 ```
 
-Operations with no variables can be called without arguments. Use `{}` as `TVariables` to mark an operation as variable-free:
+Operations with no variables can be called without arguments. Use `Record<string, never>` as `TVariables` to mark an operation as variable-free:
 
 ```ts
-const getViewer = new Operation<{}, ViewerData>({ operation: GET_VIEWER })
+const getViewer = new Operation<Record<string, never>, ViewerData>({ operation: GET_VIEWER })
 const graphql = createGraphQL({ endpoint, operations: { getViewer } })
 
 const { data } = await graphql.getViewer() // params argument is optional
