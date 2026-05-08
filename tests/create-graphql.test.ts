@@ -482,3 +482,41 @@ describe('createGraphQL — retry()', () => {
     expect(mw).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('createGraphQL — dedupe', () => {
+  it('aborts the previous in-flight request when the same operation is called again', async () => {
+    const op = new Operation<{ id: string }, { id: string }>({
+      operation: gql`query GetUser($id: String!) { user(id: $id) { id } }`,
+      dedupe: true,
+    })
+
+    let firstCallSignal: AbortSignal | undefined
+    let callCount = 0
+
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      callCount++
+      if (callCount === 1) {
+        firstCallSignal = init.signal as AbortSignal
+        return new Promise(() => {}) // hangs forever
+      }
+      return Promise.resolve({
+        ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+        text: () => Promise.resolve(JSON.stringify({ data: { id: '2' } })),
+      })
+    }))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { getUser: op },
+    })
+
+    // First call hangs — don't await
+    client.getUser({ id: '1' })
+
+    // Second call should abort the first
+    await client.getUser({ id: '2' })
+
+    expect(firstCallSignal?.aborted).toBe(true)
+    expect(callCount).toBe(2)
+  })
+})
