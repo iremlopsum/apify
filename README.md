@@ -623,6 +623,17 @@ const graphql = createGraphQL({
 })
 ```
 
+### API Reference additions
+
+| Export              | Kind     | Description                                                            |
+| ------------------- | -------- | ---------------------------------------------------------------------- |
+| `createGraphQL`     | function | Creates a typed GraphQL client from a config of Operation definitions  |
+| `Operation`         | class    | Typed operation definition — one instance per GraphQL operation        |
+| `gql`               | const    | Tagged template literal for GraphQL documents (editor tooling support) |
+| `OperationConfig`   | type     | Config object for the `Operation` constructor                          |
+| `GraphQLBaseConfig` | type     | Config object for `createGraphQL`                                      |
+| `GraphQLError`      | type     | Shape of a single GraphQL error from `{ errors: [...] }`               |
+
 ## Philosophy
 
 ### Never throws
