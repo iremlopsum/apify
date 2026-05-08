@@ -427,8 +427,33 @@ export interface ApiConfig<TRequests extends Record<string, unknown>> {
 export interface OperationConfig {
   /** The GraphQL document string. Sent as `{ query: ... }` on the wire. */
   operation: string
+
+  /**
+   * Middleware that runs only for this specific operation.
+   *
+   * Execution order: global middleware → per-operation middleware → per-call middleware.
+   * Each layer wraps the next in an "onion" pattern.
+   */
   middleware?: Middleware[]
+
+  /**
+   * Default headers for this operation.
+   *
+   * Merge precedence (most specific wins):
+   * 1. Global headers (from `createGraphQL` config) — lowest priority
+   * 2. Per-operation headers (this field)
+   * 3. Per-call headers (from `CallOptions`) — highest priority
+   */
   headers?: HeadersInit
+
+  /**
+   * When `true`, enables auto-cancellation of duplicate in-flight requests.
+   *
+   * If a new call to this operation starts while a previous one is still
+   * pending, the previous request is automatically aborted.
+   *
+   * @default false
+   */
   dedupe?: boolean
 }
 
@@ -437,9 +462,13 @@ export interface OperationConfig {
  * Mirrors the GraphQL spec error shape.
  */
 export interface GraphQLError {
+  /** Human-readable description of the error. */
   message: string
+  /** Character positions in the GraphQL document where the error originated. */
   locations?: Array<{ line: number; column: number }>
+  /** Path to the response field that produced the error, for partial responses. */
   path?: Array<string | number>
+  /** Server-defined additional metadata about the error. */
   extensions?: Record<string, unknown>
 }
 
@@ -449,7 +478,24 @@ export interface GraphQLError {
 export interface GraphQLBaseConfig {
   /** The full URL of the GraphQL endpoint, e.g. `'https://api.example.com/graphql'`. */
   endpoint: string
+
+  /**
+   * Global middleware applied to every operation.
+   * Runs first in the middleware chain (before per-operation and per-call middleware).
+   */
   middleware?: Middleware[]
+
+  /**
+   * Default headers sent with every operation.
+   * Lowest merge priority — overridden by per-operation and per-call headers.
+   */
   headers?: HeadersInit
+
+  /**
+   * Global error callback. Fires after the full middleware chain completes.
+   *
+   * Fires for GraphQL errors (HTTP 200 with `{ errors }`), HTTP errors (4xx/5xx),
+   * and network errors (status 0). Does NOT fire when the result is successful.
+   */
   onError?: (error: ApiError) => void
 }
