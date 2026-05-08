@@ -23,13 +23,14 @@ interface CacheEntry {
  */
 export function stableStringify(value: unknown): string {
   try {
-    if (value === null || value === undefined) return 'null'
+    if (value === undefined) return '[undefined]'
+    if (value === null) return 'null'
     if (Array.isArray(value)) {
       return `[${value.map(stableStringify).join(',')}]`
     }
     if (typeof value === 'object') {
       const obj = value as Record<string, unknown>
-      const pairs = Object.keys(obj).sort().map(k => `"${k}":${stableStringify(obj[k])}`)
+      const pairs = Object.keys(obj).sort().map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
       return `{${pairs.join(',')}}`
     }
     return JSON.stringify(value)
@@ -94,7 +95,8 @@ export class CacheStore {
    * timestamp is evicted before the new entry is added. Eviction is O(n) —
    * acceptable because `maxSize` is designed to be small (≤ 200).
    */
-  set<T>(key: string, value: T): void {
+  set(key: string, value: unknown): void {
+    if (this.maxSize === 0) return
     if (this.cache.size >= this.maxSize) {
       let oldestKey: string | null = null
       let oldestTimestamp = Infinity
