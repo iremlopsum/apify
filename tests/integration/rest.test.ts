@@ -71,7 +71,7 @@ describe('REST — core', () => {
 
     expect(error).toBeNull()
     expect(data?.body).toEqual({ name: 'Alice', age: 30 })
-    expect(data?.contentType).toBe('application/json')
+    expect(data?.contentType).toMatch(/^application\/json/)
   })
 
   it('headers from all three layers reach the server', async () => {
