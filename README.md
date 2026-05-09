@@ -21,6 +21,7 @@ npm install @iremlopsum/apify
   - [Result](#result)
   - [Error handling with `onError`](#error-handling-with-onerror)
   - [Middleware](#middleware)
+    - [Built-in middleware (retry, cache, log)](#built-in-middleware)
   - [Content types](#content-types)
   - [Response parsing](#response-parsing)
   - [Cancellation](#cancellation)
