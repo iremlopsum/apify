@@ -1,10 +1,36 @@
 # apify
 
-Runtime-agnostic, type-safe API client built on standard `fetch`. Zero dependencies.
+Runtime-agnostic, type-safe HTTP client for REST and GraphQL. Built on standard `fetch`. Zero dependencies.
+
+- **Unified API** — REST and GraphQL share the same `Result<T>` shape, middleware stack, and error contract
+- **Never throws** — every call returns `{ data, error, response, retry }`, no try/catch required
+- **Composable middleware** — retry, cache, dedupe, auth, logging — applied at global, per-endpoint, or per-call level
+- **Types by inference** — declare params and response once on the endpoint definition; types flow to every call site automatically
+- **Runtime-agnostic** — Node.js 18+, browsers, Bun, Deno, Cloudflare Workers, React Native — any environment with `fetch`
 
 ```
 npm install @iremlopsum/apify
 ```
+
+## Table of Contents
+
+- [Getting Started](#getting-started)
+- [REST API](#rest-api)
+  - [Request](#request)
+  - [Query strings](#query-strings)
+  - [Result](#result)
+  - [Error handling with `onError`](#error-handling-with-onerror)
+  - [Middleware](#middleware)
+  - [Content types](#content-types)
+  - [Response parsing](#response-parsing)
+  - [Cancellation](#cancellation)
+  - [TypeScript](#typescript)
+- [GraphQL Client](#graphql-client)
+  - [Queries and mutations](#queries-and-mutations)
+  - [GraphQL errors](#graphql-errors)
+  - [Middleware](#middleware-1)
+- [Philosophy](#philosophy)
+- [API Reference](#api-reference)
 
 ## Getting Started
 
@@ -49,7 +75,7 @@ if (error) {
 console.log(data.name)
 ```
 
-## Deep Dive
+## REST API
 
 ### Request
 
@@ -568,7 +594,9 @@ import type {
 
 ## GraphQL Client
 
-Use `createGraphQL` when your backend speaks GraphQL; use `createApi` for REST. Both share the same `Result<T>` shape, middleware model, and error contract — `result.data`, `result.error`, `result.response`, `result.retry` work identically.
+Use `createGraphQL` when your backend speaks GraphQL. **Everything in the REST API section applies here too** — `retryMiddleware`, `cacheMiddleware`, `logMiddleware`, `dedupe`, per-call `signal`, `onError`, `retry()`, `skipMiddleware`, header merging — all of it works identically for GraphQL operations. The only difference is transport: every operation is sent as an HTTP POST with `{ query, variables }`.
+
+Both clients return the same `Result<T>` shape — `result.data`, `result.error`, `result.response`, and `result.retry` work identically.
 
 ```ts
 import { createGraphQL, Operation, gql } from '@iremlopsum/apify'
