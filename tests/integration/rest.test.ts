@@ -272,3 +272,68 @@ describe('logMiddleware', () => {
     }
   })
 })
+
+describe('onError', () => {
+  it('fires onError on non-recovered error results', async () => {
+    const onError = vi.fn()
+    const fail = new Request<Record<string, never>, never>({
+      method: 'GET',
+      path: '/status/503',
+    })
+    const api = createApi({
+      baseUrl: server.baseUrl,
+      requests: { fail },
+      onError,
+    })
+
+    await api.fail()
+
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0].status).toBe(503)
+  })
+
+  it('does NOT fire onError when retryMiddleware recovers a 5xx', async () => {
+    const onError = vi.fn()
+    const flaky = new Request<Record<string, never>, { recovered: boolean }>({
+      method: 'GET',
+      path: '/flaky',
+    })
+    const api = createApi({
+      baseUrl: server.baseUrl,
+      requests: { flaky },
+      middleware: [retryMiddleware(2)],
+      onError,
+    })
+
+    const { data, error } = await api.flaky()
+
+    // Server fails on calls 1 and 2 (count<=2), recovers on call 3
+    expect(error).toBeNull()
+    expect(data?.recovered).toBe(true)
+    expect(onError).not.toHaveBeenCalled()
+  })
+})
+
+describe('retry()', () => {
+  it('result.retry() re-enters the full pipeline and returns a fresh result', async () => {
+    const fail = new Request<Record<string, never>, never>({
+      method: 'GET',
+      path: '/status/503',
+    })
+    const api = createApi({
+      baseUrl: server.baseUrl,
+      requests: { fail },
+    })
+
+    const first = await api.fail()
+
+    expect(first.error?.status).toBe(503)
+    expect(server.callCounts.get('GET /status/503')).toBe(1)
+
+    const second = await first.retry()
+
+    expect(second.error?.status).toBe(503)
+    // retry() made a second real HTTP request — not a cached replay
+    expect(server.callCounts.get('GET /status/503')).toBe(2)
+  })
+})

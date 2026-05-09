@@ -76,6 +76,11 @@ export function startServer(): Promise<TestServer> {
 
         } else if (method === 'GET' && pathname === '/flaky') {
           const FLAKY_FAIL_COUNT = 2 // fail this many times, then succeed
+          // `count` is read AFTER the shared increment at the top of the handler,
+          // so it reflects the current call number (1-based):
+          //   call 1 → count=1, 1<=2 → 503
+          //   call 2 → count=2, 2<=2 → 503
+          //   call 3 → count=3, 3<=2 is false → 200 { recovered: true }
           const count = callCounts.get('GET /flaky') ?? 0
           if (count <= FLAKY_FAIL_COUNT) {
             res.writeHead(503)
