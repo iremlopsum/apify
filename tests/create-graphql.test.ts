@@ -521,3 +521,100 @@ describe('createGraphQL — dedupe', () => {
     expect(callCount).toBe(2)
   })
 })
+
+// ---------------------------------------------------------------------------
+// timeout — the GraphQL path shares `timeoutSignalFor` with createApi, so it
+// inherits every defect in it. Nothing here was covered by an executable test
+// before: a defect living in the shared helper is exactly what a file-by-file
+// comparison against the REST implementation cannot find.
+// ---------------------------------------------------------------------------
+
+/** A fetch that never resolves unless its signal aborts. */
+function hangingGqlFetch() {
+  return vi.fn((_u: string, init: RequestInit) => new Promise<Response>((_res, rej) => {
+    const s = init.signal as AbortSignal | undefined
+    if (!s) { rej(new Error('no signal reached fetch')); return }
+    if (s.aborted) { rej(s.reason); return }
+    s.addEventListener('abort', () => rej(s.reason))
+  }))
+}
+
+describe('createGraphQL — timeout', () => {
+  it('aborts the operation and reports kind "timeout"', async () => {
+    vi.stubGlobal('fetch', hangingGqlFetch())
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: {
+        slow: new Operation<Record<string, never>, unknown>({ operation: 'query { slow }', timeout: 20 }),
+      },
+    })
+
+    const { error } = await client.slow()
+
+    expect(error).not.toBeNull()
+    expect(error!.kind).toBe('timeout')
+    expect(error!.status).toBe(0)
+  })
+
+  it('lets a per-call timeout override the per-operation one', async () => {
+    vi.stubGlobal('fetch', hangingGqlFetch())
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: {
+        slow: new Operation<Record<string, never>, unknown>({ operation: 'query { slow }', timeout: 10_000 }),
+      },
+    })
+
+    const started = Date.now()
+    const { error } = await client.slow({}, { timeout: 20 })
+
+    expect(error!.kind).toBe('timeout')
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('accepts a fractional timeout instead of never sending the operation', async () => {
+    // AbortSignal.timeout() throws a RangeError on a non-integer. Before the
+    // fix that throw happened during setup, so the operation was never sent at
+    // all and the caller got kind: 'network' with a RangeError body —
+    // indistinguishable from being offline.
+    const f = hangingGqlFetch()
+    vi.stubGlobal('fetch', f)
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: {
+        slow: new Operation<Record<string, never>, unknown>({ operation: 'query { slow }', timeout: 20.5 }),
+      },
+    })
+
+    const { error } = await client.slow()
+
+    expect(f).toHaveBeenCalled()                      // the operation was actually issued
+    expect(error!.body).not.toBeInstanceOf(RangeError)
+    expect(error!.kind).toBe('timeout')
+  })
+})
+
+describe('createGraphQL — error kind', () => {
+  it('reports kind "http" for a GraphQL-errors response (HTTP 200)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers(),
+      text: () => Promise.resolve(JSON.stringify({ errors: [{ message: 'Field not found' }] })),
+    }))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { broken: new Operation<Record<string, never>, unknown>({ operation: 'query { broken }' }) },
+    })
+
+    const { error } = await client.broken()
+
+    // A GraphQL error is a server answer, not a transport failure: it must
+    // classify as 'http' so consumers branching on kind do not mistake it for
+    // a network problem worth retrying.
+    expect(error!.kind).toBe('http')
+    expect(error!.status).toBe(200)
+  })
+})
