@@ -56,7 +56,6 @@ import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, Res
  *
  * @typeParam R - A Request instance (or anything — returns `never` for non-Request types).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ExtractParams<R> = R extends Request<infer P, any> ? P : never
 
 /**
@@ -67,7 +66,6 @@ type ExtractParams<R> = R extends Request<infer P, any> ? P : never
  *
  * @typeParam R - A Request instance (or anything — returns `never` for non-Request types).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ExtractResponse<R> = R extends Request<any, infer Res> ? Res : never
 
 /**
@@ -115,7 +113,6 @@ type ApiMethod<TParams extends object, TResponse> =
  *
  * @typeParam TRequests - The record of Request instances from the config.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Api<TRequests extends Record<string, Request<any, any>>> = {
   [K in keyof TRequests]: ApiMethod<ExtractParams<TRequests[K]>, ExtractResponse<TRequests[K]>>
 }
@@ -218,7 +215,6 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
  * const { data, error, retry } = await api.getUser({ id: '42' })
  * ```
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function createApi<TRequests extends Record<string, Request<any, any>>>(
   config: ApiConfig<TRequests>
 ): Api<TRequests> {

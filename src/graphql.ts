@@ -36,26 +36,21 @@ type GraphQLMethod<TVariables extends object, TData> =
     : (variables: TVariables, options?: CallOptions) => Promise<Result<TData>>
 
 type FlatClient<TOperations> = {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   [K in keyof TOperations]: TOperations[K] extends Operation<infer V, infer D>
     ? GraphQLMethod<V, D>
     : never
 }
 
 type SplitClient<TQ, TM> =
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (TQ extends Record<string, Operation<any, any>> ? { query: FlatClient<TQ> } : {}) &
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (TM extends Record<string, Operation<any, any>> ? { mutation: FlatClient<TM> } : {})
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type WithOperations<T> = GraphQLBaseConfig & {
   operations: T
   queries?: never
   mutations?: never
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type WithSplit<TQ, TM> = GraphQLBaseConfig & {
   operations?: never
   queries?: TQ
@@ -66,17 +61,13 @@ type WithSplit<TQ, TM> = GraphQLBaseConfig & {
 // createGraphQL — overloaded factory
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function createGraphQL<T extends Record<string, Operation<any, any>>>(
   config: WithOperations<T>
 ): FlatClient<T>
 export function createGraphQL<
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   TQ extends Record<string, Operation<any, any>>,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   TM extends Record<string, Operation<any, any>>
 >(config: WithSplit<TQ, TM>): SplitClient<TQ, TM>
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function createGraphQL(config: any): any {
   const {
     endpoint,
@@ -87,7 +78,6 @@ export function createGraphQL(config: any): any {
 
   const dedupeTracker = new DedupeTracker()
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function buildMethod(name: string, operation: Operation<any, any>) {
     return (variables: object = {}, options: CallOptions = {}): Promise<Result<unknown>> => {
       const execute = (): Promise<Result<unknown>> => {
@@ -201,14 +191,12 @@ export function createGraphQL(config: any): any {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const allOperations: Record<string, Operation<any, any>> = {
     ...(config.operations ?? {}),
     ...(config.queries ?? {}),
     ...(config.mutations ?? {}),
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
   const flatMethods: Record<string, Function> = {}
   for (const [name, operation] of Object.entries(allOperations)) {
     flatMethods[name] = buildMethod(name, operation)
@@ -218,7 +206,6 @@ export function createGraphQL(config: any): any {
     return flatMethods
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
   const result: Record<string, Record<string, Function>> = {}
   if (config.queries) {
     result.query = {}
