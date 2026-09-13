@@ -2,6 +2,15 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
 
+/** A fetch that resolves after `ms`, or rejects if its signal aborts first. */
+function delayedFetch(ms: number) {
+  return vi.fn((_u: string, init: RequestInit) => new Promise<Response>((res, rej) => {
+    const s = init.signal as AbortSignal | undefined
+    const timer = setTimeout(() => res(new Response('{"ok":1}', { status: 200 })), ms)
+    s?.addEventListener('abort', () => { clearTimeout(timer); rej(s.reason) })
+  }))
+}
+
 /** A fetch that never resolves unless its signal aborts. */
 function hangingFetch() {
   return vi.fn((_u: string, init: RequestInit) => new Promise<Response>((_res, rej) => {
@@ -93,6 +102,41 @@ describe('timeout', () => {
     })
     const r = await api.s()
     expect(r.error!.kind).toBe('timeout')
+  })
+
+  // ---------------------------------------------------------------------------
+  // C1: AbortSignal.timeout() accepts only an integer in [0, 2^31 - 1] and
+  // throws a RangeError otherwise. A fractional deadline is ordinary — a
+  // `budget / 3`, a `seconds * 1000 * 1.5`, a `Number(process.env.TIMEOUT)` —
+  // and the throw happened during setup, so the fetch was never issued at all:
+  // the caller got `kind: 'network'` with a RangeError body, indistinguishable
+  // from being offline, on every single call to that endpoint.
+  // ---------------------------------------------------------------------------
+  it('accepts a fractional timeout instead of never sending the request', async () => {
+    const f = hangingFetch()
+    vi.stubGlobal('fetch', f)
+    const api = createApi({
+      baseUrl: '',
+      requests: { slow: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/slow', timeout: 20.5 }) },
+    })
+    const r = await api.slow()
+    expect(f).toHaveBeenCalled()                       // the request was actually issued
+    expect(r.error!.body).not.toBeInstanceOf(RangeError)
+    expect(r.error!.kind).toBe('timeout')              // a real deadline, not a setup failure
+  })
+
+  it('clamps a timeout past the 32-bit timer ceiling instead of firing at ~1ms', async () => {
+    // Node wraps anything over 2^31 - 1 round to a 1ms timer (with a
+    // TimeoutOverflowWarning), which turns "effectively no deadline" into
+    // "abort immediately".
+    vi.stubGlobal('fetch', delayedFetch(30))
+    const api = createApi({
+      baseUrl: '',
+      requests: { far: new Request<Record<string, never>, { ok: number }>({ method: 'GET', path: '/far', timeout: 2 ** 31 }) },
+    })
+    const r = await api.far()
+    expect(r.error).toBeNull()
+    expect(r.data).toEqual({ ok: 1 })
   })
 
   it('gives retry() a fresh budget', async () => {
