@@ -36,26 +36,21 @@ type GraphQLMethod<TVariables extends object, TData> =
     : (variables: TVariables, options?: CallOptions) => Promise<Result<TData>>
 
 type FlatClient<TOperations> = {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   [K in keyof TOperations]: TOperations[K] extends Operation<infer V, infer D>
     ? GraphQLMethod<V, D>
     : never
 }
 
 type SplitClient<TQ, TM> =
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (TQ extends Record<string, Operation<any, any>> ? { query: FlatClient<TQ> } : {}) &
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (TM extends Record<string, Operation<any, any>> ? { mutation: FlatClient<TM> } : {})
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type WithOperations<T> = GraphQLBaseConfig & {
   operations: T
   queries?: never
   mutations?: never
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type WithSplit<TQ, TM> = GraphQLBaseConfig & {
   operations?: never
   queries?: TQ
@@ -66,17 +61,13 @@ type WithSplit<TQ, TM> = GraphQLBaseConfig & {
 // createGraphQL — overloaded factory
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function createGraphQL<T extends Record<string, Operation<any, any>>>(
   config: WithOperations<T>
 ): FlatClient<T>
 export function createGraphQL<
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   TQ extends Record<string, Operation<any, any>>,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   TM extends Record<string, Operation<any, any>>
 >(config: WithSplit<TQ, TM>): SplitClient<TQ, TM>
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function createGraphQL(config: any): any {
   const {
     endpoint,
@@ -87,7 +78,6 @@ export function createGraphQL(config: any): any {
 
   const dedupeTracker = new DedupeTracker()
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function buildMethod(name: string, operation: Operation<any, any>) {
     return (variables: object = {}, options: CallOptions = {}): Promise<Result<unknown>> => {
       const execute = (): Promise<Result<unknown>> => {
@@ -98,18 +88,50 @@ export function createGraphQL(config: any): any {
             ...(options.middleware ?? []),
           ]
 
-          let effectiveSignal: AbortSignal | undefined = options.signal
-          if (operation.config.dedupe) {
-            effectiveSignal = dedupeTracker.track(name, options.signal)
-          }
+          // The caller's signal is the starting point, and it is what the
+          // context carries into the middleware chain. When dedupe is enabled
+          // the real registration happens inside core() — see below — so that
+          // a middleware which short-circuits (a cache hit) never cancels a
+          // live request that is genuinely in flight, and so that a signal
+          // installed by middleware is an input to dedupe rather than
+          // something dedupe overwrites.
+          //
+          // dedupeController doubles as the "already registered" flag: it is
+          // set on the first attempt that reaches core() and survives across
+          // retries, which keeps registration once per execute().
+          const callerSignal: AbortSignal | undefined = options.signal
+          let dedupeController: AbortController | undefined
 
           const core = async (ctx: MiddlewareContext): Promise<Result<unknown>> => {
             try {
+              // Register with the dedupe tracker on the first attempt that
+              // reaches core() — we are committed to sending a request. Any
+              // middleware that short-circuits above us returned without
+              // reaching this point, so it cannot cancel a live request.
+              //
+              // The `!dedupeController` guard makes this once per execute(),
+              // not once per attempt. retryMiddleware calls next() repeatedly;
+              // if every attempt re-registered, an older operation's retry
+              // would abort a newer call for the same operation — the exact
+              // inverse of dedupe's newest-wins contract.
+              //
+              // The signal we hand to track() is ctx.request.signal, not the
+              // caller's: a middleware may have installed its own (a timeout,
+              // a deadline), and dedupe must merge that rather than discard
+              // it. Because registration happens only once, that field still
+              // holds a live signal here — never a previous attempt's already
+              // aborted dedupe signal.
+              if (operation.config.dedupe && !dedupeController) {
+                const tracked = dedupeTracker.track(name, ctx.request.signal ?? callerSignal)
+                dedupeController = tracked.controller
+                ctx.request.signal = tracked.signal
+              }
+
               const response = await fetch(ctx.request.url, {
                 method: 'POST',
                 headers: ctx.request.headers,
                 body: ctx.request.body as string,
-                signal: effectiveSignal,
+                signal: ctx.request.signal,
               })
 
               if (!response.ok) {
@@ -174,13 +196,21 @@ export function createGraphQL(config: any): any {
               params: variables,
               headers,
               body,
+              signal: callerSignal,
             },
             requestName: name,
           }
 
           const composed = composeMiddleware(allMiddleware, core, options.skipMiddleware ?? [])
           return composed(context).then(result => {
-            if (operation.config.dedupe) dedupeTracker.clear(name)
+            // dedupeController is only assigned inside core() — if every
+            // middleware short-circuited and core() never ran, it stays
+            // undefined here. clear() with no controller deletes the map
+            // entry unconditionally, which would be wrong in that case: it
+            // could delete the entry belonging to a genuinely in-flight
+            // request registered by someone else under the same name. So
+            // only clear when this execute() actually registered.
+            if (operation.config.dedupe && dedupeController) dedupeTracker.clear(name, dedupeController)
             if (result.error && onError) onError(result.error as ApiError)
             return result
           })
@@ -201,14 +231,12 @@ export function createGraphQL(config: any): any {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const allOperations: Record<string, Operation<any, any>> = {
     ...(config.operations ?? {}),
     ...(config.queries ?? {}),
     ...(config.mutations ?? {}),
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
   const flatMethods: Record<string, Function> = {}
   for (const [name, operation] of Object.entries(allOperations)) {
     flatMethods[name] = buildMethod(name, operation)
@@ -218,7 +246,6 @@ export function createGraphQL(config: any): any {
     return flatMethods
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
   const result: Record<string, Record<string, Function>> = {}
   if (config.queries) {
     result.query = {}
