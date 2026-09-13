@@ -50,6 +50,19 @@ describe('timeout', () => {
     expect(Date.now() - started).toBeLessThan(1000)
   })
 
+  it('lets a per-call timeout of 0 disable a per-request timeout', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":1}', { status: 200 })))
+    const api = createApi({
+      baseUrl: '',
+      requests: { slow: new Request<Record<string, never>, { ok: number }>({ method: 'GET', path: '/slow', timeout: 5 }) },
+    })
+    // Per-request timeout is 5ms; a per-call 0 must disable it entirely rather
+    // than falling through to the per-request value.
+    const r = await api.slow({}, { timeout: 0 })
+    expect(r.error).toBeNull()
+    expect(r.data).toEqual({ ok: 1 })
+  })
+
   it('treats 0 and omitted as no timeout', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
     const api = createApi({
