@@ -2,7 +2,7 @@ import { ApiError, createSuccessResult, createErrorResult, createNetworkErrorRes
 import { composeMiddleware } from './middleware.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
-import { abortKind } from './utils/is-abort-error.js'
+import { abortKind } from './utils/abort-kind.js'
 import { anySignal } from './utils/any-signal.js'
 import { timeoutSignalFor } from './utils/timeout.js'
 import type { CallOptions, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
@@ -80,6 +80,25 @@ export function createGraphQL(config: any): any {
   } = config
 
   const dedupeTracker = new DedupeTracker()
+
+  /**
+   * Calls the consumer's `onError`, swallowing anything it throws.
+   *
+   * `onError` runs *after* the result is in hand, so an exception from it
+   * would reject a promise that already holds a perfectly good `Result` — the
+   * caller would see a throw for an operation that merely came back with
+   * GraphQL errors. A Sentry client in a misconfigured environment, or a
+   * logger dereferencing `error.response.status`, is all it takes. Same stance
+   * as the retry policy's user callbacks in `built-in-middleware.ts`.
+   */
+  const fireOnError = (error: ApiError): void => {
+    if (!onError) return
+    try {
+      onError(error)
+    } catch {
+      /* swallowed by contract — onError cannot fail an operation */
+    }
+  }
 
   function buildMethod(name: string, operation: Operation<any, any>) {
     return (variables: object = {}, options: CallOptions = {}): Promise<Result<unknown>> => {
@@ -222,7 +241,7 @@ export function createGraphQL(config: any): any {
             // request registered by someone else under the same name. So
             // only clear when this execute() actually registered.
             if (operation.config.dedupe && dedupeController) dedupeTracker.clear(name, dedupeController)
-            if (result.error && onError) onError(result.error as ApiError)
+            if (result.error) fireOnError(result.error as ApiError)
             return result
           })
         } catch (err) {
@@ -234,7 +253,7 @@ export function createGraphQL(config: any): any {
             headers: new Headers(),
             request: { method: 'POST', url: endpoint, params: variables },
           })
-          if (onError) onError(error)
+          fireOnError(error)
           return Promise.resolve(createNetworkErrorResult(error, execute))
         }
       }

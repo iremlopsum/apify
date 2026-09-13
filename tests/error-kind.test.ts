@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
-import { abortKind } from '../src/utils/is-abort-error.js'
+import { abortKind } from '../src/utils/abort-kind.js'
 
 const api = (extra = {}) => createApi({
   baseUrl: '',

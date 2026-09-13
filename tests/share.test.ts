@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
+import { ApiError } from '../src/result.js'
 import type { Middleware } from '../src/types.js'
 
 function controllable() {
@@ -206,5 +207,112 @@ describe('share', () => {
     f.calls[1].resolve()
     const r2 = await second
     expect(r2.error).toBeNull()
+  })
+
+  // ---------------------------------------------------------------------------
+  // C2: isSpecialBody, stableStringify and timeoutSignalFor all run in the bare
+  // body of the api method, outside execute()'s try/catch — the one region of
+  // the request path where "every call returns a Result" was not enforced by
+  // construction. A BigInt timeout is the cheapest reachable trigger (TypeScript
+  // forbids it; JavaScript callers and `as any` config loaders do not): Math.min
+  // inside timeoutSignalFor throws a TypeError on it.
+  // ---------------------------------------------------------------------------
+  it('returns a Result when the share setup itself throws', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const api = shared()
+
+    const r = await api.get({ id: '1' }, { timeout: 10n as unknown as number })
+
+    expect(r.error).toBeInstanceOf(ApiError)
+    expect(r.error!.kind).toBe('network')
+    expect(r.error!.body).toBeInstanceOf(TypeError)
+    // And nothing was left in flight: the throw happens before acquire(), so
+    // there is no shared request holding a reference this caller never releases.
+    expect(f.fn).not.toHaveBeenCalled()
+  })
+
+  // ---------------------------------------------------------------------------
+  // C3: a rejection escaping the shared operation (an async middleware that
+  // throws is the realistic case) used to be handed to the caller as if it
+  // were a Result — `const { data, error } = await api.get(...)` then yielded
+  // undefined/undefined, `if (error)` was false, and the consumer carried on as
+  // though the call had succeeded with no data. Worse than the rejection it
+  // replaced, because a rejection is at least loud.
+  // ---------------------------------------------------------------------------
+  it('hands every sharer a real Result when the shared operation rejects', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const exploding: Middleware = async () => {
+      await Promise.resolve()
+      throw new Error('middleware exploded')
+    }
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        get: new Request<{ id: string }, { ok: number }>({
+          method: 'GET', path: '/x/:id', share: true, middleware: [exploding],
+        }),
+      },
+    })
+
+    const ac = new AbortController()
+    const [plain, watched] = await Promise.all([
+      api.get({ id: '1' }),                          // no per-caller signal: the direct path
+      api.get({ id: '1' }, { signal: ac.signal }),   // with one: the race path
+    ])
+
+    for (const r of [plain, watched]) {
+      expect(r.data).toBeNull()
+      expect(r.error).toBeInstanceOf(ApiError)
+      expect(r.error!.kind).toBe('network')
+      expect((r.error!.body as Error).message).toBe('middleware exploded')
+    }
+  })
+
+  // ---------------------------------------------------------------------------
+  // I3: a sharer that gives up builds its Result directly, bypassing the
+  // post-execution hook inside execute() where onError normally fires. A
+  // shared timeout therefore reached no error tracker at all, and behaved
+  // differently from the identical non-shared call — which defeats the whole
+  // point of splitting 'timeout' from 'abort' (a timeout is a genuine failure
+  // that belongs in an error tracker; a cancellation usually is not).
+  // ---------------------------------------------------------------------------
+  it("reports a sharer's own timeout to onError, as the non-shared call does", async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const kinds: (string | undefined)[] = []
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: { get: new Request<{ id: string }, { ok: number }>({ method: 'GET', path: '/x/:id', share: true }) },
+    })
+
+    const impatient = api.get({ id: '1' }, { timeout: 20 })
+    const patient = api.get({ id: '1' })
+    await Promise.resolve()
+
+    expect((await impatient).error?.kind).toBe('timeout')
+    expect(kinds).toEqual(['timeout'])
+
+    f.calls[0].resolve()
+    expect((await patient).error).toBeNull()
+    expect(kinds).toEqual(['timeout'])   // the sharer that succeeded reports nothing
+  })
+
+  it("reports a sharer's own abort to onError", async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const kinds: (string | undefined)[] = []
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: { get: new Request<{ id: string }, { ok: number }>({ method: 'GET', path: '/x/:id', share: true }) },
+    })
+
+    const ac = new AbortController()
+    const cancelled = api.get({ id: '1' }, { signal: ac.signal })
+    api.get({ id: '1' })
+    await Promise.resolve()
+    ac.abort()
+
+    expect((await cancelled).error?.kind).toBe('abort')
+    expect(kinds).toEqual(['abort'])
   })
 })
