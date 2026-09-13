@@ -132,11 +132,23 @@ describe('unresolved path params', () => {
   it('does not mistake a bare colon in a path for a param token', () => {
     expect(() => buildUrl('/api', '/time/12:30', {})).not.toThrow()
   })
+
+  it('detects a token whose name starts with a digit', () => {
+    expect(() => buildUrl('/api', '/promo/:2fa', {}, true)).toThrow(/:2fa/)
+  })
+
+  it('detects a token whose name is only digits', () => {
+    expect(() => buildUrl('/api', '/v/:2', {}, true)).toThrow(/:2/)
+  })
 })
 
 describe('baseUrl and path joining', () => {
   it('collapses a double slash when baseUrl has a trailing slash', () => {
     expect(buildUrl('https://x.com/', '/health', {}).url).toBe('https://x.com/health')
+  })
+
+  it('collapses multiple trailing slashes on baseUrl', () => {
+    expect(buildUrl('https://x.com//', '/health', {}).url).toBe('https://x.com/health')
   })
 
   it('inserts a slash when neither side has one', () => {
