@@ -67,4 +67,41 @@ describe('mockFetch', () => {
     mock.restore()
     expect(globalThis.fetch).toBe(original)
   })
+
+  it("hands the handler the caller's real relative URL, not the dummy origin used to parse it", async () => {
+    let seenUrl = ''
+    const mock = mockFetch({
+      'GET /api/users/:id': ({ params, request }) => {
+        seenUrl = request.url
+        return jsonResponse({ id: params.id, name: 'Ada' })
+      },
+    })
+    vi.stubGlobal('fetch', mock.fetch)
+    await api().getUser({ id: '42' })
+    expect(seenUrl).toBe(mock.calls[0].url)
+    expect(seenUrl).toBe('/api/users/42')
+  })
+
+  it('is idempotent: a second install() does not lose the real fetch', () => {
+    const original = globalThis.fetch
+    const mock = mockFetch({})
+    mock.install()
+    mock.install()
+    mock.restore()
+    expect(globalThis.fetch).toBe(original)
+  })
+
+  it('restore() with no prior install() leaves globalThis.fetch untouched', () => {
+    const original = globalThis.fetch
+    const mock = mockFetch({})
+    mock.restore()
+    expect(globalThis.fetch).toBe(original)
+  })
+
+  it('throws a descriptive error for an empty response array rather than a bare TypeError', async () => {
+    const mock = mockFetch({ 'GET /api/flaky': [] })
+    vi.stubGlobal('fetch', mock.fetch)
+    const r = await api().flaky()
+    expect(String(r.error?.body)).toMatch(/empty response array/)
+  })
 })
