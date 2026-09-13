@@ -339,10 +339,13 @@ export interface MiddlewareContext {
      * call superseding this one.
      *
      * While middleware runs — before `next()` reaches the core fetch — this
-     * holds whatever the caller passed as `CallOptions.signal`, so it is
-     * `undefined` when the caller passed none. That is true whether or not
-     * dedupe is enabled: the dedupe signal is installed here by the core
-     * fetch, so middleware only observes it after `next()` returns.
+     * holds the caller's `CallOptions.signal` merged with the timeout signal
+     * (via `anySignal`) when a `timeout` is configured on the request,
+     * operation, or call. It is `undefined` only when neither is present —
+     * no `CallOptions.signal` and no effective `timeout`. This is true
+     * whether or not dedupe is enabled: the dedupe signal is installed here
+     * by the core fetch, so middleware only observes it after `next()`
+     * returns.
      *
      * @example
      * ```ts
