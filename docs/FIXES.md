@@ -28,6 +28,7 @@ Companion document: [FEATURES.md](./FEATURES.md)
 | 11 | GraphQL discards partial data when `errors` is present | Medium | Yes (behavioural) |
 | 12 | Tooling hygiene: dead eslint-disables, no CI, incomplete `prepublishOnly` | Low | No |
 | 13 | Path param keys are interpolated into a regex unescaped | Medium | No |
+| 14 | `cacheMiddleware` collapses special-body params (`FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`) to the same cache key | High | No |
 | —  | [Package size: roughly halved, 241 kB → 113 kB](#package-size) | — | No |
 
 Items 1, 5, 10 and 11 are behavioural/type breaking changes. **Batch them into a
@@ -516,6 +517,67 @@ on a metacharacter key matching loosely, so it wants a test for the dotted case
 specifically.
 
 **Status:** not fixed — pre-existing, out of scope for 2.1.0.
+
+---
+
+## 14. `cacheMiddleware` collapses special-body params to the same cache key
+
+**Severity:** High · **Files:** `src/built-in-middleware.ts:434-469` (key built at
+`:446-447`), `src/utils/cache.ts:24-40` (`stableStringify`)
+
+`cacheMiddleware`'s cache key is built as:
+
+```ts
+const paramsStr = stableStringify(ctx.request.params)
+const key = `${ctx.requestName}|${paramsStr}`
+```
+
+`stableStringify` has no special case for `FormData`, `Blob`, `ArrayBuffer`, or
+`URLSearchParams`. It falls through to the generic object branch, which builds
+its output from `Object.keys(obj).sort()`. `Object.keys()` returns `[]` for all
+four of those types regardless of what they actually contain, so
+`stableStringify` collapses every one of them to the literal string `"{}"`.
+
+### Evidence
+
+```ts
+import { stableStringify } from '../src/utils/cache.js'
+
+const a = new FormData(); a.append('file', 'SECRET-A')
+const b = new FormData(); b.append('file', 'SECRET-B')
+
+console.log(stableStringify(a))  // '{}'
+console.log(stableStringify(b))  // '{}'  -- identical, despite different content
+```
+
+Two different `FormData` POSTs to the same endpoint, cached through one shared
+`cacheMiddleware()` instance, produce the identical cache key
+(`"uploadFile|{}"`). Whichever request completes first populates the cache
+entry; the second is served *that* cached response instead of hitting the
+network — a caller uploading payload B gets back the cached result for
+payload A's upload.
+
+### Why it matters
+
+This is the exact same collapse that `share` (this release) was given an
+explicit guard against: `isSpecialBody` in `src/create-api.ts` excludes
+`FormData`/`Blob`/`ArrayBuffer`/`URLSearchParams`/`string` params from
+coalescing for precisely this reason — `stableStringify`'s fallback to
+`Object.keys()` can't tell two different payloads of these types apart. The
+cache has no equivalent guard. Any endpoint whose params are one of these
+types, wrapped in `cacheMiddleware()`, will silently serve a stale — or simply
+*wrong* — cached response across genuinely different payloads.
+
+### Fix (not applied — see Status)
+
+Mirror the guard added for `share` this release: either have
+`cacheMiddleware` refuse to cache a call whose params are a special body type
+(declining to cache is always safe, the same stance `share` takes), or give
+`stableStringify` a real, content-based representation for these types instead
+of falling through to `Object.keys()`.
+
+**Status:** not fixed — pre-existing (shipped two releases ago), out of scope
+for 2.2.0.
 
 ---
 

@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-09-13
+
+Four new capabilities — a whole-operation `timeout`, a real retry backoff
+policy, request coalescing via `share`, and a framework-agnostic testing entry
+point — plus an `ApiError.kind` discriminator. Additive for typical consumers,
+with two behavioural changes existing callers will notice, called out under
+Changed.
+
+### Added
+
+- **`timeout`** on `RequestConfig`, `CallOptions`, and `OperationConfig` — a
+  whole-operation deadline, not a per-attempt budget. One signal covers the
+  entire middleware chain, including every retry and its backoff delay, so
+  `timeout: 5000` combined with `retryMiddleware(3)` still means "an answer
+  within 5 seconds" for the call as a whole. This deliberately differs from
+  axios, XHR and `got`, which apply a timeout per attempt; the README shows the
+  per-attempt recipe (a signal-replacing middleware placed inside the retry
+  middleware) for readers who want that instead. `result.retry()` always
+  starts a fresh budget. A timeout produces `status: 0`, `kind: 'timeout'`.
+  Non-positive or omitted disables it.
+- **A real retry backoff policy.** `retryMiddleware` now accepts
+  `number | RetryOptions`: `max`, `delay` (`'exponential' | 'linear'` or a
+  custom function), `baseDelay`, `maxDelay`, `jitter` (full jitter, default
+  on), `respectRetryAfter` (honours a `Retry-After` response header, default
+  on), `retryOn` (default: retry 5xx only — 429 and network errors are
+  opt-in), and an observational `onRetry` hook. `retryMiddleware(3)` keeps
+  working exactly as before, as shorthand for `{ max: 3 }`.
+- **`share: true`** on `RequestConfig` — coalesces identical concurrent calls
+  onto a single in-flight request. Sibling of `dedupe`, with the opposite
+  intent: dedupe cancels the older call, share joins the existing one. Setting
+  both on the same `Request` throws at `createApi(...)` time. A per-call
+  `signal` or `timeout` bounds only that caller, via a refcount, and never the
+  shared request itself; a per-call `headers` or `middleware`, or params that
+  are a special body type (`FormData`, `Blob`, `ArrayBuffer`,
+  `URLSearchParams`, a raw `string`), always get their own unshared request.
+- **`@iremlopsum/apify/testing`** — a new, framework-agnostic entry point with
+  no test-runner dependency: `mockFetch` (a route-matching `fetch` stub keyed
+  by `"METHOD /path"`, with `:token` capture, call recording, and response
+  sequencing), `jsonResponse`, `successResult`, and `errorResult`.
+- **`ApiError.kind`** — an optional discriminator:
+  `'http' | 'network' | 'abort' | 'timeout' | 'parse'`. Branch on this instead
+  of `status` to tell a timeout, a cancellation, and a genuine network failure
+  apart — all three carry `status: 0`. `'parse'` is reserved for a future
+  release and is not produced by this one.
+
+### Changed
+
+- **Retries now back off instead of firing instantly.** Before this release,
+  `retryMiddleware(3)` made all four attempts in the same tick, with no delay
+  between them. It now waits out a real backoff (exponential by default, with
+  full jitter) between attempts, honouring a `Retry-After` response header
+  when the server sends one. Tests or timing assumptions that depended on the
+  old zero-delay retries will need `baseDelay: 0` (and `jitter: false`, and
+  possibly fake timers) to stay fast and deterministic.
+- **Abort reasons now propagate through `dedupe`.** This is worth reading even
+  if you never touch the new `kind` field: `error.body` — the native
+  `Error`/`DOMException` the library has always put there for a network
+  error or abort — and its `.name` are a **pre-2.2.0 surface** that existing
+  consumers can already be reading. Previously, a `dedupe: true` request's
+  merged signal always aborted with a generic, reason-less `AbortError`,
+  discarding whatever reason the external signal actually carried (a
+  `TimeoutError` from a timeout-setting middleware, or a custom reason passed
+  to your own `AbortController.abort(reason)`). The merged signal now
+  preserves that original reason, so code reading `error.body.name` under
+  `dedupe: true` combined with a signal-setting middleware can see a different
+  value after upgrading — independent of whether it adopts `kind` at all.
+
 ## [2.1.0] — 2026-09-13
 
 Six audit fixes plus a package-size reduction. Non-breaking for consumers, with
@@ -146,6 +213,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[2.2.0]: https://github.com/iremlopsum/apify/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/iremlopsum/apify/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/iremlopsum/apify/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/iremlopsum/apify/releases/tag/v1.0.0
