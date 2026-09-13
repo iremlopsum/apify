@@ -89,11 +89,15 @@ function parseRetryAfter(value: string | null): number | null {
  * **Abortable sleep:**
  *
  * The backoff sleep watches `ctx.request.signal`, so a whole-operation
- * `timeout` cannot be outlived by a long delay. If the signal fires mid-sleep,
- * the loop stops immediately and returns the last real result observed (e.g.
- * the 503 that triggered the retry) rather than fabricating a timeout error —
- * that is the most informative thing actually observed, and it explains why
- * retries were happening.
+ * `timeout` cannot be outlived by a long delay: the sleep resolves (rather
+ * than rejects) as soon as the signal aborts, and the loop proceeds straight
+ * to `next()`. With an already-aborted signal, the core fetch rejects
+ * immediately (no network call), and its existing abort classification does
+ * the rest — the result comes back with `kind: 'timeout'` for a deadline,
+ * `kind: 'abort'` for a cancellation or a dedupe supersede — instead of this
+ * middleware reporting a stale HTTP result for a request that was actually
+ * cancelled or timed out. The loop then exits on its own, since an abort is
+ * status 0 and the default `retryOn` only matches `status >= 500`.
  *
  * **What it does NOT retry by default:**
  *
@@ -197,13 +201,19 @@ export function retryMiddleware(options: number | RetryOptions = 3): Middleware 
       }
 
       // The sleep watches the current signal, so a whole-operation deadline
-      // cannot be outlived by a long backoff. If the deadline already fired
-      // (or fires during the sleep), stop and hand back the last real
-      // result — typically the error that triggered this retry — rather
-      // than fabricate a timeout. That's the most informative thing
-      // actually observed, and it explains why retries were happening.
+      // cannot be outlived by a long backoff.
+      //
+      // The sleep resolves rather than rejects when the signal aborts, so the
+      // loop simply continues. Calling next() with an already-aborted signal
+      // makes the core fetch reject immediately — no network call — and the
+      // core's catch turns the abort reason into the right kind ('abort' for
+      // a cancellation or a dedupe supersede, 'timeout' for a deadline). The
+      // loop then exits on its own, because an abort is status 0 and the
+      // default retryOn only matches status >= 500.
+      //
+      // Returning the last real result here instead would report a stale 503
+      // as the outcome of a request that was actually cancelled or timed out.
       await sleep(delay, ctx.request.signal)
-      if (ctx.request.signal?.aborted) return result
 
       // Call next() again to re-execute the downstream chain. This creates
       // a completely fresh request through all middleware below this one.

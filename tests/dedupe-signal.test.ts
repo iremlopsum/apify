@@ -124,14 +124,16 @@ describe('dedupe + ctx.request.signal', () => {
     // ...and A loses: it was superseded, so its retry is cancelled too.
     //
     // A's tracked signal was already aborted (by B's registration) before
-    // retryMiddleware's backoff sleep for the retry elapsed. Per Task 6's
-    // design, the sleep resolves rather than rejects on abort, and the loop
-    // re-checks the signal and stops *before* attempting the now-doomed
-    // fetch — returning the last real result (A's first 503) rather than a
-    // synthetic network error. So A surfaces the 503 it actually observed,
-    // not a cancelled-request status 0.
+    // retryMiddleware's backoff sleep for the retry elapsed. The sleep
+    // resolves rather than rejects on abort, and the loop calls next() anyway
+    // — the core fetch then rejects immediately on the already-aborted
+    // signal, with no network call, and its abort classification reports
+    // this as a genuine cancellation. So A surfaces the fact that it was
+    // cancelled (status 0, kind 'abort'), not the stale 503 it was retrying,
+    // and not a fabricated success either.
     expect(rA.error).not.toBeNull()
-    expect(rA.error?.status).toBe(503)
+    expect(rA.error?.status).toBe(0)
+    expect(rA.error?.kind).toBe('abort')
   })
 
   // ---------------------------------------------------------------------------
