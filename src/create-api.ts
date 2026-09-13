@@ -281,21 +281,13 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // -----------------------------------------------------------------
           // Step 2: Compute the effective abort signal
           // -----------------------------------------------------------------
-          // When dedupe is enabled for this request, we route the signal
-          // through the DedupeTracker. This does two things:
-          // 1. Aborts any previous in-flight request for this endpoint
-          // 2. Merges the caller's signal (if any) so external abort also works
-          //
-          // When dedupe is disabled, the caller's signal (if any) is used
-          // directly — no tracking overhead.
+          // The caller's signal is the starting point. When dedupe is enabled
+          // the real registration happens inside core() — see below — so that
+          // a middleware which short-circuits (a cache hit) never cancels a
+          // live request that is genuinely in flight.
           // -----------------------------------------------------------------
-          let effectiveSignal: AbortSignal | undefined = options.signal
+          const callerSignal: AbortSignal | undefined = options.signal
           let dedupeController: AbortController | undefined
-          if (request.config.dedupe) {
-            const tracked = dedupeTracker.track(name, options.signal)
-            effectiveSignal = tracked.signal
-            dedupeController = tracked.controller
-          }
 
           // -----------------------------------------------------------------
           // Step 3: Define the core fetch function
@@ -316,12 +308,27 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // -----------------------------------------------------------------
           const core = async (ctx: MiddlewareContext): Promise<Result<unknown>> => {
             try {
+              // Register with the dedupe tracker only now — we are committed
+              // to sending a request. Any middleware that short-circuits above
+              // us returned without reaching this point, so it cannot cancel
+              // a live request.
+              //
+              // retryMiddleware calls next() repeatedly, so this may run more
+              // than once per execute(). Each run supersedes the previous
+              // controller, whose request has already settled — the abort is a
+              // no-op. That is the intended behaviour.
+              if (request.config.dedupe) {
+                const tracked = dedupeTracker.track(name, callerSignal)
+                dedupeController = tracked.controller
+                ctx.request.signal = tracked.signal
+              }
+
               // Build the RequestInit object for the native fetch call.
               // We pull method, headers, and signal from the context (middleware
-              // may have modified any of them) rather than closing over the
-              // effectiveSignal computed above — that's what lets a middleware
-              // replace the signal (e.g. to implement a timeout) and have it
-              // actually take effect.
+              // may have modified any of them) rather than closing over a signal
+              // computed during setup — that's what lets a middleware replace
+              // the signal (e.g. to implement a timeout) and have it actually
+              // take effect.
               const fetchInit: RequestInit = {
                 method: ctx.request.method,
                 headers: ctx.request.headers,
@@ -490,7 +497,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               params,
               headers,
               body,
-              signal: effectiveSignal
+              signal: callerSignal
             },
             requestName: name
           }
@@ -518,7 +525,15 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // Clean up dedupe tracking after the request completes.
             // This must happen before onError so that onError handlers can
             // immediately fire a new request without triggering a dedupe abort.
-            if (request.config.dedupe) dedupeTracker.clear(name, dedupeController)
+            //
+            // dedupeController is only assigned inside core() — if every
+            // middleware short-circuited and core() never ran (e.g. a cache
+            // hit), it stays undefined here. clear() with no controller
+            // deletes the map entry unconditionally, which would be wrong in
+            // that case: it could delete the entry belonging to a genuinely
+            // in-flight request registered by someone else under the same
+            // name. So only clear when this execute() actually registered.
+            if (request.config.dedupe && dedupeController) dedupeTracker.clear(name, dedupeController)
 
             // Fire the global error handler if the final result has an error.
             // This is the "last chance" error hook — middleware has already had

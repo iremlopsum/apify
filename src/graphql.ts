@@ -88,16 +88,30 @@ export function createGraphQL(config: any): any {
             ...(options.middleware ?? []),
           ]
 
-          let effectiveSignal: AbortSignal | undefined = options.signal
+          // The caller's signal is the starting point. When dedupe is enabled
+          // the real registration happens inside core() — see below — so that
+          // a middleware which short-circuits (a cache hit) never cancels a
+          // live request that is genuinely in flight.
+          const callerSignal: AbortSignal | undefined = options.signal
           let dedupeController: AbortController | undefined
-          if (operation.config.dedupe) {
-            const tracked = dedupeTracker.track(name, options.signal)
-            effectiveSignal = tracked.signal
-            dedupeController = tracked.controller
-          }
 
           const core = async (ctx: MiddlewareContext): Promise<Result<unknown>> => {
             try {
+              // Register with the dedupe tracker only now — we are committed
+              // to sending a request. Any middleware that short-circuits above
+              // us returned without reaching this point, so it cannot cancel
+              // a live request.
+              //
+              // retryMiddleware calls next() repeatedly, so this may run more
+              // than once per execute(). Each run supersedes the previous
+              // controller, whose request has already settled — the abort is a
+              // no-op. That is the intended behaviour.
+              if (operation.config.dedupe) {
+                const tracked = dedupeTracker.track(name, callerSignal)
+                dedupeController = tracked.controller
+                ctx.request.signal = tracked.signal
+              }
+
               const response = await fetch(ctx.request.url, {
                 method: 'POST',
                 headers: ctx.request.headers,
@@ -167,14 +181,21 @@ export function createGraphQL(config: any): any {
               params: variables,
               headers,
               body,
-              signal: effectiveSignal,
+              signal: callerSignal,
             },
             requestName: name,
           }
 
           const composed = composeMiddleware(allMiddleware, core, options.skipMiddleware ?? [])
           return composed(context).then(result => {
-            if (operation.config.dedupe) dedupeTracker.clear(name, dedupeController)
+            // dedupeController is only assigned inside core() — if every
+            // middleware short-circuited and core() never ran, it stays
+            // undefined here. clear() with no controller deletes the map
+            // entry unconditionally, which would be wrong in that case: it
+            // could delete the entry belonging to a genuinely in-flight
+            // request registered by someone else under the same name. So
+            // only clear when this execute() actually registered.
+            if (operation.config.dedupe && dedupeController) dedupeTracker.clear(name, dedupeController)
             if (result.error && onError) onError(result.error as ApiError)
             return result
           })
