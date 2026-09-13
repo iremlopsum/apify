@@ -7,7 +7,7 @@ Runtime-agnostic, type-safe HTTP client for REST and GraphQL. Built on standard 
 - **Composable middleware** — retry, cache, dedupe, auth, logging — applied at global, per-endpoint, or per-call level
 - **Types by inference** — declare params and response once on the endpoint definition; types flow to every call site automatically
 - **Runtime-agnostic** — Node.js 20+, browsers, Bun, Deno, Cloudflare Workers, React Native — any environment with `fetch`
-- **Tiny** — about **2 kB gzipped** for a REST-only import, 3.2 kB for everything including GraphQL and all middleware; tree-shaking drops what you do not import
+- **Tiny** — about **2.9 kB gzipped** for a REST-only import, 4.4 kB for everything including GraphQL and all middleware; tree-shaking drops what you do not import
 
 ```
 npm install @iremlopsum/apify
@@ -26,11 +26,14 @@ npm install @iremlopsum/apify
   - [Content types](#content-types)
   - [Response parsing](#response-parsing)
   - [Cancellation](#cancellation)
+  - [Timeout](#timeout)
+  - [Sharing](#sharing)
   - [TypeScript](#typescript)
 - [GraphQL Client](#graphql-client)
   - [Queries and mutations](#queries-and-mutations)
   - [GraphQL errors](#graphql-errors)
   - [Middleware](#middleware-1)
+- [Testing](#testing)
 - [Philosophy](#philosophy)
 - [API Reference](#api-reference)
 
@@ -154,6 +157,24 @@ await api.searchUsers({ q: 'hel' })
 await api.searchUsers({ q: 'hello' }) // previous call is auto-cancelled
 ```
 
+#### `share`
+
+When `true`, identical concurrent calls to this endpoint join a single in-flight request instead of firing their own. See [Sharing](#sharing) for the full contract — including its mutual exclusion with `dedupe` and what disables it.
+
+```ts
+const getProduct = new Request<{ id: string }, Product>({
+  method: 'GET',
+  path: '/products/:id',
+  share: true
+})
+
+// Both calls join the same network request
+await Promise.all([
+  api.getProduct({ id: '42' }),
+  api.getProduct({ id: '42' })
+])
+```
+
 #### `bodyAs`
 
 Overrides the default body serialization strategy. By default, GET/DELETE serialize params as query strings and POST/PUT/PATCH serialize params as a JSON body. Use `bodyAs` to invert that:
@@ -205,24 +226,37 @@ interface Result<TResponse> {
 }
 ```
 
-Check `error` first, then use `data` with confidence:
+Check `error` first, then use `data` with confidence. Branch on `error.kind` rather than `error.status` — `'network'`, `'abort'` and `'timeout'` all carry `status: 0`, but they call for different handling:
 
 ```ts
 const { data, error, response, retry } = await api.getUser({ id: '42' })
 
 if (error) {
-  if (error.status === 0) {
-    // Network error -- user is probably offline
-  } else if (error.status === 401) {
-    redirectToLogin()
-  } else {
-    console.error(error.status, error.body)
+  switch (error.kind) {
+    case 'network':
+      // fetch itself failed -- user is probably offline
+      break
+    case 'timeout':
+      // the whole-operation deadline fired; report it
+      reportTimeout(error)
+      break
+    case 'abort':
+      // this call was cancelled (dedupe supersede, or your own signal) -- usually ignore it
+      break
+    case 'http':
+      if (error.status === 401) redirectToLogin()
+      else console.error(error.status, error.body)
+      break
   }
   return
 }
 
-// data is typed as User, error is null
-console.log(data.name)
+// data is typed as User | null; the library doesn't (yet) narrow it via `error`
+// -- see the "Result isn't a discriminated union" note in the project's own
+// audit trail, tracked for a future major version -- so an explicit check
+// (or a non-null assertion, since a success result's `data` is never null)
+// is still required here even after handling `error` above.
+console.log(data!.name)
 ```
 
 #### `retry()`
@@ -246,10 +280,15 @@ The error object on failed calls. It is not a subclass of `Error` -- it is a str
 | Property     | Type      | Description                                                       |
 | ------------ | --------- | ----------------------------------------------------------------- |
 | `status`     | `number`  | HTTP status code (e.g., 404, 500). `0` for network errors/aborts. |
+| `kind`       | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse'` (optional) | What category of failure this is. See below. |
 | `statusText` | `string`  | HTTP status text (e.g., 'Not Found'). `''` for network errors.    |
 | `body`       | `unknown` | Parsed response body, or the native Error for network failures.   |
 | `headers`    | `Headers` | Response headers. Empty `Headers` for network errors.             |
 | `request`    | `object`  | `{ method, url, params }` -- metadata about the failed request.   |
+
+`kind` exists because `status` alone cannot tell some outcomes apart: an HTTP error (`'http'`), a `fetch` failure with no response (`'network'`), a cancellation — your own signal, or a dedupe supersede — (`'abort'`), and a whole-operation deadline firing (`'timeout'`) all need different handling, but `'network'`, `'abort'`, and `'timeout'` all carry `status: 0`. Every error the library itself produces sets `kind`; it is `undefined` only if you construct an `ApiError` by hand without one.
+
+`'parse'` is reserved for a response that arrived but whose body failed to parse according to `responseType`. It is declared on the type for forward compatibility but is **not produced by the current release** — a parse failure today still surfaces as `kind: 'network'`.
 
 You can use `instanceof` to check if a value is an `ApiError`:
 
@@ -431,11 +470,11 @@ The library ships three optional middleware functions, importable from a separat
 import { retryMiddleware, logMiddleware, cacheMiddleware } from '@iremlopsum/apify/middleware'
 ```
 
-**`retryMiddleware(maxRetries?: number)`**
+**`retryMiddleware(options?: number | RetryOptions)`**
 
-Automatically retries requests that return a 5xx server error. The `maxRetries` parameter (default: 3) is the number of additional attempts after the initial one, so `retryMiddleware(2)` means up to 3 total attempts.
+Automatically retries requests that fail, with a real backoff policy — exponential (or linear, or custom) delay curves, full jitter, `Retry-After` support, a configurable retry predicate, and an observational `onRetry` hook.
 
-Only retries server errors (status >= 500). Client errors (4xx) and network errors (status 0) are not retried.
+The numeric shorthand still works exactly as before — `retryMiddleware(2)` retries up to 2 additional times (3 total attempts) on a 5xx response:
 
 ```ts
 const api = createApi({
@@ -443,6 +482,75 @@ const api = createApi({
   requests: { getItems },
   middleware: [retryMiddleware(2)]
 })
+```
+
+By default, only server errors (`status >= 500`) are retried. Client errors (4xx), 429, and network errors (`status: 0`) are not — see the opt-in recipes below.
+
+**Retry policy**
+
+Pass a `RetryOptions` object instead of a number for full control:
+
+```ts
+const api = createApi({
+  baseUrl: '/api',
+  requests: { getItems },
+  middleware: [retryMiddleware({
+    max: 5,
+    delay: 'exponential',
+    baseDelay: 250,
+    maxDelay: 10_000,
+    jitter: true,
+    respectRetryAfter: true,
+    onRetry: ({ attempt, max, delay }) => console.log(`retry ${attempt}/${max} in ${delay}ms`),
+  })],
+})
+```
+
+| Option              | Type                                              | Default          | Description |
+| -------------------- | -------------------------------------------------- | ----------------- | ----------- |
+| `max`                | `number`                                            | `3`               | Additional attempts after the first. `retryMiddleware({ max: 2 })` means up to 3 total calls. |
+| `delay`              | `'exponential' \| 'linear' \| (attempt: number) => number` | `'exponential'`   | The delay curve. Exponential is `baseDelay * 2^(attempt-1)`; linear is `baseDelay * attempt`; a function receives the 1-based attempt number and returns milliseconds. |
+| `baseDelay`          | `number`                                            | `250`             | The first delay, in milliseconds, before jitter and `Retry-After` are applied. |
+| `maxDelay`           | `number`                                            | `30000`           | Hard cap applied to every computed delay, including a `Retry-After` value. |
+| `jitter`             | `boolean`                                           | `true`            | Full jitter: the actual delay is `Math.random() * computed`, per AWS's recommendation for de-synchronizing a thundering herd. Never applied to a `Retry-After` value — a server telling you exactly when to come back should not be randomized. |
+| `respectRetryAfter`  | `boolean`                                           | `true`            | Honor a `Retry-After` response header (delta-seconds or an HTTP-date) when present, replacing the computed delay outright (still capped by `maxDelay`). |
+| `retryOn`            | `(result: Result<unknown>, attempt: number) => boolean` | `r => (r.error?.status ?? 0) >= 500` | Whether to retry. Called with the 1-based *candidate* attempt number, even once `max` is reached, so a predicate that counts attempts sees one call per result. |
+| `onRetry`            | `(info: RetryInfo) => void`                         | —                 | Observational hook fired before each retry's delay elapses. Its return value is ignored, and a throw cannot fail the request — this is the only way to observe an in-progress retry sequence, since the call site sees nothing until the final result. |
+
+`RetryInfo` (the argument to `onRetry`): `{ attempt, max, delay, result }` — `attempt` is 1-based (the first retry is `1`), `delay` is the actual delay about to elapse (after jitter and `Retry-After`), and `result` is the `Result` that triggered this retry.
+
+**429 and network-error opt-in.** Both are deliberately excluded from the default `retryOn` — retrying a rate limit or a network failure by default would change behavior under existing callers on upgrade. Opt in explicitly:
+
+```ts
+// Retry 429 in addition to 5xx
+retryMiddleware({
+  retryOn: r => r.error?.status === 429 || (r.error?.status ?? 0) >= 500
+})
+
+// Retry network errors (status 0) too — but not aborts, which are also status 0
+retryMiddleware({
+  retryOn: r => (r.error?.status ?? 0) >= 500 || r.error?.kind === 'network'
+})
+```
+
+**An abort during backoff surfaces as the abort, not the stale result it was retrying.** If the signal driving the request — a whole-operation `timeout`, a caller's own `AbortSignal`, or a dedupe supersede — fires while `retryMiddleware` is sleeping between attempts, the backoff sleep resolves immediately and the loop proceeds straight to the next attempt, which the core fetch rejects instantly (no network call) because the signal is already aborted. The caller receives **that abort** — `kind: 'timeout'` for a deadline, `kind: 'abort'` for a cancellation or a dedupe supersede — never the last real HTTP result (e.g. a stale `503`) that triggered the retry in the first place:
+
+```ts
+const api = createApi({
+  baseUrl: '/api',
+  requests: {
+    getItems: new Request<Record<string, never>, Item[]>({
+      method: 'GET',
+      path: '/items',
+      timeout: 2000, // whole-operation deadline
+    })
+  },
+  middleware: [retryMiddleware({ max: 5, baseDelay: 1000 })], // long backoff
+})
+
+const { error } = await api.getItems()
+// If the 2s deadline fires while retryMiddleware is asleep between attempts:
+// error.status === 0, error.kind === 'timeout' -- not the 503 being retried
 ```
 
 **`logMiddleware`**
@@ -568,6 +676,89 @@ api.searchUsers({ q: 'hel' })  // this one completes
 ```
 
 Dedupe and manual abort signals work together. If both are active, the request is cancelled if either fires.
+
+### Timeout
+
+Set `timeout` (milliseconds) on a `Request` or per-call to abort a request that takes too long:
+
+```ts
+const getUser = new Request<{ id: string }, User>({
+  method: 'GET',
+  path: '/users/:id',
+  timeout: 5000
+})
+
+const { error } = await api.getUser({ id: '42' })
+// error.status === 0, error.kind === 'timeout' if it fired
+```
+
+**`timeout` is a whole-operation deadline, not a per-attempt budget.** It covers the entire middleware chain, including every retry and every backoff delay. `timeout: 5000` combined with `retryMiddleware(3)` still means "an answer within 5 seconds" for the call as a whole — not five seconds for each individual attempt. This is a deliberate choice, and it **differs from axios, XHR, and `got`**, all of which apply a timeout per attempt and therefore let a retrying request run for a multiple of the configured timeout. Know which behavior you're assuming before you tune the number.
+
+If you want a per-attempt budget instead — the axios-style behavior — write a small signal-replacing middleware and place it *inside* the retry middleware, so a fresh signal is installed on every attempt:
+
+```ts
+const perAttempt = (ms: number): Middleware => async (ctx, next) => {
+  ctx.request.signal = AbortSignal.timeout(ms)
+  return next()
+}
+
+const api = createApi({
+  baseUrl: '/api',
+  requests: { getUser },
+  middleware: [retryMiddleware(3), perAttempt(5000)]
+})
+```
+
+Because middleware order is outermost-to-innermost, `retryMiddleware(3)` re-invokes everything below it — including `perAttempt(5000)` — on every retry, so each attempt gets its own fresh 5-second budget instead of sharing one.
+
+A few more details:
+
+- `CallOptions.timeout` overrides `RequestConfig.timeout` for a single call; a per-call `timeout: 0` disables a per-request timeout rather than falling back to it.
+- A timeout produces an error with `status: 0` and `kind: 'timeout'` — distinguishable from a caller-initiated cancellation (`kind: 'abort'`) and from a genuine network failure (`kind: 'network'`).
+- `result.retry()` always starts a fresh deadline. A retried call is not charged against the original budget.
+- Non-positive or omitted `timeout` disables it entirely (the default).
+- `timeout` composes with `dedupe: true` and `share: true` — it is merged with the dedupe/share signal rather than discarded by either.
+
+### Sharing
+
+Set `share: true` on a `Request` to coalesce identical concurrent calls onto a single in-flight request, instead of each caller firing its own:
+
+```ts
+const getProduct = new Request<{ id: string }, Product>({
+  method: 'GET',
+  path: '/products/:id',
+  share: true
+})
+
+// Only one network request is made; both callers get the same response
+const [a, b] = await Promise.all([
+  api.getProduct({ id: '42' }),
+  api.getProduct({ id: '42' })
+])
+```
+
+`share` is the sibling of `dedupe`, with the opposite intent: **dedupe cancels** the older call in favor of the newer one, **share joins** the existing call instead of starting a new one. Because the two behaviors contradict each other, setting both on the same `Request` throws at `createApi(...)` time — not at call time — so the mistake surfaces immediately rather than the first time the endpoint is called.
+
+**What counts as "identical":** the request name plus a stable serialization of the params. Two calls with the same params to the same endpoint share; different params (or different endpoints) never do.
+
+**What disables sharing for a single call:**
+
+- A per-call `headers` or `middleware` — these change *what* is requested, so handing that caller another caller's response would be a real bug, not just a missed optimization. A call carrying either always gets its own, unshared request.
+- Params that are a special body type — `FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`, or a raw `string` — are never coalesced. The stable serialization used to build the share key can't distinguish two different payloads of these types from each other (it falls back to `Object.keys()`, which is empty for all of them), so two different `FormData` uploads would otherwise collide on the same key and one caller could receive the response meant for the other's payload entirely. Declining to share is always safe; handing back the wrong response never is.
+
+**What does *not* disable sharing:** a per-call `signal` or `timeout`. These bound *who is still waiting*, not *what is being asked for*, so they're tracked with a per-caller refcount instead: each sharer's own signal/timeout only removes that caller from the wait list. The underlying request keeps running for everyone else, and is only aborted once every sharer — including the one that gave up — has stopped waiting.
+
+```ts
+const impatient = api.getProduct({ id: '42' }, { timeout: 20 })   // gives up quickly
+const patient = api.getProduct({ id: '42' })                      // keeps waiting
+
+// impatient's early timeout does not cancel the shared request —
+// patient still gets a real response.
+```
+
+**`result.retry()` on a shared result** re-runs the pipeline using the *acquiring caller's* own per-call options (headers, signal, timeout) — that is, whichever call first started the shared request, not whichever caller happens to invoke `retry()`. This falls out of every non-aborting sharer receiving the literal same `Result` object; it's unavoidable given that design, but worth knowing before relying on it.
+
+**Known limitation:** middleware (global or per-request) that replaces `ctx.request.signal` is re-merged with the *dedupe* signal under `dedupe: true`, but is **not** currently re-merged with the *share* refcount controller. Combining `share` with a signal-replacing middleware means that middleware's signal — not the refcount — ends up controlling the shared request: one sharer's middleware-installed signal could cancel the request for every other sharer. Avoid combining `share: true` with signal-replacing middleware until this is addressed.
 
 ### TypeScript
 
@@ -713,6 +904,48 @@ const graphql = createGraphQL({
 | `GraphQLBaseConfig` | type     | Config object for `createGraphQL`                                      |
 | `GraphQLError`      | type     | Shape of a single GraphQL error from `{ errors: [...] }`               |
 
+## Testing
+
+`@iremlopsum/apify/testing` is a separate, framework-agnostic entry point for testing consumers of this library — it has no test-runner dependency, so it works the same under Vitest, Jest, or anything else. It gives you a `fetch` stub with route matching, so your tests exercise the real pipeline — URL building, path substitution, header merging, body serialization, response parsing, your own middleware — rather than stubbing an API method to return a canned `Result` and silently drifting out of sync with what the library actually does.
+
+```ts
+import { mockFetch, jsonResponse } from '@iremlopsum/apify/testing'
+
+const mock = mockFetch({
+  'GET /api/users/:id': ({ params }) => jsonResponse({ id: params.id, name: 'Ada' }),
+  'POST /api/users': jsonResponse({ id: 'new-user' }, { status: 201 }),
+})
+
+mock.install()   // replaces globalThis.fetch
+// ... exercise your code, which calls the real api.getUser(...) ...
+mock.restore()    // puts the original globalThis.fetch back
+```
+
+Routes are keyed as `"METHOD /path"`, with `:token` segments captured and handed to a route function as `{ params, request }`. A route value can also be a plain `Response` (built with the `jsonResponse` helper, or your own), or an array of either — the array is consumed one response per matching call, and the final entry repeats once exhausted (handy for "fail twice, then succeed").
+
+```ts
+const mock = mockFetch({
+  'GET /api/flaky': [jsonResponse(null, { status: 503 }), jsonResponse({ ok: true })],
+})
+```
+
+`mock.calls` records every request (`{ method, url, headers, body }`); `mock.callCount('GET /api/users/:id')` and `mock.lastCall(...)` key off the same `"METHOD /path"` strings as the routes object. An unmatched request throws immediately, naming the method, URL, and the routes that were defined — a mocked test should fail loudly on a typo'd path, not silently 404.
+
+For stubbing at the `Result` level instead of the `fetch` level, `successResult(data)` and `errorResult(status, body)` build a well-formed `Result` directly (shown here with Vitest's `vi.spyOn`, but any runner's equivalent works the same way):
+
+```ts
+import { successResult, errorResult } from '@iremlopsum/apify/testing'
+
+vi.spyOn(api, 'getUser').mockResolvedValue(successResult({ id: '42', name: 'Ada' }))
+vi.spyOn(api, 'getUser').mockResolvedValue(errorResult(404, { message: 'not found' }))
+```
+
+Three behaviors worth knowing:
+
+- **`restore()` assumes `globalThis.fetch` was defined when `install()` ran** — true on Node 20+ (and in every browser), since `fetch` is a global there. If you somehow call `install()` in an environment where `globalThis.fetch` is `undefined` beforehand, `restore()` puts back that `undefined` rather than inventing a real `fetch`.
+- **Declaration order decides when two same-length routes could both match.** Routes are matched in the order they appear in the object you pass to `mockFetch`, and the first structural match wins — put more specific routes first if two patterns could both match the same path.
+- **Trailing and duplicate slashes are normalized away on both sides.** `/a/b/`, `/a//b`, and `/a/b` all match the same route, whether the extra slash is in the route key or in the URL the library actually built.
+
 ## Philosophy
 
 ### Never throws
@@ -743,7 +976,8 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 | --------------- | -------- | ------------------------------------------------------------------ |
 | `createApi`     | function | Creates a typed API client from a config of Request definitions    |
 | `Request`       | class    | Typed endpoint definition -- one instance per endpoint             |
-| `ApiError`      | class    | Structured error with status, body, headers, and request metadata  |
+| `ApiError`      | class    | Structured error with status, kind, body, headers, and request metadata |
+| `ApiErrorKind`  | type     | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse'` -- discriminates `ApiError.kind` |
 | `RequestConfig` | type     | Config object for the `Request` constructor                        |
 | `ApiConfig`     | type     | Config object for `createApi`                                      |
 | `CallOptions`   | type     | Per-call overrides (middleware, headers, signal)                   |
@@ -762,9 +996,25 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 
 | Export            | Kind     | Description                                                   |
 | ----------------- | -------- | ------------------------------------------------------------- |
-| `retryMiddleware` | function | Factory that returns middleware to retry on 5xx server errors  |
+| `retryMiddleware` | function | Factory that returns middleware retrying on 5xx by default, with a configurable backoff policy |
+| `RetryOptions`    | type     | Options object accepted by `retryMiddleware` (`max`, `delay`, `baseDelay`, `maxDelay`, `jitter`, `respectRetryAfter`, `retryOn`, `onRetry`) |
+| `RetryInfo`       | type     | Shape of the argument passed to `RetryOptions.onRetry`         |
 | `logMiddleware`   | const    | Middleware that logs request lifecycle to the console          |
 | `cacheMiddleware` | function | Factory that returns a per-request in-memory cache with `clear()` |
+| `CacheMiddleware` | type     | Return type of `cacheMiddleware()` -- a `Middleware` with an attached `clear()` |
+
+### Testing (`@iremlopsum/apify/testing`)
+
+| Export          | Kind     | Description                                                        |
+| --------------- | -------- | ------------------------------------------------------------------ |
+| `mockFetch`     | function | Builds a route-matching `fetch` stub, with `install()`/`restore()`, call recording, and response sequencing |
+| `jsonResponse`  | function | Builds a `Response` with a JSON body and a `content-type` header, for use as a route value |
+| `successResult` | function | Builds a well-formed success `Result<T>` directly, for stubbing at the `Result` level |
+| `errorResult`   | function | Builds a well-formed error `Result<T>` with a given HTTP status, for stubbing at the `Result` level |
+| `RouteContext`  | type     | `{ params, request }` passed to a route handler function          |
+| `RouteHandler`  | type     | `(ctx: RouteContext) => Response \| Promise<Response>` -- a route value that computes its response |
+| `RouteValue`    | type     | `Response \| RouteHandler \| Array<Response \| RouteHandler>` -- anything a route key can map to |
+| `RecordedCall`  | type     | `{ method, url, headers, body }` -- shape of each entry in `mock.calls` |
 
 ## License
 
