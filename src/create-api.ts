@@ -43,6 +43,7 @@ import { serializeBody } from './utils/serialize.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
 import { abortKind } from './utils/is-abort-error.js'
+import { anySignal } from './utils/any-signal.js'
 import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
 
 // =============================================================================
@@ -294,7 +295,13 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // set on the first attempt that reaches core() and survives across
           // retries, which keeps registration once per execute().
           // -----------------------------------------------------------------
-          const callerSignal: AbortSignal | undefined = options.signal
+          // Resolve the deadline: per-call beats per-request, and non-positive
+          // means none. The signal is created once here — not inside core() —
+          // so a retry sequence draws from a single budget rather than getting
+          // a fresh one per attempt.
+          const timeoutMs = options.timeout ?? request.config.timeout ?? 0
+          const timeoutSignal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
+          const callerSignal: AbortSignal | undefined = anySignal([options.signal, timeoutSignal])
           let dedupeController: AbortController | undefined
 
           // -----------------------------------------------------------------
