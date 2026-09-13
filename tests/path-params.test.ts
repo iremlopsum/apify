@@ -107,3 +107,29 @@ describe('buildUrl', () => {
     expect(remaining).toEqual({ id: '42' })
   })
 })
+
+describe('unresolved path params', () => {
+  it('throws when a :token has no matching param', () => {
+    expect(() => buildUrl('/api', '/users/:userId', { id: '42' }, true))
+      .toThrow(TypeError)
+  })
+
+  it('names the offending token in the message', () => {
+    expect(() => buildUrl('/api', '/users/:userId', { id: '42' }, true))
+      .toThrow(/:userId/)
+  })
+
+  it('reports every unresolved token, not just the first', () => {
+    expect(() => buildUrl('/api', '/orgs/:org/repos/:repo', {}, true))
+      .toThrow(/:org.*:repo|:repo.*:org/)
+  })
+
+  it('does not throw when every token is substituted', () => {
+    expect(() => buildUrl('/api', '/orgs/:org/repos/:repo', { org: 'a', repo: 'b' }))
+      .not.toThrow()
+  })
+
+  it('does not mistake a bare colon in a path for a param token', () => {
+    expect(() => buildUrl('/api', '/time/12:30', {})).not.toThrow()
+  })
+})
