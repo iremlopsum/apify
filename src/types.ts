@@ -145,6 +145,28 @@ export interface RequestConfig {
    * change *what* is requested, and handing one caller another's response
    * would be a security-shaped bug. A per-call `signal` or `timeout` does not
    * prevent sharing: those bound *who is still waiting*, not what is asked for.
+   * A call whose params are a special body type — `FormData`, `Blob`,
+   * `ArrayBuffer`, `URLSearchParams`, or a raw string — is also never shared:
+   * the stable serialisation used for identity can't distinguish two
+   * different payloads of these types from each other, so sharing them could
+   * hand one caller the response to a *different* payload than the one it
+   * sent.
+   *
+   * `result.retry()` on a shared result re-runs the pipeline using the
+   * **acquiring caller's** own per-call options (headers, signal, timeout) —
+   * whichever call first started the shared request — not the options of
+   * whichever caller happens to invoke `retry()`. This falls out of every
+   * non-aborting sharer receiving the literal same `Result` object; it is
+   * unavoidable given that design, but worth knowing before relying on it.
+   *
+   * **Known limitation:** middleware (global or per-request) that replaces
+   * `ctx.request.signal` — see {@link MiddlewareContext.request.signal} — is
+   * re-merged with the dedupe signal under `dedupe: true`, but is **not**
+   * currently re-merged with the share refcount controller. Combining
+   * `share` with signal-replacing middleware means that middleware's signal,
+   * not the refcount, ends up controlling the shared request: one sharer's
+   * middleware-installed signal could cancel the request for every other
+   * sharer.
    *
    * @default false
    */

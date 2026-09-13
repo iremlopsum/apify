@@ -47,6 +47,7 @@ import { abortKind } from './utils/is-abort-error.js'
 import { anySignal } from './utils/any-signal.js'
 import { timeoutSignalFor } from './utils/timeout.js'
 import { stableStringify } from './utils/cache.js'
+import { isSpecialBody } from './utils/special-body.js'
 import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
 
 // =============================================================================
@@ -356,7 +357,12 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // means none. The signal is created once here — not inside core() —
           // so a retry sequence draws from a single budget rather than getting
           // a fresh one per attempt.
-          const timeoutSignal = timeoutSignalFor(options.timeout, request.config.timeout)
+          //
+          // Skip the allocation entirely when overrideSignal is supplied (the
+          // share path): AbortSignal.timeout() starts a real timer, and
+          // `overrideSignal ?? ...` would never evaluate the right-hand side
+          // anyway, so computing it first would just be a wasted timer.
+          const timeoutSignal = overrideSignal ? undefined : timeoutSignalFor(options.timeout, request.config.timeout)
           const callerSignal: AbortSignal | undefined =
             overrideSignal ?? anySignal([options.signal, timeoutSignal])
           let dedupeController: AbortController | undefined
@@ -504,12 +510,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // key-value pairs for path param substitution or query string serialization.
           // When a special body type is detected, we skip buildUrl entirely for the
           // body portion and pass the params directly to serializeBody.
-          const isSpecialBody =
-            params instanceof FormData ||
-            params instanceof Blob ||
-            params instanceof ArrayBuffer ||
-            params instanceof URLSearchParams ||
-            typeof params === 'string'
+          const paramsIsSpecialBody = isSpecialBody(params)
 
           // For special body types, we still need to build the URL (for baseUrl + path),
           // but we pass an empty params object since there are no key-value pairs to
@@ -517,7 +518,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           const { url, remaining } = buildUrl(
             baseUrl,
             request.config.path,
-            isSpecialBody ? {} : (params as Record<string, unknown>),
+            paramsIsSpecialBody ? {} : (params as Record<string, unknown>),
             asQuery
           )
 
@@ -546,11 +547,11 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           if (!asQuery) {
             // Decide what to serialize: the original params (for special types)
             // or the remaining params after path substitution (for plain objects)
-            const toSerialize = isSpecialBody ? params : remaining
+            const toSerialize = paramsIsSpecialBody ? params : remaining
 
             // Only serialize if there's something to serialize — avoid sending
             // empty bodies ({}) for endpoints with no body params.
-            if (isSpecialBody || Object.keys(remaining).length > 0) {
+            if (paramsIsSpecialBody || Object.keys(remaining).length > 0) {
               const serialized = serializeBody(toSerialize)
               body = serialized.body
 
@@ -667,8 +668,18 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
       // call never shares — it always gets its own execute(). A per-call
       // signal or timeout only changes *who is waiting*, so it does not
       // disable sharing: it is observed for this caller alone, below.
+      //
+      // Special-body params (FormData, Blob, ArrayBuffer, URLSearchParams,
+      // a raw string) are excluded too: stableStringify falls through to
+      // Object.keys() for any object, which returns [] for all four of
+      // those types regardless of content, so two calls with genuinely
+      // different payloads would otherwise collide on the same share key,
+      // coalesce into one request, and hand one caller the response to the
+      // other's payload — the exact "security-shaped bug" this doc warns
+      // about for per-call headers, reachable through a different vector.
+      // Declining to share is always safe; corrupting a response never is.
       // -----------------------------------------------------------------------
-      const canShare = request.config.share && !options.headers && !options.middleware
+      const canShare = request.config.share && !options.headers && !options.middleware && !isSpecialBody(params)
       if (!canShare) return execute()
 
       const shareKey = `${name}|${stableStringify(params)}`

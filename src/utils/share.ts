@@ -35,6 +35,21 @@ export class ShareTracker {
   ): { promise: Promise<Result<unknown>>; release: (reason?: unknown) => void } {
     let entry = this.inflight.get(key)
 
+    // A dying entry: every sharer has already released (refs <= 0) or its
+    // controller has already been aborted, but the `.finally()` cleanup
+    // below has not run yet — that only happens once the real request's
+    // promise actually settles, at least one microtask after a synchronous
+    // `controller.abort()`. Joining it here would hand this caller a
+    // synthetic abort result instead of a real request, e.g.:
+    //
+    //   controller.abort()      // last sharer releases; refs -> 0, aborts
+    //   api.get(params)         // no await in between — must NOT join this
+    //
+    // Treat it as if no entry exists so a fresh one is started instead.
+    if (entry && (entry.refs <= 0 || entry.controller.signal.aborted)) {
+      entry = undefined
+    }
+
     if (!entry) {
       const controller = new AbortController()
       const created: Entry = { controller, refs: 0, promise: undefined as unknown as Promise<Result<unknown>> }
