@@ -519,8 +519,8 @@ separately keeps them. Verified: JSDoc survives intact in the recommended output
 | | Unpacked | Packed |
 |---|----------|--------|
 | Current | 222 KB | 61 KB |
-| Recommended | **77 KB** | **~25 KB** |
-| | **−65%** | **−59%** |
+| Recommended | **107 KB** | **~30 KB** |
+| | **−52%** | **−51%** |
 
 Zero DX loss — same hover docs, same types, same tree-shaking, same runtime bytes.
 
