@@ -1,5 +1,7 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { composeMiddleware } from '../src/middleware.js'
+import { createApi } from '../src/create-api.js'
+import { Request } from '../src/request.js'
 import type { Middleware, MiddlewareContext, Result } from '../src/types.js'
 
 /** Helper to create a minimal context. */
@@ -11,7 +13,8 @@ function makeContext(overrides: Partial<MiddlewareContext> = {}): MiddlewareCont
       path: '/test',
       params: {},
       headers: new Headers(),
-      body: null
+      body: null,
+      signal: undefined
     },
     requestName: 'test',
     ...overrides
@@ -123,5 +126,52 @@ describe('composeMiddleware', () => {
     const result = await composed(makeContext())
 
     expect(result.data).toBe('ok')
+  })
+})
+
+describe('abort signal on the middleware context', () => {
+  beforeEach(() => vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 }))))
+  afterEach(() => vi.restoreAllMocks())
+
+  it('exposes the caller signal to middleware', async () => {
+    const ac = new AbortController()
+    let seen: AbortSignal | undefined | 'missing' = 'missing'
+    const api = createApi({
+      baseUrl: '',
+      middleware: [async (ctx, next) => { seen = ctx.request.signal; return next() }],
+      requests: { g: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/g' }) },
+    })
+    await api.g({}, { signal: ac.signal })
+    expect(seen).toBe(ac.signal)
+  })
+
+  it('lets middleware replace the signal, and core honours the replacement', async () => {
+    const replacement = new AbortController()
+    const api = createApi({
+      baseUrl: '',
+      middleware: [async (ctx, next) => { ctx.request.signal = replacement.signal; return next() }],
+      requests: { g: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/g' }) },
+    })
+    await api.g()
+    const init = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit
+    expect(init.signal).toBe(replacement.signal)
+  })
+
+  it('a middleware can implement a timeout by replacing the signal', async () => {
+    vi.stubGlobal('fetch', vi.fn((_u: string, init: RequestInit) => new Promise((_res, rej) => {
+      ;(init.signal as AbortSignal).addEventListener('abort', () => rej(new DOMException('Aborted', 'AbortError')))
+    })))
+    const timeoutMw = (ms: number) => async (ctx: any, next: any) => {
+      ctx.request.signal = AbortSignal.timeout(ms)
+      return next()
+    }
+    const api = createApi({
+      baseUrl: '',
+      middleware: [timeoutMw(20)],
+      requests: { g: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/g' }) },
+    })
+    const r = await api.g()
+    expect(r.error).not.toBeNull()
+    expect(r.error!.status).toBe(0)
   })
 })
