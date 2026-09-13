@@ -103,12 +103,17 @@ export function buildUrl(baseUrl: string, path: string, params: Record<string, u
   // ship the literal token in the URL AND duplicate the value as a query
   // param — a silently wrong request that looks plausible in a network tab.
   //
-  // The pattern mirrors the substitution regex: a colon followed by at least
-  // one identifier character. `/time/12:30` is not a match because `30` is
-  // preceded by a digit-only segment that never had a token shape... but to
-  // be exact we require the colon to start a path segment or follow a slash.
+  // The substitution loop above builds its pattern from the key directly and
+  // accepts any key (including one starting with a digit, e.g. `:2fa`), so
+  // detection must accept the same character set or a mismatched token could
+  // still slip through undetected.
+  //
+  // The lookbehind requires the colon to begin a path segment — start of
+  // string, or immediately after `/`. A colon appearing mid-segment (a time
+  // like `12:30`, a port embedded in a path) is therefore never mistaken for
+  // a token, because it is preceded by a non-`/` character.
   // -------------------------------------------------------------------------
-  const unresolved = resolvedPath.match(/(?<=^|\/):[a-zA-Z_][a-zA-Z0-9_]*/g)
+  const unresolved = resolvedPath.match(/(?<=^|\/):[a-zA-Z0-9_]+/g)
   if (unresolved) {
     throw new TypeError(
       `Unresolved path parameter${unresolved.length > 1 ? 's' : ''} ${unresolved.join(', ')} ` +
@@ -129,7 +134,7 @@ export function buildUrl(baseUrl: string, path: string, params: Record<string, u
   if (!baseUrl) {
     url = resolvedPath
   } else {
-    const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
+    const base = baseUrl.replace(/\/+$/, '')
     const tail = resolvedPath.startsWith('/') ? resolvedPath : `/${resolvedPath}`
     url = `${base}${tail}`
   }
