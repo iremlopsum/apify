@@ -30,6 +30,29 @@ interface BuildUrlResult {
 }
 
 /**
+ * Joins a base URL and a path with exactly one separating slash.
+ *
+ * A trailing slash on baseUrl is the shape `process.env.API_URL` usually has.
+ * Naive concatenation produces '//', which some servers 404 on and which can
+ * trigger a cross-origin redirect that drops the Authorization header. An
+ * empty baseUrl (same-origin usage) passes the path through untouched.
+ *
+ * Exported so the error paths that report a URL without having built one —
+ * a synchronous failure before buildUrl returns — can describe the same URL
+ * the request would have used, rather than a naively concatenated one.
+ *
+ * @param baseUrl - The API base URL, with or without a trailing slash.
+ * @param path - The path to append, with or without a leading slash.
+ * @returns The joined URL.
+ */
+export function joinUrl(baseUrl: string, path: string): string {
+  if (!baseUrl) return path
+  const base = baseUrl.replace(/\/+$/, '')
+  const tail = path.startsWith('/') ? path : `/${path}`
+  return `${base}${tail}`
+}
+
+/**
  * Substitutes `:param` tokens in the path with matching values from params,
  * optionally appends remaining params as a query string.
  *
@@ -80,15 +103,26 @@ export function buildUrl(baseUrl: string, path: string, params: Record<string, u
   // - Match the literal `:key`
   // - Followed by either a non-word character (/, ?, etc.) or end of string
   // - This prevents `:id` from matching `:idExtra` because 'E' is alphanumeric
+  //
+  // The `g` flag matters: a template may legitimately repeat a token, as in
+  // '/orgs/:id/members/:id'. Without it only the first occurrence would be
+  // substituted and the second would survive into Phase 1b, which now throws
+  // on any leftover token — turning a working path into a hard error.
   // -------------------------------------------------------------------------
   for (const [key, value] of Object.entries(params)) {
-    const pattern = new RegExp(`:${key}(?=[^a-zA-Z0-9_]|$)`)
+    const pattern = new RegExp(`:${key}(?=[^a-zA-Z0-9_]|$)`, 'g')
 
-    if (pattern.test(resolvedPath)) {
-      // This param matches a path token — substitute it in the URL.
-      // encodeURIComponent ensures special characters (spaces, slashes, etc.)
-      // are properly encoded for use in URL path segments.
-      resolvedPath = resolvedPath.replace(pattern, encodeURIComponent(String(value)))
+    // Replace first and compare, rather than test() then replace(): a global
+    // regex carries lastIndex between calls, and doing it in one pass keeps
+    // that state from mattering at all. The comparison is a reliable "did it
+    // match" signal because encodeURIComponent always escapes ':' to '%3A',
+    // so a substitution can never reproduce the token it replaced.
+    const substituted = resolvedPath.replace(pattern, encodeURIComponent(String(value)))
+
+    if (substituted !== resolvedPath) {
+      // This param matched at least one path token — substitution encoded the
+      // value so special characters (spaces, slashes) are safe in a segment.
+      resolvedPath = substituted
     } else {
       // This param doesn't match any path token — keep it for later use
       // (either query string serialization or request body)
@@ -97,9 +131,45 @@ export function buildUrl(baseUrl: string, path: string, params: Record<string, u
   }
 
   // -------------------------------------------------------------------------
-  // Phase 2: Construct the base URL
+  // Phase 1b: Reject any :token that no param filled in
   // -------------------------------------------------------------------------
-  let url = `${baseUrl}${resolvedPath}`
+  // A mismatch between the path template and the params type would otherwise
+  // ship the literal token in the URL AND duplicate the value as a query
+  // param — a silently wrong request that looks plausible in a network tab.
+  //
+  // The substitution loop above builds its pattern from the key directly and
+  // accepts any key (including one starting with a digit, e.g. `:2fa`), so
+  // detection must accept the same character set or a mismatched token could
+  // still slip through undetected.
+  //
+  // A token must BEGIN a path segment. Splitting on '/' and anchoring the
+  // match to the start of each segment expresses that without a lookbehind:
+  // a colon appearing mid-segment (a time like `12:30`, a port embedded in a
+  // path) is never mistaken for a token because it is not at index 0.
+  //
+  // Lookbehind is avoided deliberately. It is the only construct here that
+  // some supported runtimes lack (Safari below 16.4), and an unsupported
+  // regex *literal* is a parse-time SyntaxError: it would take down the whole
+  // module rather than fail on the one call that used it. For a library whose
+  // first promise is "runtime-agnostic", that trade is not worth one regex.
+  // -------------------------------------------------------------------------
+  const unresolved = resolvedPath
+    .split('/')
+    .map(segment => /^:[a-zA-Z0-9_]+/.exec(segment)?.[0])
+    .filter((token): token is string => !!token)
+
+  if (unresolved.length > 0) {
+    throw new TypeError(
+      `Unresolved path parameter${unresolved.length > 1 ? 's' : ''} ${unresolved.join(', ')} ` +
+      `in path "${path}". Provide ${unresolved.length > 1 ? 'these keys' : 'this key'} in params, ` +
+      `or correct the path template.`
+    )
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 2: Join base and path with exactly one separating slash
+  // -------------------------------------------------------------------------
+  let url = joinUrl(baseUrl, resolvedPath)
 
   // -------------------------------------------------------------------------
   // Phase 3: Optional query string serialization

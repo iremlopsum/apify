@@ -295,6 +295,32 @@ export interface MiddlewareContext {
     headers: Headers
     /** Serialized request body, or null for GET/DELETE requests. */
     body: unknown | null
+    /**
+     * The AbortSignal that will be handed to `fetch`.
+     *
+     * Middleware may read this, or replace it to impose its own cancellation
+     * policy — a timeout, a deadline, or a cancel-on-condition rule. The core
+     * fetch reads this field at call time, so a replacement made by any
+     * middleware takes effect. Under `dedupe: true` the replacement is merged
+     * into the dedupe signal rather than discarded: the fetch is then
+     * cancelled by whichever fires first, the middleware's signal or a newer
+     * call superseding this one.
+     *
+     * While middleware runs — before `next()` reaches the core fetch — this
+     * holds whatever the caller passed as `CallOptions.signal`, so it is
+     * `undefined` when the caller passed none. That is true whether or not
+     * dedupe is enabled: the dedupe signal is installed here by the core
+     * fetch, so middleware only observes it after `next()` returns.
+     *
+     * @example
+     * ```ts
+     * const timeout = (ms: number): Middleware => async (ctx, next) => {
+     *   ctx.request.signal = AbortSignal.timeout(ms)
+     *   return next()
+     * }
+     * ```
+     */
+    signal?: AbortSignal
   }
 
   /** The key name of the request in the api object (e.g., 'getUser'). */

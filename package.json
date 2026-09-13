@@ -1,8 +1,9 @@
 {
   "name": "@iremlopsum/apify",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Runtime-agnostic, type-safe API client built on standard fetch. Zero dependencies.",
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -21,12 +22,13 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json && tsc -p tsconfig.types.json",
     "test": "vitest",
     "test:run": "vitest run",
     "test:integration": "vitest run --config vitest.integration.ts",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run test:run && npm run build"
+    "prepublishOnly": "npm run typecheck && npm run test:run && npm run test:integration && npm run build"
   },
   "repository": {
     "type": "git",
@@ -34,6 +36,9 @@
   },
   "author": "Kristjan Vool",
   "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "bugs": {
     "url": "https://github.com/iremlopsum/apify/issues"
   },

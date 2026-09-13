@@ -106,4 +106,83 @@ describe('buildUrl', () => {
     expect(url).toBe('/items/foo')
     expect(remaining).toEqual({ id: '42' })
   })
+
+  it('substitutes every occurrence of a repeated token', () => {
+    // A template may legitimately name the same param twice. Without the `g`
+    // flag only the first was substituted, and the survivor then tripped the
+    // unresolved-token check — a working path turned into a hard throw.
+    const { url, remaining } = buildUrl('', '/orgs/:id/members/:id', { id: '42' })
+    expect(url).toBe('/orgs/42/members/42')
+    expect(remaining).toEqual({})
+  })
+
+  it('does not throw on a repeated token', () => {
+    expect(() => buildUrl('/api', '/a/:id/b/:id', { id: '1' })).not.toThrow()
+  })
+})
+
+describe('unresolved path params', () => {
+  it('throws when a :token has no matching param', () => {
+    expect(() => buildUrl('/api', '/users/:userId', { id: '42' }, true))
+      .toThrow(TypeError)
+  })
+
+  it('names the offending token in the message', () => {
+    expect(() => buildUrl('/api', '/users/:userId', { id: '42' }, true))
+      .toThrow(/:userId/)
+  })
+
+  it('reports every unresolved token, not just the first', () => {
+    expect(() => buildUrl('/api', '/orgs/:org/repos/:repo', {}, true))
+      .toThrow(/:org.*:repo|:repo.*:org/)
+  })
+
+  it('does not throw when every token is substituted', () => {
+    expect(() => buildUrl('/api', '/orgs/:org/repos/:repo', { org: 'a', repo: 'b' }))
+      .not.toThrow()
+  })
+
+  it('does not mistake a bare colon in a path for a param token', () => {
+    expect(() => buildUrl('/api', '/time/12:30', {})).not.toThrow()
+  })
+
+  it('detects a token whose name starts with a digit', () => {
+    expect(() => buildUrl('/api', '/promo/:2fa', {}, true)).toThrow(/:2fa/)
+  })
+
+  it('detects a token whose name is only digits', () => {
+    expect(() => buildUrl('/api', '/v/:2', {}, true)).toThrow(/:2/)
+  })
+})
+
+describe('baseUrl and path joining', () => {
+  it('collapses a double slash when baseUrl has a trailing slash', () => {
+    expect(buildUrl('https://x.com/', '/health', {}).url).toBe('https://x.com/health')
+  })
+
+  it('collapses multiple trailing slashes on baseUrl', () => {
+    expect(buildUrl('https://x.com//', '/health', {}).url).toBe('https://x.com/health')
+  })
+
+  it('inserts a slash when neither side has one', () => {
+    expect(buildUrl('https://x.com', 'health', {}).url).toBe('https://x.com/health')
+  })
+
+  it('leaves a correctly formed join alone', () => {
+    expect(buildUrl('https://x.com', '/health', {}).url).toBe('https://x.com/health')
+  })
+
+  it('handles an empty baseUrl for same-origin requests', () => {
+    expect(buildUrl('', '/health', {}).url).toBe('/health')
+  })
+
+  it('does not corrupt the protocol slashes', () => {
+    expect(buildUrl('https://x.com/api/', '/v1/health', {}).url)
+      .toBe('https://x.com/api/v1/health')
+  })
+
+  it('still appends a query string after normalising', () => {
+    expect(buildUrl('https://x.com/', '/items', { page: 1 }, true).url)
+      .toBe('https://x.com/items?page=1')
+  })
 })

@@ -22,7 +22,7 @@ import { DedupeTracker } from '../src/utils/dedupe.js'
 describe('DedupeTracker', () => {
   it('returns a new AbortSignal on first call', () => {
     const tracker = new DedupeTracker()
-    const signal = tracker.track('req1')
+    const { signal } = tracker.track('req1')
 
     // The first call for any key should produce a fresh, non-aborted signal.
     // This signal is what the fetch call will use to know if it should cancel.
@@ -35,8 +35,8 @@ describe('DedupeTracker', () => {
 
     // Simulate two rapid calls for the same request key (e.g., user typed
     // two characters quickly in a search box, triggering two API calls)
-    const first = tracker.track('req1')
-    const second = tracker.track('req1')
+    const { signal: first } = tracker.track('req1')
+    const { signal: second } = tracker.track('req1')
 
     // The first request's signal should now be aborted — the fetch using it
     // will throw an AbortError, which the caller can handle gracefully
@@ -51,8 +51,8 @@ describe('DedupeTracker', () => {
 
     // Different request keys represent entirely separate API endpoints
     // or request types — they should never interfere with each other
-    const a = tracker.track('req1')
-    const b = tracker.track('req2')
+    const { signal: a } = tracker.track('req1')
+    const { signal: b } = tracker.track('req2')
 
     // Both should remain active because they are independent
     expect(a.aborted).toBe(false)
@@ -61,14 +61,16 @@ describe('DedupeTracker', () => {
 
   it('clears tracking for a key', () => {
     const tracker = new DedupeTracker()
-    const first = tracker.track('req1')
+    const { signal: first } = tracker.track('req1')
 
     // After a request completes successfully, the caller should clear the key.
     // This removes the AbortController from the Map, so the next call for the
     // same key won't unnecessarily abort the (already finished) previous request.
+    // Omitting the controller argument preserves the old unconditional-delete
+    // behaviour.
     tracker.clear('req1')
 
-    const second = tracker.track('req1')
+    const { signal: second } = tracker.track('req1')
 
     // The first signal was NOT aborted — clear() only removes tracking, it
     // does not abort. The request already completed, so aborting would be wrong.
@@ -85,7 +87,7 @@ describe('DedupeTracker', () => {
     // This simulates a scenario where the caller's signal was aborted before
     // the dedupe tracker even gets involved (e.g., a component unmounted).
     const external = AbortSignal.abort()
-    const signal = tracker.track('req1', external)
+    const { signal } = tracker.track('req1', external)
 
     // The dedupe signal should immediately reflect the external abort — there's
     // no point starting a fetch that's already been cancelled by the caller
@@ -97,15 +99,38 @@ describe('DedupeTracker', () => {
 
     // Create an external AbortController that the caller controls
     // (e.g., tied to a component lifecycle or a timeout)
-    const controller = new AbortController()
-    const signal = tracker.track('req1', controller.signal)
+    const externalController = new AbortController()
+    const { signal } = tracker.track('req1', externalController.signal)
 
     // Initially, neither external nor dedupe signal is aborted
     expect(signal.aborted).toBe(false)
 
     // When the external signal aborts (e.g., component unmounts), the dedupe
     // signal should also abort — propagating the cancellation to the fetch
-    controller.abort()
+    externalController.abort()
     expect(signal.aborted).toBe(true)
+  })
+})
+
+describe('clear() identity', () => {
+  it('does not delete a newer controller when an older request settles', () => {
+    const tracker = new DedupeTracker()
+    const a = tracker.track('search')
+    const b = tracker.track('search')          // aborts a, replaces the entry
+    tracker.clear('search', a.controller)      // a settles late — must be a no-op
+
+    const c = tracker.track('search')          // must still abort b
+    expect(b.signal.aborted).toBe(true)
+    expect(c.signal.aborted).toBe(false)
+  })
+
+  it('still deletes when the controller matches', () => {
+    const tracker = new DedupeTracker()
+    const a = tracker.track('search')
+    tracker.clear('search', a.controller)
+
+    const b = tracker.track('search')
+    expect(a.signal.aborted).toBe(false)       // nothing left to abort
+    expect(b.signal.aborted).toBe(false)
   })
 })

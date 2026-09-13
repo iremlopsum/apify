@@ -38,7 +38,7 @@
 import { Request } from './request.js'
 import { ApiError, createSuccessResult, createErrorResult, createNetworkErrorResult } from './result.js'
 import { composeMiddleware } from './middleware.js'
-import { buildUrl } from './utils/path-params.js'
+import { buildUrl, joinUrl } from './utils/path-params.js'
 import { serializeBody } from './utils/serialize.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
@@ -56,7 +56,6 @@ import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, Res
  *
  * @typeParam R - A Request instance (or anything — returns `never` for non-Request types).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ExtractParams<R> = R extends Request<infer P, any> ? P : never
 
 /**
@@ -67,7 +66,6 @@ type ExtractParams<R> = R extends Request<infer P, any> ? P : never
  *
  * @typeParam R - A Request instance (or anything — returns `never` for non-Request types).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ExtractResponse<R> = R extends Request<any, infer Res> ? Res : never
 
 /**
@@ -115,7 +113,6 @@ type ApiMethod<TParams extends object, TResponse> =
  *
  * @typeParam TRequests - The record of Request instances from the config.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Api<TRequests extends Record<string, Request<any, any>>> = {
   [K in keyof TRequests]: ApiMethod<ExtractParams<TRequests[K]>, ExtractResponse<TRequests[K]>>
 }
@@ -218,7 +215,6 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
  * const { data, error, retry } = await api.getUser({ id: '42' })
  * ```
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function createApi<TRequests extends Record<string, Request<any, any>>>(
   config: ApiConfig<TRequests>
 ): Api<TRequests> {
@@ -285,18 +281,20 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // -----------------------------------------------------------------
           // Step 2: Compute the effective abort signal
           // -----------------------------------------------------------------
-          // When dedupe is enabled for this request, we route the signal
-          // through the DedupeTracker. This does two things:
-          // 1. Aborts any previous in-flight request for this endpoint
-          // 2. Merges the caller's signal (if any) so external abort also works
+          // The caller's signal is the starting point, and it is what the
+          // context carries into the middleware chain. When dedupe is enabled
+          // the real registration happens inside core() — see below — so that
+          // a middleware which short-circuits (a cache hit) never cancels a
+          // live request that is genuinely in flight, and so that a signal
+          // installed by middleware is an input to dedupe rather than
+          // something dedupe overwrites.
           //
-          // When dedupe is disabled, the caller's signal (if any) is used
-          // directly — no tracking overhead.
+          // dedupeController doubles as the "already registered" flag: it is
+          // set on the first attempt that reaches core() and survives across
+          // retries, which keeps registration once per execute().
           // -----------------------------------------------------------------
-          let effectiveSignal: AbortSignal | undefined = options.signal
-          if (request.config.dedupe) {
-            effectiveSignal = dedupeTracker.track(name, options.signal)
-          }
+          const callerSignal: AbortSignal | undefined = options.signal
+          let dedupeController: AbortController | undefined
 
           // -----------------------------------------------------------------
           // Step 3: Define the core fetch function
@@ -317,13 +315,41 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // -----------------------------------------------------------------
           const core = async (ctx: MiddlewareContext): Promise<Result<unknown>> => {
             try {
+              // Register with the dedupe tracker on the first attempt that
+              // reaches core() — we are committed to sending a request. Any
+              // middleware that short-circuits above us returned without
+              // reaching this point, so it cannot cancel a live request.
+              //
+              // The `!dedupeController` guard makes this once per execute(),
+              // not once per attempt. retryMiddleware calls next() repeatedly;
+              // if every attempt re-registered, an older request's retry would
+              // abort a newer call for the same endpoint — the exact inverse
+              // of dedupe's newest-wins contract. Registering once also means
+              // a request that has been superseded stays cancelled: its retry
+              // reuses the signal the newer call aborted.
+              //
+              // The signal we hand to track() is ctx.request.signal, not the
+              // caller's: a middleware may have installed its own (a timeout,
+              // a deadline), and dedupe must merge that rather than discard
+              // it. Because registration happens only once, that field still
+              // holds a live signal here — never a previous attempt's already
+              // aborted dedupe signal.
+              if (request.config.dedupe && !dedupeController) {
+                const tracked = dedupeTracker.track(name, ctx.request.signal ?? callerSignal)
+                dedupeController = tracked.controller
+                ctx.request.signal = tracked.signal
+              }
+
               // Build the RequestInit object for the native fetch call.
-              // We pull method and headers from the context (middleware may
-              // have modified them) and use the effectiveSignal computed above.
+              // We pull method, headers, and signal from the context (middleware
+              // may have modified any of them) rather than closing over a signal
+              // computed during setup — that's what lets a middleware replace
+              // the signal (e.g. to implement a timeout) and have it actually
+              // take effect.
               const fetchInit: RequestInit = {
                 method: ctx.request.method,
                 headers: ctx.request.headers,
-                signal: effectiveSignal
+                signal: ctx.request.signal
               }
 
               // Only set the body if there is one — GET/DELETE requests
@@ -487,7 +513,8 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               path: request.config.path,
               params,
               headers,
-              body
+              body,
+              signal: callerSignal
             },
             requestName: name
           }
@@ -515,7 +542,15 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // Clean up dedupe tracking after the request completes.
             // This must happen before onError so that onError handlers can
             // immediately fire a new request without triggering a dedupe abort.
-            if (request.config.dedupe) dedupeTracker.clear(name)
+            //
+            // dedupeController is only assigned inside core() — if every
+            // middleware short-circuited and core() never ran (e.g. a cache
+            // hit), it stays undefined here. clear() with no controller
+            // deletes the map entry unconditionally, which would be wrong in
+            // that case: it could delete the entry belonging to a genuinely
+            // in-flight request registered by someone else under the same
+            // name. So only clear when this execute() actually registered.
+            if (request.config.dedupe && dedupeController) dedupeTracker.clear(name, dedupeController)
 
             // Fire the global error handler if the final result has an error.
             // This is the "last chance" error hook — middleware has already had
@@ -542,7 +577,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             statusText: '',
             body: err,
             headers: new Headers(),
-            request: { method: request.config.method, url: `${baseUrl}${request.config.path}`, params }
+            request: { method: request.config.method, url: joinUrl(baseUrl, request.config.path), params }
           })
 
           // Fire onError for synchronous errors too — they're still errors
