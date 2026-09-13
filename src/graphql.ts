@@ -89,8 +89,11 @@ export function createGraphQL(config: any): any {
           ]
 
           let effectiveSignal: AbortSignal | undefined = options.signal
+          let dedupeController: AbortController | undefined
           if (operation.config.dedupe) {
-            effectiveSignal = dedupeTracker.track(name, options.signal)
+            const tracked = dedupeTracker.track(name, options.signal)
+            effectiveSignal = tracked.signal
+            dedupeController = tracked.controller
           }
 
           const core = async (ctx: MiddlewareContext): Promise<Result<unknown>> => {
@@ -170,7 +173,7 @@ export function createGraphQL(config: any): any {
 
           const composed = composeMiddleware(allMiddleware, core, options.skipMiddleware ?? [])
           return composed(context).then(result => {
-            if (operation.config.dedupe) dedupeTracker.clear(name)
+            if (operation.config.dedupe) dedupeTracker.clear(name, dedupeController)
             if (result.error && onError) onError(result.error as ApiError)
             return result
           })

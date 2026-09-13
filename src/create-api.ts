@@ -290,8 +290,11 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // directly — no tracking overhead.
           // -----------------------------------------------------------------
           let effectiveSignal: AbortSignal | undefined = options.signal
+          let dedupeController: AbortController | undefined
           if (request.config.dedupe) {
-            effectiveSignal = dedupeTracker.track(name, options.signal)
+            const tracked = dedupeTracker.track(name, options.signal)
+            effectiveSignal = tracked.signal
+            dedupeController = tracked.controller
           }
 
           // -----------------------------------------------------------------
@@ -511,7 +514,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // Clean up dedupe tracking after the request completes.
             // This must happen before onError so that onError handlers can
             // immediately fire a new request without triggering a dedupe abort.
-            if (request.config.dedupe) dedupeTracker.clear(name)
+            if (request.config.dedupe) dedupeTracker.clear(name, dedupeController)
 
             // Fire the global error handler if the final result has an error.
             // This is the "last chance" error hook — middleware has already had

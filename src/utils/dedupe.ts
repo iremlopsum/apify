@@ -24,13 +24,18 @@
 //   - Externally: caller aborts (e.g., component unmounts, timeout fires)
 //
 // Usage flow:
-//   1. Before fetching: `const signal = tracker.track(requestKey, callerSignal?)`
+//   1. Before fetching: `const { signal, controller } = tracker.track(requestKey, callerSignal?)`
 //   2. Pass `signal` to the fetch call
-//   3. After fetch completes (success or error): `tracker.clear(requestKey)`
+//   3. After fetch completes (success or error): `tracker.clear(requestKey, controller)`
 //
 // The Map is never unbounded because clear() is called after every request
 // completes, keeping the Map size proportional to the number of CONCURRENT
 // in-flight requests (typically very small).
+//
+// clear() takes the controller returned by the matching track() call so it can
+// verify it still owns the map entry before deleting it. Without that check, a
+// superseded request that settles late would delete the entry belonging to
+// whichever newer request replaced it — see clear()'s doc comment below.
 // =============================================================================
 
 /**
@@ -48,16 +53,17 @@
  * const tracker = new DedupeTracker()
  *
  * // First search request
- * const signal1 = tracker.track('searchUsers')
- * fetch('/api/users?q=he', { signal: signal1 })
+ * const first = tracker.track('searchUsers')
+ * fetch('/api/users?q=he', { signal: first.signal })
  *
  * // User types another character — second search request
- * const signal2 = tracker.track('searchUsers')
- * // signal1 is now aborted, the first fetch will throw AbortError
- * fetch('/api/users?q=hel', { signal: signal2 })
+ * const second = tracker.track('searchUsers')
+ * // first.signal is now aborted, the first fetch will throw AbortError
+ * fetch('/api/users?q=hel', { signal: second.signal })
  *
- * // After the second fetch completes:
- * tracker.clear('searchUsers')
+ * // After the second fetch completes, pass its controller back so clear()
+ * // can confirm it still owns the entry before deleting it:
+ * tracker.clear('searchUsers', second.controller)
  * ```
  */
 export class DedupeTracker {
@@ -90,11 +96,12 @@ export class DedupeTracker {
    *   signal aborts, the dedupe signal will also abort. This enables the
    *   caller to cancel the request independently of the dedupe logic (e.g.,
    *   on component unmount or timeout).
-   * @returns An AbortSignal that the fetch call should use. This signal will
-   *   be aborted if either (a) a newer request starts for the same key, or
-   *   (b) the external signal aborts.
+   * @returns The `signal` the fetch call should use — aborted if either (a) a
+   *   newer request starts for the same key, or (b) the external signal
+   *   aborts — alongside the `controller` that owns it, which the caller must
+   *   pass back to `clear()` to prove ownership of the map entry.
    */
-  track(key: string, externalSignal?: AbortSignal): AbortSignal {
+  track(key: string, externalSignal?: AbortSignal): { signal: AbortSignal; controller: AbortController } {
     // -------------------------------------------------------------------------
     // Step 1: Abort any existing in-flight request for this key
     // -------------------------------------------------------------------------
@@ -139,10 +146,9 @@ export class DedupeTracker {
       }
     }
 
-    // Return the signal (not the controller) — the caller only needs to
-    // observe abort status, not trigger it. Only the tracker controls when
-    // this signal aborts (via dedupe logic or external signal propagation).
-    return controller.signal
+    // Return the controller alongside the signal so the caller can pass it
+    // back to clear() and prove ownership — see clear()'s identity check.
+    return { signal: controller.signal, controller }
   }
 
   /**
@@ -157,11 +163,19 @@ export class DedupeTracker {
    * @param key - The same key that was passed to `track()`. If the key doesn't
    *   exist in the Map (e.g., it was already cleared or never tracked), this
    *   is a no-op — Map.delete() on a missing key does nothing.
+   * @param controller - Optional: the controller returned by the `track()`
+   *   call this clear() corresponds to. When provided, the entry is only
+   *   deleted if it still belongs to that exact controller — otherwise a
+   *   superseded (and now-stale) request's cleanup would delete the entry
+   *   belonging to whichever newer request replaced it. Omitting it preserves
+   *   the old unconditional-delete behaviour.
    */
-  clear(key: string): void {
-    // Simply remove the entry. We don't abort because the request already
-    // completed — aborting a finished request has no effect, and we don't
-    // want to trigger any abort event listeners that might still be attached.
+  clear(key: string, controller?: AbortController): void {
+    // Only the request that registered this controller may clear it. Without
+    // this check a superseded request settling late would delete the entry
+    // belonging to the request that superseded it, silently disabling dedupe
+    // from the second cancellation onward.
+    if (controller && this.controllers.get(key) !== controller) return
     this.controllers.delete(key)
   }
 }
