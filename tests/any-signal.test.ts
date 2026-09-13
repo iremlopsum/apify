@@ -53,4 +53,27 @@ describe('anySignal', () => {
     expect(fired).toBe(1)
     expect((merged.reason as Error).message).toBe('first')
   })
+
+  it('aborts immediately when a later input is already aborted', () => {
+    const pending = new AbortController()
+    const already = new AbortController()
+    already.abort(new DOMException('gone', 'AbortError'))
+
+    const merged = anySignal([pending.signal, already.signal])!
+
+    expect(merged.aborted).toBe(true)
+    expect((merged.reason as Error).message).toBe('gone')
+  })
+
+  it('ignores a losing input that aborts after the race is decided', () => {
+    const winner = new AbortController()
+    const loser = new AbortController()
+    const merged = anySignal([winner.signal, loser.signal])!
+
+    winner.abort(new DOMException('winner', 'AbortError'))
+    const settledReason = merged.reason
+
+    loser.abort(new DOMException('loser', 'AbortError'))
+    expect(merged.reason).toBe(settledReason)
+  })
 })
