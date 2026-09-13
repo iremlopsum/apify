@@ -41,9 +41,12 @@ import { composeMiddleware } from './middleware.js'
 import { buildUrl, joinUrl } from './utils/path-params.js'
 import { serializeBody } from './utils/serialize.js'
 import { DedupeTracker } from './utils/dedupe.js'
+import { ShareTracker } from './utils/share.js'
 import { mergeHeaders } from './utils/headers.js'
 import { abortKind } from './utils/is-abort-error.js'
 import { anySignal } from './utils/any-signal.js'
+import { timeoutSignalFor } from './utils/timeout.js'
+import { stableStringify } from './utils/cache.js'
 import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
 
 // =============================================================================
@@ -159,6 +162,29 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
   }
 }
 
+/**
+ * The Result a sharer receives when it gives up before the shared request
+ * settles. The shared request itself is unaffected unless this was the last
+ * reference — that is the refcount's job, not this function's.
+ */
+function abortResultFor(
+  reason: unknown,
+  method: string,
+  url: string,
+  params: unknown,
+  retry: () => Promise<Result<unknown>>
+): Result<unknown> {
+  const error = new ApiError({
+    kind: abortKind(reason) ?? 'abort',
+    status: 0,
+    statusText: '',
+    body: reason,
+    headers: new Headers(),
+    request: { method, url, params }
+  })
+  return createNetworkErrorResult(error, retry)
+}
+
 // =============================================================================
 // createApi — the main export
 // =============================================================================
@@ -233,6 +259,27 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
   // ---------------------------------------------------------------------------
   const dedupeTracker = new DedupeTracker()
 
+  // ---------------------------------------------------------------------------
+  // Share tracker — shared across all endpoints in this API instance, same
+  // per-createApi lifetime rationale as dedupeTracker above.
+  //
+  // share and dedupe are opposites (share joins the existing call, dedupe
+  // cancels it), so a Request that sets both is a contradiction with no
+  // sensible combined semantics. Validate this up front, at construction
+  // time, rather than at call time: it's the one sanctioned throw outside a
+  // Result, because it's a configuration mistake, not a request failure.
+  // ---------------------------------------------------------------------------
+  const shareTracker = new ShareTracker()
+
+  for (const [name, request] of Object.entries(requests)) {
+    if (request.config.share && request.config.dedupe) {
+      throw new Error(
+        `Request "${name}" sets both share and dedupe. They are opposites — ` +
+        `dedupe cancels the previous call, share joins it. Pick one.`
+      )
+    }
+  }
+
   // The api object is built up imperatively by iterating over the requests
   // record. Each key becomes a method on the api object.
   // We use `Record<string, Function>` internally because the precise types
@@ -262,8 +309,18 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * passed as a query string param). These are returned as Result
        * errors rather than unhandled rejections, keeping the "never throws"
        * contract intact.
+       *
+       * `overrideSignal`, when given, replaces the caller's own `options.signal`
+       * / timeout as the signal that actually drives the fetch. This is used
+       * only by the `share: true` path below: the first caller to acquire a
+       * shared slot hands `execute` the ShareTracker's own refcounted signal,
+       * so the real network request is governed by "has every sharer given
+       * up?" rather than by any single caller's personal signal or timeout.
+       * `result.retry()` calls `execute` with no argument, so a retry (shared
+       * or not) always falls back to this caller's own `options.signal` /
+       * timeout — a retry is a fresh, unshared request.
        */
-      const execute = (): Promise<Result<unknown>> => {
+      const execute = (overrideSignal?: AbortSignal): Promise<Result<unknown>> => {
         try {
           // -----------------------------------------------------------------
           // Step 1: Compose the middleware chain
@@ -299,9 +356,9 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // means none. The signal is created once here — not inside core() —
           // so a retry sequence draws from a single budget rather than getting
           // a fresh one per attempt.
-          const timeoutMs = options.timeout ?? request.config.timeout ?? 0
-          const timeoutSignal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
-          const callerSignal: AbortSignal | undefined = anySignal([options.signal, timeoutSignal])
+          const timeoutSignal = timeoutSignalFor(options.timeout, request.config.timeout)
+          const callerSignal: AbortSignal | undefined =
+            overrideSignal ?? anySignal([options.signal, timeoutSignal])
           let dedupeController: AbortController | undefined
 
           // -----------------------------------------------------------------
@@ -598,8 +655,65 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
         }
       }
 
-      // Kick off the execute function for the initial call
-      return execute()
+      // -----------------------------------------------------------------------
+      // Coalescing (share: true)
+      // -----------------------------------------------------------------------
+      // Coalescing wraps the whole chain — unlike dedupe, which registers
+      // inside core(). Running the middleware once for ten callers is the
+      // actual saving; ten auth injections and ten cache lookups for one
+      // network call would be most of the cost.
+      //
+      // Per-call headers or middleware change *what* is requested, so such a
+      // call never shares — it always gets its own execute(). A per-call
+      // signal or timeout only changes *who is waiting*, so it does not
+      // disable sharing: it is observed for this caller alone, below.
+      // -----------------------------------------------------------------------
+      const canShare = request.config.share && !options.headers && !options.middleware
+      if (!canShare) return execute()
+
+      const shareKey = `${name}|${stableStringify(params)}`
+
+      // acquire() either starts the real request (first caller — exec is
+      // called with the tracker's own refcounted signal, which becomes the
+      // signal that actually drives fetch) or joins an identical one already
+      // in flight. Either way every sharer gets the same promise back.
+      const { promise, release } = shareTracker.acquire(shareKey, signal => execute(signal))
+
+      // This caller's own signal/timeout, kept entirely separate from the
+      // signal the real fetch runs on. It bounds only whether THIS caller
+      // keeps waiting — it must never reach into the shared request itself.
+      const perCaller = anySignal([options.signal, timeoutSignalFor(options.timeout, request.config.timeout)])
+      if (!perCaller) return promise
+
+      // Race this caller's own giving-up against the shared result settling.
+      // Giving up calls release(), which only decrements the refcount — the
+      // underlying request is aborted by ShareTracker itself, and only once
+      // every sharer (including this one) has released.
+      return new Promise<Result<unknown>>(resolve => {
+        let settled = false
+        const finish = (r: Result<unknown>): void => {
+          if (settled) return
+          settled = true
+          perCaller.removeEventListener('abort', onAbort)
+          resolve(r)
+        }
+
+        promise.then(finish, finish)
+
+        const onAbort = (): void => {
+          release(perCaller.reason)
+          finish(abortResultFor(
+            perCaller.reason,
+            request.config.method,
+            joinUrl(baseUrl, request.config.path),
+            params,
+            execute
+          ))
+        }
+
+        if (perCaller.aborted) onAbort()
+        else perCaller.addEventListener('abort', onAbort, { once: true })
+      })
     }
   }
 

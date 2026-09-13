@@ -4,6 +4,7 @@ import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
 import { abortKind } from './utils/is-abort-error.js'
 import { anySignal } from './utils/any-signal.js'
+import { timeoutSignalFor } from './utils/timeout.js'
 import type { CallOptions, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -105,8 +106,7 @@ export function createGraphQL(config: any): any {
           // means none. The signal is created once here — not inside core() —
           // so a retry sequence draws from a single budget rather than getting
           // a fresh one per attempt.
-          const timeoutMs = options.timeout ?? operation.config.timeout ?? 0
-          const timeoutSignal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
+          const timeoutSignal = timeoutSignalFor(options.timeout, operation.config.timeout)
           const callerSignal: AbortSignal | undefined = anySignal([options.signal, timeoutSignal])
           let dedupeController: AbortController | undefined
 

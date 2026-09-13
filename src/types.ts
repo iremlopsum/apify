@@ -134,6 +134,23 @@ export interface RequestConfig {
   dedupe?: boolean
 
   /**
+   * Join identical concurrent calls onto a single in-flight request.
+   *
+   * Sibling of {@link RequestConfig.dedupe}, not a replacement: dedupe
+   * **cancels** the older request, share **joins** the existing one. Setting
+   * both throws at `createApi` time.
+   *
+   * Identity is the request name plus a stable serialisation of the params.
+   * A call carrying per-call `headers` or `middleware` is never shared — those
+   * change *what* is requested, and handing one caller another's response
+   * would be a security-shaped bug. A per-call `signal` or `timeout` does not
+   * prevent sharing: those bound *who is still waiting*, not what is asked for.
+   *
+   * @default false
+   */
+  share?: boolean
+
+  /**
    * Override the default body serialization strategy.
    *
    * By default, GET/DELETE serialize params as query strings, and
