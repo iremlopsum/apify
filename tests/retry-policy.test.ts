@@ -109,6 +109,69 @@ describe('retry policy', () => {
     expect(r.error!.status).toBe(503)
   })
 
+  it('survives a throwing retryOn', async () => {
+    vi.stubGlobal('fetch', always(503))
+    // The natural, unguarded predicate (`r => r.error.status >= 500`, no
+    // optional chaining) throws on every success, where `r.error` is null —
+    // this must resolve with a Result, not reject the call.
+    const r = await makeApi(retryMiddleware({
+      max: 3, baseDelay: 1,
+      retryOn: () => { throw new Error('predicate exploded') },
+    })).g()
+    // Can't know whether to retry, so we stop: the caller gets the first
+    // failure rather than looping past an unknown.
+    expect(r.error!.status).toBe(503)
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
+  })
+
+  it('survives a throwing delay curve', async () => {
+    const seen: number[] = []
+    vi.stubGlobal('fetch', always(503))
+    const r = await makeApi(retryMiddleware({
+      max: 1, baseDelay: 20, jitter: false,
+      delay: () => { throw new Error('curve boom') },
+      onRetry: ({ delay }) => { seen.push(delay) },
+    })).g()
+    // Falls back to the exponential default (baseDelay * 2**(attempt-1),
+    // i.e. 20 for attempt 1) rather than propagating.
+    expect(seen[0]).toBe(20)
+    expect(r.error!.status).toBe(503)
+  })
+
+  it('treats a whitespace-only Retry-After as absent', async () => {
+    const seen: number[] = []
+    vi.stubGlobal('fetch', always(503, { 'retry-after': '   ' }))
+    await makeApi(retryMiddleware({
+      max: 1, baseDelay: 30, jitter: false,
+      onRetry: ({ delay }) => { seen.push(delay) },
+    })).g()
+    // Number('   ') coerces to 0 — without trimming first, that reads as a
+    // valid "retry immediately" instead of falling through to the computed
+    // delay.
+    expect(seen[0]).toBe(30)
+  })
+
+  it('ignores Retry-After when respectRetryAfter is false', async () => {
+    const seen: number[] = []
+    vi.stubGlobal('fetch', always(503, { 'retry-after': '1' }))
+    await makeApi(retryMiddleware({
+      max: 1, baseDelay: 40, jitter: false, respectRetryAfter: false,
+      onRetry: ({ delay }) => { seen.push(delay) },
+    })).g()
+    expect(seen[0]).toBe(40)
+  })
+
+  it('uses a custom delay curve when provided', async () => {
+    const seen: number[] = []
+    vi.stubGlobal('fetch', always(503))
+    await makeApi(retryMiddleware({
+      max: 3, jitter: false,
+      delay: attempt => attempt * 7,
+      onRetry: ({ delay }) => { seen.push(delay) },
+    })).g()
+    expect(seen).toEqual([7, 14, 21])
+  })
+
   it('stops promptly when the deadline fires during backoff', async () => {
     vi.stubGlobal('fetch', vi.fn(async (_u: string, init: RequestInit) => {
       const s = init.signal as AbortSignal | undefined
