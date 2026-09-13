@@ -7,6 +7,52 @@ For the full record of what changed in each release, see [CHANGELOG.md](./CHANGE
 
 ---
 
+## Upgrading to 2.2.0
+
+2.2.0 is additive — no API changed shape, and there is nothing you need to do.
+
+### Worth knowing, no action needed
+
+- **Abort reasons now survive `dedupe`.** Previously, a `dedupe: true`
+  request's merged signal always aborted with a generic, reason-less
+  `AbortError`, regardless of what actually caused the abort:
+
+  ```ts
+  const withTimeout: Middleware = async (ctx, next) => {
+    ctx.request.signal = AbortSignal.timeout(20)
+    return next()
+  }
+
+  const api = createApi({
+    baseUrl: '/api',
+    requests: { getUser }, // getUser has dedupe: true
+    middleware: [withTimeout],
+  })
+
+  const { error } = await api.getUser({ id: '42' })
+  // 2.1.0 → error.body.name === 'AbortError'   -- the real cause (a timeout) was lost
+  // 2.2.0 → error.body.name === 'TimeoutError' -- the actual cause survives
+  ```
+
+  This only differs when `dedupe: true` is combined with a caller-supplied
+  `signal` or a signal-setting middleware — plain `dedupe: true` with no
+  external signal involved is unaffected. `error.body.name` (and any custom
+  reason you pass to your own `AbortController.abort(reason)`) is a
+  **pre-2.2.0 surface** — existing code reading it does not need to touch
+  anything new to notice this, since it never had to opt into `kind` to read
+  `.name` in the first place. Going forward, prefer branching on the new
+  `error.kind` (`'timeout'` vs `'abort'` vs `'network'`) instead of
+  `error.body.name` — it's the field the library commits to maintaining.
+
+- **Retries now back off instead of firing instantly.** `retryMiddleware(3)`
+  previously made all four attempts in the same tick, with no delay between
+  them. It now waits out a real backoff (exponential by default, with jitter)
+  between attempts, so a retrying request takes measurably longer in
+  wall-clock terms. Nothing breaks, but a test asserting on elapsed time
+  around a retrying call may need its tolerance revisited — or pass
+  `retryMiddleware({ baseDelay: 0, jitter: false })` to keep the old, instant
+  timing.
+
 ## Upgrading to 2.1.0
 
 2.1.0 is a non-breaking release, but **two changes can surface as new errors** in
