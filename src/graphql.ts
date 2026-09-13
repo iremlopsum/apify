@@ -102,7 +102,7 @@ export function createGraphQL(config: any): any {
                 method: 'POST',
                 headers: ctx.request.headers,
                 body: ctx.request.body as string,
-                signal: effectiveSignal,
+                signal: ctx.request.signal,
               })
 
               if (!response.ok) {
@@ -167,6 +167,7 @@ export function createGraphQL(config: any): any {
               params: variables,
               headers,
               body,
+              signal: effectiveSignal,
             },
             requestName: name,
           }

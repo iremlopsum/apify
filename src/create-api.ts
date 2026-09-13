@@ -317,12 +317,15 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           const core = async (ctx: MiddlewareContext): Promise<Result<unknown>> => {
             try {
               // Build the RequestInit object for the native fetch call.
-              // We pull method and headers from the context (middleware may
-              // have modified them) and use the effectiveSignal computed above.
+              // We pull method, headers, and signal from the context (middleware
+              // may have modified any of them) rather than closing over the
+              // effectiveSignal computed above — that's what lets a middleware
+              // replace the signal (e.g. to implement a timeout) and have it
+              // actually take effect.
               const fetchInit: RequestInit = {
                 method: ctx.request.method,
                 headers: ctx.request.headers,
-                signal: effectiveSignal
+                signal: ctx.request.signal
               }
 
               // Only set the body if there is one — GET/DELETE requests
@@ -486,7 +489,8 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               path: request.config.path,
               params,
               headers,
-              body
+              body,
+              signal: effectiveSignal
             },
             requestName: name
           }

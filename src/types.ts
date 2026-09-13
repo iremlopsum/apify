@@ -295,6 +295,25 @@ export interface MiddlewareContext {
     headers: Headers
     /** Serialized request body, or null for GET/DELETE requests. */
     body: unknown | null
+    /**
+     * The AbortSignal that will be handed to `fetch`.
+     *
+     * Middleware may read this, or replace it to impose its own cancellation
+     * policy — a timeout, a deadline, or a cancel-on-condition rule. The core
+     * fetch reads this field at call time, so a replacement made by any
+     * middleware takes effect.
+     *
+     * `undefined` when the caller passed no signal and dedupe is off.
+     *
+     * @example
+     * ```ts
+     * const timeout = (ms: number): Middleware => async (ctx, next) => {
+     *   ctx.request.signal = AbortSignal.timeout(ms)
+     *   return next()
+     * }
+     * ```
+     */
+    signal: AbortSignal | undefined
   }
 
   /** The key name of the request in the api object (e.g., 'getUser'). */
