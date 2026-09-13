@@ -50,6 +50,53 @@ Changed.
   apart — all three carry `status: 0`. `'parse'` is reserved for a future
   release and is not produced by this one.
 
+### Fixed
+
+- **A non-integer or oversized `timeout` no longer breaks the request.**
+  `AbortSignal.timeout()` accepts only an integer in `[0, 2^31 - 1]`, so a
+  perfectly ordinary `budget / 3` or `Number(process.env.TIMEOUT)` threw a
+  `RangeError` during setup — the request was never sent, and the caller got a
+  `kind: 'network'` Result indistinguishable from being offline. Values are now
+  rounded down to whole milliseconds and clamped to the timer ceiling; `NaN`
+  and non-positive values still mean "no timeout". Applies to `createGraphQL`
+  too, which shares the helper.
+- **`share: true` returns a `Result` from every exit.** The coalescing block
+  ran outside the request pipeline's `try`/`catch`, so a throw in it escaped as
+  a rejection; and a rejection from the shared operation was handed back *as
+  if it were a `Result`*, leaving `data` and `error` both `undefined` so
+  `if (error)` was false and the call looked like a success with no data. Both
+  now produce a proper network-error `Result`.
+- **A throwing `onError` no longer rejects the caller.** `onError` fires after
+  the `Result` is in hand, so a misconfigured error reporter — or a logger
+  reaching for `error.response.status` where `response` is `null` — rejected a
+  promise that already held a perfectly good `Result`. It is now guarded on
+  both `createApi` and `createGraphQL`, matching the retry policy's `retryOn`,
+  `onRetry` and custom `delay` callbacks.
+- **Under `share`, `RequestConfig.timeout` now bounds the shared request.** It
+  was applied per-caller, from each caller's join time, so a steady arrival of
+  joiners could hold one socket open indefinitely against the configured
+  deadline. The operation's deadline now bounds the one real request for
+  everyone, measured from when that request started; `CallOptions.timeout`
+  still bounds only the caller that passed it, which means a per-call
+  `timeout: 0` cannot lift the operation's own deadline.
+- **A sharer's own timeout or abort now reaches `onError`**, as the identical
+  non-shared call always did.
+- **`headers: {}` or `middleware: []` no longer disables coalescing.** The gate
+  tested truthiness rather than emptiness.
+- **`cacheMiddleware` no longer collapses special-body params to one key.**
+  `FormData`, `Blob`, `ArrayBuffer` and `URLSearchParams` all stringify to
+  `"{}"` for keying purposes, so two different uploads through one cache served
+  each other's responses. Such calls are now neither cached nor served from
+  cache — the same stance `share` takes. Pre-existing (not new in 2.2.0), fixed
+  here because this release introduces the guard for the identical bug under
+  `share`.
+- **A custom retry `delay` curve returning `NaN` or a negative no longer
+  reaches `setTimeout`**, where both mean "retry immediately" and turn a
+  backoff policy into a tight loop. A non-finite result falls back to the
+  exponential default; a negative is clamped to zero.
+- **`mockFetch` rejects a route key with no method** (`'/users'`) at
+  construction, instead of registering a route that can never match.
+
 ### Changed
 
 - **Retries now back off instead of firing instantly.** Before this release,

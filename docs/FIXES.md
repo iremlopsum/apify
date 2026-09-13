@@ -28,7 +28,7 @@ Companion document: [FEATURES.md](./FEATURES.md)
 | 11 | GraphQL discards partial data when `errors` is present | Medium | Yes (behavioural) |
 | 12 | Tooling hygiene: dead eslint-disables, no CI, incomplete `prepublishOnly` | Low | No |
 | 13 | Path param keys are interpolated into a regex unescaped | Medium | No |
-| 14 | `cacheMiddleware` collapses special-body params (`FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`) to the same cache key | High | No |
+| 14 | `cacheMiddleware` collapses special-body params (`FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`) to the same cache key — **fixed in 2.2.0** | High | No |
 | —  | [Package size: roughly halved, 241 kB → 113 kB](#package-size) | — | No |
 
 Items 1, 5, 10 and 11 are behavioural/type breaking changes. **Batch them into a
@@ -568,16 +568,31 @@ cache has no equivalent guard. Any endpoint whose params are one of these
 types, wrapped in `cacheMiddleware()`, will silently serve a stale — or simply
 *wrong* — cached response across genuinely different payloads.
 
-### Fix (not applied — see Status)
+### Fix (applied)
 
-Mirror the guard added for `share` this release: either have
-`cacheMiddleware` refuse to cache a call whose params are a special body type
-(declining to cache is always safe, the same stance `share` takes), or give
-`stableStringify` a real, content-based representation for these types instead
-of falling through to `Object.keys()`.
+Mirrors the guard added for `share` this release, using the same predicate:
 
-**Status:** not fixed — pre-existing (shipped two releases ago), out of scope
-for 2.2.0.
+```ts
+// src/built-in-middleware.ts, inside cacheMiddleware's mw
+if (isSpecialBody(ctx.request.params)) return next()
+```
+
+`cacheMiddleware` now refuses to cache — or to serve from cache — any call
+whose params are a special body type. Declining to cache is always safe, the
+same stance `share` takes; keying them wrongly never is. Giving
+`stableStringify` a real content-based representation for these types was the
+alternative, but it would have to read a `Blob` or `FormData` asynchronously to
+do it honestly, which a synchronous key builder cannot.
+
+Covered by `tests/cache-middleware.test.ts`: two different `FormData` payloads
+make two real requests and each caller gets its own response, and two
+*identical* `URLSearchParams` payloads are not cached either.
+
+**Status:** fixed in 2.2.0. Pre-existing (shipped two releases ago), but pulled
+in deliberately: 2.2.0 introduces `isSpecialBody` for the identical bug under
+`share` and documents the failure mode in both the README and this file, so
+shipping the guard for one while the other stayed exposed would invite a reader
+to assume the library handles it everywhere.
 
 ---
 

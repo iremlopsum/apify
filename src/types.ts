@@ -143,8 +143,14 @@ export interface RequestConfig {
    * Identity is the request name plus a stable serialisation of the params.
    * A call carrying per-call `headers` or `middleware` is never shared — those
    * change *what* is requested, and handing one caller another's response
-   * would be a security-shaped bug. A per-call `signal` or `timeout` does not
-   * prevent sharing: those bound *who is still waiting*, not what is asked for.
+   * would be a security-shaped bug. (Emptiness is what counts: `headers: {}`
+   * and `middleware: []` still share.) A per-call `signal` or `timeout` does
+   * not prevent sharing: those bound *who is still waiting*, not what is asked
+   * for, and a sharer that gives up receives its own error `Result`
+   * (`kind: 'timeout'` or `'abort'`) and reports it to `onError` exactly as
+   * the same non-shared call would. A per-*request*
+   * {@link RequestConfig.timeout}, by contrast, bounds the shared request
+   * itself for everyone.
    * A call whose params are a special body type — `FormData`, `Blob`,
    * `ArrayBuffer`, `URLSearchParams`, or a raw string — is also never shared:
    * the stable serialisation used for identity can't distinguish two
@@ -217,6 +223,12 @@ export interface RequestConfig {
    * A timeout produces an error with `kind: 'timeout'` and `status: 0`.
    * `result.retry()` starts a fresh budget. Non-positive or omitted means no
    * timeout.
+   *
+   * Under {@link RequestConfig.share} this deadline belongs to the *operation*:
+   * it bounds the single shared request, measured from when that request
+   * started rather than from when each caller joined, so every sharer is
+   * bounded by it and no individual caller can extend or disable it. A caller's
+   * own {@link CallOptions.timeout} bounds only that caller.
    */
   timeout?: number
 }
@@ -328,6 +340,15 @@ export interface CallOptions {
   /**
    * Overrides `RequestConfig.timeout` for this call only. Same whole-operation
    * deadline semantics — see there for details. Non-positive means no timeout.
+   *
+   * Under `share: true` this bounds only *this* caller's wait. The operation's
+   * own `RequestConfig.timeout` still bounds the shared request for everyone,
+   * so a per-call `timeout: 0` cannot lift it and a longer per-call timeout
+   * cannot outlast it.
+   *
+   * A fractional or out-of-range value is normalised rather than rejected:
+   * rounded down to whole milliseconds, clamped to the platform timer ceiling,
+   * and treated as "no timeout" if it is `NaN` or non-positive.
    */
   timeout?: number
 }

@@ -717,7 +717,8 @@ A few more details:
 - A timeout produces an error with `status: 0` and `kind: 'timeout'` — distinguishable from a caller-initiated cancellation (`kind: 'abort'`) and from a genuine network failure (`kind: 'network'`).
 - `result.retry()` always starts a fresh deadline. A retried call is not charged against the original budget.
 - Non-positive or omitted `timeout` disables it entirely (the default).
-- `timeout` composes with `dedupe: true` and `share: true` — it is merged with the dedupe/share signal rather than discarded by either.
+- `timeout` composes with `dedupe: true` — the deadline is merged with the dedupe signal rather than discarded by it.
+- Under `share: true` the two timeouts have different owners. `RequestConfig.timeout` belongs to the *operation*: it bounds the one shared request for every caller, measured from when that request started, so a single caller can neither extend it nor disable it with a per-call `timeout: 0`. `CallOptions.timeout` bounds only the caller that passed it — see [Sharing](#sharing).
 
 ### Sharing
 
@@ -746,7 +747,9 @@ const [a, b] = await Promise.all([
 - A per-call `headers` or `middleware` — these change *what* is requested, so handing that caller another caller's response would be a real bug, not just a missed optimization. A call carrying either always gets its own, unshared request.
 - Params that are a special body type — `FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`, or a raw `string` — are never coalesced. The stable serialization used to build the share key can't distinguish two different payloads of these types from each other (it falls back to `Object.keys()`, which is empty for all of them), so two different `FormData` uploads would otherwise collide on the same key and one caller could receive the response meant for the other's payload entirely. Declining to share is always safe; handing back the wrong response never is.
 
-**What does *not* disable sharing:** a per-call `signal` or `timeout`. These bound *who is still waiting*, not *what is being asked for*, so they're tracked with a per-caller refcount instead: each sharer's own signal/timeout only removes that caller from the wait list. The underlying request keeps running for everyone else, and is only aborted once every sharer — including the one that gave up — has stopped waiting.
+**What does *not* disable sharing:** a per-call `signal` or `timeout`. These bound *who is still waiting*, not *what is being asked for*, so they're tracked with a per-caller refcount instead: each sharer's own signal/timeout only removes that caller from the wait list. The underlying request keeps running for everyone else, and is only aborted once every sharer — including the one that gave up — has stopped waiting. A sharer that gives up gets an error `Result` (`kind: 'timeout'` or `kind: 'abort'`) and, like any other failing call, reports it to `onError`.
+
+**A per-*request* `timeout` is different: it belongs to the operation.** `RequestConfig.timeout` bounds the single shared request itself, measured from when that request started — not from when each caller joined it. Every sharer is therefore bounded by it, a late joiner cannot extend it, and a caller passing `timeout: 0` cannot switch it off for everyone else. Without that, a steadily arriving stream of joiners would keep one socket open indefinitely against a deadline that was supposed to cap it.
 
 ```ts
 const impatient = api.getProduct({ id: '42' }, { timeout: 20 })   // gives up quickly
@@ -929,7 +932,17 @@ const mock = mockFetch({
 })
 ```
 
-`mock.calls` records every request (`{ method, url, headers, body }`); `mock.callCount('GET /api/users/:id')` and `mock.lastCall(...)` key off the same `"METHOD /path"` strings as the routes object. An unmatched request throws immediately, naming the method, URL, and the routes that were defined — a mocked test should fail loudly on a typo'd path, not silently 404.
+`mock.calls` records every request (`{ method, url, headers, body }`); `mock.callCount('GET /api/users/:id')` and `mock.lastCall(...)` key off the same `"METHOD /path"` strings as the routes object.
+
+An unmatched request makes the stub throw rather than invent a 404 — a mocked test should not quietly pass for a typo'd path. Note what your code actually sees, though: the library catches every `fetch` rejection by design, so that throw arrives as an ordinary `Result` with `error.kind === 'network'` and the `Error` itself as `error.body`, whose message names the method, the URL, and every route that was defined. Assert on the result (or read it in `onError`); do not expect the call to reject.
+
+```ts
+const r = await api.getUser({ id: '42' })   // routes only define 'GET /api/user/:id'
+expect(r.error?.kind).toBe('network')
+expect(String(r.error?.body)).toMatch(/no route matched GET \/api\/users\/42/)
+```
+
+An empty response array for a route behaves the same way — a descriptive `Error` reaching you as `error.body`, not a bare `TypeError`.
 
 For stubbing at the `Result` level instead of the `fetch` level, `successResult(data)` and `errorResult(status, body)` build a well-formed `Result` directly (shown here with Vitest's `vi.spyOn`, but any runner's equivalent works the same way):
 
@@ -943,6 +956,7 @@ vi.spyOn(api, 'getUser').mockResolvedValue(errorResult(404, { message: 'not foun
 Three behaviors worth knowing:
 
 - **`restore()` assumes `globalThis.fetch` was defined when `install()` ran** — true on Node 20+ (and in every browser), since `fetch` is a global there. If you somehow call `install()` in an environment where `globalThis.fetch` is `undefined` beforehand, `restore()` puts back that `undefined` rather than inventing a real `fetch`.
+- **A route key must be `"METHOD /path"`.** A key with no space (`'/users'`) throws at `mockFetch(...)` time, naming the offending key, rather than silently registering a route that can never match.
 - **Declaration order decides when two same-length routes could both match.** Routes are matched in the order they appear in the object you pass to `mockFetch`, and the first structural match wins — put more specific routes first if two patterns could both match the same path.
 - **Trailing and duplicate slashes are normalized away on both sides.** `/a/b/`, `/a//b`, and `/a/b` all match the same route, whether the extra slash is in the route key or in the URL the library actually built.
 
@@ -980,7 +994,7 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 | `ApiErrorKind`  | type     | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse'` -- discriminates `ApiError.kind` |
 | `RequestConfig` | type     | Config object for the `Request` constructor                        |
 | `ApiConfig`     | type     | Config object for `createApi`                                      |
-| `CallOptions`   | type     | Per-call overrides (middleware, headers, signal)                   |
+| `CallOptions`   | type     | Per-call overrides (`middleware`, `skipMiddleware`, `headers`, `signal`, `timeout`) |
 | `Result`        | type     | Return shape of every API call: `{ data, error, response, retry }` |
 | `Middleware`    | type     | Middleware function signature: `(ctx, next) => Promise<Result>`    |
 | `MiddlewareContext` | type | Request context passed to middleware                               |
