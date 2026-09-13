@@ -38,6 +38,8 @@
 // whichever newer request replaced it — see clear()'s doc comment below.
 // =============================================================================
 
+import { anySignal } from './any-signal.js'
+
 /**
  * Tracks in-flight requests by key and auto-aborts previous calls when a new
  * one starts for the same key. This prevents stale responses from overwriting
@@ -124,31 +126,15 @@ export class DedupeTracker {
     // Step 3: Merge with external signal (if provided)
     // -------------------------------------------------------------------------
     // The external signal comes from the caller (e.g., CallOptions.signal).
-    // We need to propagate its abort to our internal controller so that the
-    // fetch is cancelled from the caller's perspective too.
-    //
-    // Two cases to handle:
-    // a) The external signal is ALREADY aborted — abort immediately
-    // b) The external signal is NOT yet aborted — listen for the abort event
-    if (externalSignal) {
-      if (externalSignal.aborted) {
-        // Case (a): The caller's signal was already aborted before we even
-        // started. This can happen if a component unmounted between the time
-        // the API call was queued and when it actually starts executing.
-        // We abort immediately — no point starting a fetch that's DOA.
-        controller.abort()
-      } else {
-        // Case (b): The caller's signal is still active. Set up a one-time
-        // listener so that when it aborts in the future, our controller
-        // also aborts. Using { once: true } ensures the listener is cleaned
-        // up automatically after firing, preventing memory leaks.
-        externalSignal.addEventListener('abort', () => controller.abort(), { once: true })
-      }
-    }
+    // Merge the caller's signal so cancellation flows from both directions:
+    // this tracker aborts when a newer request supersedes, and the caller's
+    // own signal aborts when they give up. anySignal carries the reason
+    // through, so a TimeoutError does not degrade into a plain AbortError.
+    const signal = anySignal([controller.signal, externalSignal]) ?? controller.signal
 
     // Return the controller alongside the signal so the caller can pass it
     // back to clear() and prove ownership — see clear()'s identity check.
-    return { signal: controller.signal, controller }
+    return { signal, controller }
   }
 
   /**
