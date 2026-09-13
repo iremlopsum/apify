@@ -429,13 +429,24 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // so a retry sequence draws from a single budget rather than getting
           // a fresh one per attempt.
           //
-          // Skip the allocation entirely when overrideSignal is supplied (the
-          // share path): AbortSignal.timeout() starts a real timer, and
-          // `overrideSignal ?? ...` would never evaluate the right-hand side
-          // anyway, so computing it first would just be a wasted timer.
-          const timeoutSignal = overrideSignal ? undefined : timeoutSignalFor(options.timeout, request.config.timeout)
-          const callerSignal: AbortSignal | undefined =
-            overrideSignal ?? anySignal([options.signal, timeoutSignal])
+          // Under `share` (overrideSignal supplied) only the *per-request*
+          // deadline applies here, merged with the refcount signal rather than
+          // replacing it. `RequestConfig.timeout` is a property of the
+          // operation — "this endpoint must answer within 5s" — so it belongs
+          // to the one real request every sharer is waiting on, and is measured
+          // from when that request started. Suppressing it here instead, and
+          // applying it per-caller at the share site, is what let a steady
+          // arrival of joiners hold one socket open indefinitely: each new
+          // joiner's clock started at *its* join time, and the request itself
+          // had no deadline at all.
+          //
+          // `CallOptions.timeout` is deliberately absent from this branch: a
+          // single caller's patience must not shorten (or lengthen) the shared
+          // operation for everyone else, so it is observed per-caller at the
+          // share site instead.
+          const callerSignal: AbortSignal | undefined = overrideSignal
+            ? anySignal([overrideSignal, timeoutSignalFor(undefined, request.config.timeout)])
+            : anySignal([options.signal, timeoutSignalFor(options.timeout, request.config.timeout)])
           let dedupeController: AbortController | undefined
 
           // -----------------------------------------------------------------
@@ -761,12 +772,16 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
 
         const shareKey = `${name}|${stableStringify(params)}`
 
-        // This caller's own signal/timeout, kept entirely separate from the
-        // signal the real fetch runs on. It bounds only whether THIS caller
-        // keeps waiting — it must never reach into the shared request itself.
-        // Computed before acquire() so a throw from here cannot strand a shared
-        // request that this caller then never releases.
-        const perCaller = anySignal([options.signal, timeoutSignalFor(options.timeout, request.config.timeout)])
+        // This caller's own signal and per-call timeout, kept entirely separate
+        // from the signal the real fetch runs on. It bounds only whether THIS
+        // caller keeps waiting — it must never reach into the shared request.
+        //
+        // Deliberately *not* `request.config.timeout`: that one belongs to the
+        // operation, is shared by every caller, and is applied inside execute()
+        // against the request's own start time. Computed before acquire() so a
+        // throw from here cannot strand a shared request that this caller then
+        // never releases.
+        const perCaller = anySignal([options.signal, timeoutSignalFor(options.timeout, undefined)])
 
         // acquire() either starts the real request (first caller — exec is
         // called with the tracker's own refcounted signal, which becomes the

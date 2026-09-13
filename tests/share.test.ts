@@ -315,4 +315,58 @@ describe('share', () => {
     expect((await cancelled).error?.kind).toBe('abort')
     expect(kinds).toEqual(['abort'])
   })
+
+  // ---------------------------------------------------------------------------
+  // I2: RequestConfig.timeout is documented as a whole-operation deadline and
+  // specified as "a property of the operation itself, therefore shared by all
+  // callers". It was neither: the share path suppressed it inside execute()
+  // and applied it per-caller instead, measured from each caller's *join*
+  // time. With a steady arrival of joiners the one real socket was never
+  // released — measured at 1086ms against a configured 100ms deadline.
+  // ---------------------------------------------------------------------------
+  it('bounds the shared operation with the per-request timeout, even for a more patient caller', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        get: new Request<{ id: string }, { ok: number }>({ method: 'GET', path: '/x/:id', share: true, timeout: 30 }),
+      },
+    })
+
+    // This caller asks for far more patience than the operation allows. Its own
+    // budget bounds only itself; it cannot extend the operation's deadline.
+    const started = Date.now()
+    const r = await api.get({ id: '1' }, { timeout: 2000 })
+
+    expect(r.error?.kind).toBe('timeout')
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(f.calls[0].aborted()).toBe(true)   // the shared request itself was cut off
+  })
+
+  it('does not let a late joiner extend the shared operation deadline', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        get: new Request<{ id: string }, { ok: number }>({ method: 'GET', path: '/x/:id', share: true, timeout: 100 }),
+      },
+    })
+
+    const started = Date.now()
+    const first = api.get({ id: '1' })
+    await Promise.resolve()
+    await new Promise(r => setTimeout(r, 60))
+
+    // Joins the request already in flight, 60ms into its 100ms budget. Its own
+    // generous per-call budget must not keep that socket alive past the
+    // operation's deadline.
+    const late = api.get({ id: '1' }, { timeout: 2000 })
+    await Promise.resolve()
+    expect(f.fn.mock.calls.length).toBe(1)    // still one shared request
+
+    const [a, b] = await Promise.all([first, late])
+    expect(a.error?.kind).toBe('timeout')
+    expect(b.error?.kind).toBe('timeout')
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
 })
