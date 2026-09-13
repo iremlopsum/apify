@@ -12,6 +12,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { ApiError, createSuccessResult, createErrorResult, createNetworkErrorResult } from '../src/result.js'
+import type { Result } from '../src/types.js'
 
 describe('ApiError', () => {
   it('stores HTTP error properties', () => {
@@ -55,7 +56,7 @@ describe('createSuccessResult', () => {
   it('returns data with null error', () => {
     // Success results should have data populated, error null, and the raw Response
     const mockResponse = new Response('{}', { status: 200 })
-    const retryFn = () => Promise.resolve(createSuccessResult({ id: 1 }, mockResponse, retryFn))
+    const retryFn = (): Promise<Result<{ id: number }>> => Promise.resolve(createSuccessResult({ id: 1 }, mockResponse, retryFn))
     const result = createSuccessResult({ id: 1 }, mockResponse, retryFn)
 
     expect(result.data).toEqual({ id: 1 })
@@ -77,7 +78,7 @@ describe('createErrorResult', () => {
       headers: new Headers(),
       request: { method: 'GET', url: '/test', params: {} }
     })
-    const retryFn = () => Promise.resolve(createErrorResult(error, mockResponse, retryFn))
+    const retryFn = (): Promise<Result<unknown>> => Promise.resolve(createErrorResult(error, mockResponse, retryFn))
     const result = createErrorResult(error, mockResponse, retryFn)
 
     expect(result.data).toBeNull()
@@ -97,7 +98,7 @@ describe('createNetworkErrorResult', () => {
       headers: new Headers(),
       request: { method: 'GET', url: '/test', params: {} }
     })
-    const retryFn = () => Promise.resolve(createNetworkErrorResult(error, retryFn))
+    const retryFn = (): Promise<Result<unknown>> => Promise.resolve(createNetworkErrorResult(error, retryFn))
     const result = createNetworkErrorResult(error, retryFn)
 
     expect(result.data).toBeNull()

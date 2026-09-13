@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { Operation, gql, createGraphQL } from '../src/graphql.js'
+import type { Middleware } from '../src/types.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -371,9 +372,9 @@ describe('createGraphQL — onError callback', () => {
 describe('createGraphQL — middleware', () => {
   it('runs global → per-operation → per-call middleware in order', async () => {
     const order: string[] = []
-    const globalMw = vi.fn(async (_ctx: unknown, next: () => Promise<unknown>) => { order.push('global'); return next() })
-    const opMw = vi.fn(async (_ctx: unknown, next: () => Promise<unknown>) => { order.push('operation'); return next() })
-    const callMw = vi.fn(async (_ctx: unknown, next: () => Promise<unknown>) => { order.push('call'); return next() })
+    const globalMw = vi.fn<Middleware>(async (_ctx, next) => { order.push('global'); return next() })
+    const opMw = vi.fn<Middleware>(async (_ctx, next) => { order.push('operation'); return next() })
+    const callMw = vi.fn<Middleware>(async (_ctx, next) => { order.push('call'); return next() })
 
     const op = new Operation<Record<string, never>, { ok: boolean }>({
       operation: gql`query { health }`,
@@ -405,7 +406,7 @@ describe('createGraphQL — middleware', () => {
     })
     vi.stubGlobal('fetch', mockFetch)
 
-    const authMw = vi.fn(async (ctx: { request: { headers: Headers } }, next: () => Promise<unknown>) => {
+    const authMw = vi.fn<Middleware>(async (ctx, next) => {
       ctx.request.headers.set('Authorization', 'Bearer token123')
       return next()
     })
@@ -423,7 +424,7 @@ describe('createGraphQL — middleware', () => {
   })
 
   it('skipMiddleware excludes middleware by reference', async () => {
-    const mw = vi.fn(async (_ctx: unknown, next: () => Promise<unknown>) => next())
+    const mw = vi.fn<Middleware>(async (_ctx, next) => next())
     const op = new Operation<Record<string, never>, { ok: boolean }>({
       operation: gql`query { health }`,
     })
@@ -464,7 +465,7 @@ describe('createGraphQL — retry()', () => {
       })
     }))
 
-    const mw = vi.fn(async (_ctx: unknown, next: () => Promise<unknown>) => next())
+    const mw = vi.fn<Middleware>(async (_ctx, next) => next())
 
     const client = createGraphQL({
       endpoint: 'https://api.example.com/graphql',
