@@ -30,7 +30,8 @@
     "test:run": "vitest run",
     "test:integration": "vitest run --config vitest.integration.ts",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck && npm run test:run && npm run test:integration && npm run build"
+    "test:types": "vitest run --typecheck",
+    "prepublishOnly": "npm run typecheck && npm run test:types && npm run test:run && npm run test:integration && npm run build"
   },
   "repository": {
     "type": "git",
