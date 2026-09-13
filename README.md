@@ -7,6 +7,7 @@ Runtime-agnostic, type-safe HTTP client for REST and GraphQL. Built on standard 
 - **Composable middleware** — retry, cache, dedupe, auth, logging — applied at global, per-endpoint, or per-call level
 - **Types by inference** — declare params and response once on the endpoint definition; types flow to every call site automatically
 - **Runtime-agnostic** — Node.js 20+, browsers, Bun, Deno, Cloudflare Workers, React Native — any environment with `fetch`
+- **Tiny** — about **2 kB gzipped** for a REST-only import, 3.2 kB for everything including GraphQL and all middleware; tree-shaking drops what you do not import
 
 ```
 npm install @iremlopsum/apify
@@ -367,7 +368,25 @@ The context object passed to each middleware:
 | `request.params`      | `unknown` | Original params object from the caller                   |
 | `request.headers`     | `Headers` | Merged headers -- middleware can add/remove entries       |
 | `request.body`        | `unknown` | Serialized body, or null for GET/DELETE                  |
+| `request.signal`      | `AbortSignal \| undefined` | The signal handed to `fetch` -- replace it to impose your own cancellation policy |
 | `requestName`         | `string`  | Key name in the requests object (e.g., 'getUser')        |
+
+`request.signal` holds whatever the caller passed as `options.signal`, so it is `undefined` when they passed none. The core fetch reads the field at call time, so replacing it takes effect -- that is all a timeout middleware needs:
+
+```ts
+const timeout = (ms: number): Middleware => async (ctx, next) => {
+  ctx.request.signal = AbortSignal.timeout(ms)
+  return next()
+}
+
+const api = createApi({
+  baseUrl: '/api',
+  requests: { getUser },
+  middleware: [timeout(5000)]
+})
+```
+
+Under `dedupe: true` your signal is merged rather than discarded: the request is cancelled by whichever fires first -- your signal, or a newer call superseding this one. The dedupe signal is installed by the core fetch, so middleware reading `ctx.request.signal` before `next()` sees the caller's signal, not the dedupe one.
 
 #### Writing custom middleware
 

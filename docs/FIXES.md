@@ -27,7 +27,8 @@ Companion document: [FEATURES.md](./FEATURES.md)
 | 10 | `onError` fires for self-inflicted aborts; aborts indistinguishable from offline | Medium | Yes (behavioural) |
 | 11 | GraphQL discards partial data when `errors` is present | Medium | Yes (behavioural) |
 | 12 | Tooling hygiene: dead eslint-disables, no CI, incomplete `prepublishOnly` | Low | No |
-| —  | [Package size: 222 KB → 77 KB](#package-size) | — | No |
+| 13 | Path param keys are interpolated into a regex unescaped | Medium | No |
+| —  | [Package size: roughly halved, 241 kB → 113 kB](#package-size) | — | No |
 
 Items 1, 5, 10 and 11 are behavioural/type breaking changes. **Batch them into a
 single 3.0.0** rather than shipping them piecemeal.
@@ -452,6 +453,72 @@ it's the one you most want gating a publish.
 
 ---
 
+## 13. Path param keys are interpolated into a regex unescaped
+
+**Severity:** Medium · **Files:** `src/utils/path-params.ts:85`
+
+The substitution loop builds its matcher by pasting the param key straight into
+a regex source string:
+
+```ts
+const pattern = new RegExp(`:${key}(?=[^a-zA-Z0-9_]|$)`, 'g')
+```
+
+The key is caller data. Nothing escapes it, so any regex metacharacter in a key
+is interpreted as syntax rather than matched literally.
+
+### Evidence
+
+A key containing an unbalanced group is a hard `SyntaxError`:
+
+```ts
+buildUrl('', '/items', { 'a(b': '1' }, true)
+```
+
+```
+SyntaxError: Invalid regular expression: /:a(b(?=[^a-zA-Z0-9_]|$)/g: Unterminated group
+```
+
+A key containing `.` silently matches the wrong token, because `.` is the
+any-character wildcard:
+
+```ts
+buildUrl('', '/u/:userXid', { 'user.id': '42' })
+```
+
+```
+{ url: '/u/42', remaining: {} }
+```
+
+The template asked for `:userXid` and got filled by a param named `user.id`.
+
+### Why it matters
+
+The throw is contained — `createApi` catches synchronous errors and returns a
+network-error `Result`, so the "never throws" contract holds — but the request
+is silently never sent, and the error names a regex the caller never wrote.
+
+The wildcard case is worse than the throw: it produces a plausible-looking URL
+built from the wrong param. Dotted keys are not exotic; they show up wherever
+params are flattened from a nested object.
+
+### Fix
+
+Escape the key before interpolation:
+
+```ts
+const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const pattern = new RegExp(`:${escaped}(?=[^a-zA-Z0-9_]|$)`, 'g')
+```
+
+Note that this changes behaviour for any consumer who is (unknowingly) relying
+on a metacharacter key matching loosely, so it wants a test for the dotted case
+specifically.
+
+**Status:** not fixed — pre-existing, out of scope for 2.1.0.
+
+---
+
 ## Package size
 
 Two different numbers here, and they tell opposite stories.
@@ -462,15 +529,15 @@ Measured with esbuild against the real `dist/`:
 
 | Import | Minified | Gzipped |
 |--------|----------|---------|
-| REST only (`createApi` + `Request`) | 4,180 B | **1,778 B** |
-| Everything (REST + GraphQL + all middleware) | 7,586 B | **2,887 B** |
+| REST only (`createApi` + `Request`) | 4,639 B | **1,988 B** |
+| Everything (REST + GraphQL + all middleware) | 8,312 B | **3,179 B** |
 
 Tree-shaking already drops GraphQL entirely from a REST-only import. **Under
 2 KB gzipped for the core is a headline feature — the README should say so.**
 
 ### The npm package is ~90% waste
 
-222 KB unpacked / 61 KB packed, for 22 KB of actual JavaScript.
+241 kB unpacked / 65 kB packed, for 22 kB of actual JavaScript.
 
 | Component | Bytes | Verdict |
 |-----------|-------|---------|
@@ -518,9 +585,14 @@ separately keeps them. Verified: JSDoc survives intact in the recommended output
 
 | | Unpacked | Packed |
 |---|----------|--------|
-| Current | 222 KB | 61 KB |
-| Recommended | **107 KB** | **~30 KB** |
-| | **−52%** | **−51%** |
+| Current | 240.6 kB | 65.4 kB |
+| Recommended | **112.7 kB** | **31.7 kB** |
+| | **−53%** | **−52%** |
+
+Measured with `npm pack --dry-run` against this branch, building the same
+`src/` both ways. The headline is "roughly halves the package" — the exact
+percentage drifts with every comment added to `src/`, because the old build
+shipped comments and the new one strips them.
 
 Zero DX loss — same hover docs, same types, same tree-shaking, same runtime bytes.
 
@@ -532,7 +604,7 @@ consumer shipping 1.8 KB and 2.9 KB.
 
 ## Suggested order
 
-1. **Size fix** — ~30 minutes, −65%, non-breaking, independent of everything else.
+1. **Size fix** — ~30 minutes, roughly halves the package, non-breaking, independent of everything else.
 2. **Issues 2, 3, 4, 8** — four confirmed bugs, all small, all silent-failure class, all non-breaking.
 3. **Issues 1, 5, 10, 11 + 7** — the breaking batch. Ship as **3.0.0** together, since they all touch `Result`/`ApiError` shape.
 4. **Issue 9** — additive, and it unblocks [Feature 2](./FEATURES.md#2-first-class-timeout).
