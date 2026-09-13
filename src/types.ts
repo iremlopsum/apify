@@ -21,8 +21,8 @@
 // reference it without creating a circular dependency at runtime.
 // At runtime, modules that need the actual class import directly from result.ts.
 // ---------------------------------------------------------------------------
-import type { ApiError } from './result.js'
-export type { ApiError }
+import type { ApiError, ApiErrorKind } from './result.js'
+export type { ApiError, ApiErrorKind }
 
 // ---------------------------------------------------------------------------
 // HTTP Method
