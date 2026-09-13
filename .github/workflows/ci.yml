@@ -5,6 +5,19 @@ on:
     branches: [main]
   pull_request:
 
+# The workflow only reads the repository — it publishes nothing and opens no
+# issues or comments. Pinning the token down to that is the default-deny
+# posture GitHub recommends for third-party actions.
+permissions:
+  contents: read
+
+# Superseded runs for the same branch or PR are wasted CI minutes: only the
+# newest push can still be merged. Keyed on the ref so main and each PR queue
+# independently.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
