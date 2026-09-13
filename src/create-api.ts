@@ -38,7 +38,7 @@
 import { Request } from './request.js'
 import { ApiError, createSuccessResult, createErrorResult, createNetworkErrorResult } from './result.js'
 import { composeMiddleware } from './middleware.js'
-import { buildUrl } from './utils/path-params.js'
+import { buildUrl, joinUrl } from './utils/path-params.js'
 import { serializeBody } from './utils/serialize.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
@@ -577,7 +577,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             statusText: '',
             body: err,
             headers: new Headers(),
-            request: { method: request.config.method, url: `${baseUrl}${request.config.path}`, params }
+            request: { method: request.config.method, url: joinUrl(baseUrl, request.config.path), params }
           })
 
           // Fire onError for synchronous errors too — they're still errors

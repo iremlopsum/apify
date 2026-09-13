@@ -233,9 +233,10 @@ describe('dedupe', () => {
     })
     const api = createApi({ baseUrl: server.baseUrl, requests: { hello } })
 
-    // Both calls are dispatched synchronously. The second call's dedupeTracker.track()
-    // aborts the first signal before fetch is even called, so the first request
-    // immediately fails with a network error (status 0).
+    // Both calls are dispatched synchronously. Registration happens at the top
+    // of core(), so the first request has already reached fetch by the time the
+    // second call's dedupeTracker.track() aborts its signal — it is cancelled
+    // mid-flight and surfaces as a network error (status 0).
     const p1 = api.hello()
     const p2 = api.hello()
     const [r1, r2] = await Promise.all([p1, p2])
@@ -335,5 +336,26 @@ describe('retry()', () => {
     expect(second.error?.status).toBe(503)
     // retry() made a second real HTTP request — not a cached replay
     expect(server.callCounts.get('GET /status/503')).toBe(2)
+  })
+})
+
+describe('baseUrl joining', () => {
+  it('a trailing slash on baseUrl reaches the server as a single slash', async () => {
+    // Every other test of this fix inspects the string the library builds.
+    // This one asks the server what it actually received: callCounts is keyed
+    // on the parsed pathname, so a doubled slash would register as '//hello'
+    // and leave 'GET /hello' at zero.
+    const hello = new Request<Record<string, never>, { message: string }>({
+      method: 'GET',
+      path: '/hello',
+    })
+    const api = createApi({ baseUrl: `${server.baseUrl}/`, requests: { hello } })
+
+    const { data, error } = await api.hello()
+
+    expect(error).toBeNull()
+    expect(data).toEqual({ message: 'hello' })
+    expect(server.callCounts.get('GET /hello')).toBe(1)
+    expect(server.callCounts.get('GET //hello')).toBeUndefined()
   })
 })
