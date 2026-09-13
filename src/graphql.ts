@@ -3,6 +3,7 @@ import { composeMiddleware } from './middleware.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
 import { abortKind } from './utils/is-abort-error.js'
+import { anySignal } from './utils/any-signal.js'
 import type { CallOptions, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -100,7 +101,13 @@ export function createGraphQL(config: any): any {
           // dedupeController doubles as the "already registered" flag: it is
           // set on the first attempt that reaches core() and survives across
           // retries, which keeps registration once per execute().
-          const callerSignal: AbortSignal | undefined = options.signal
+          // Resolve the deadline: per-call beats per-operation, and non-positive
+          // means none. The signal is created once here — not inside core() —
+          // so a retry sequence draws from a single budget rather than getting
+          // a fresh one per attempt.
+          const timeoutMs = options.timeout ?? operation.config.timeout ?? 0
+          const timeoutSignal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
+          const callerSignal: AbortSignal | undefined = anySignal([options.signal, timeoutSignal])
           let dedupeController: AbortController | undefined
 
           const core = async (ctx: MiddlewareContext): Promise<Result<unknown>> => {

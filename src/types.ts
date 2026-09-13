@@ -154,6 +154,32 @@ export interface RequestConfig {
    * ```
    */
   bodyAs?: 'query' | 'body'
+
+  /**
+   * Abort this request if it has not completed within this many milliseconds.
+   *
+   * **This is a whole-operation deadline, not a per-attempt budget.** It covers
+   * the entire middleware chain including every retry and every backoff delay,
+   * so `timeout: 5000` with `retryMiddleware(3)` still means "an answer within
+   * 5 seconds" — not five seconds per attempt. This deliberately differs from
+   * axios, XHR and `got`, which apply timeouts per attempt.
+   *
+   * For a per-attempt budget, use a signal-replacing middleware placed inside
+   * the retry middleware instead:
+   *
+   * ```ts
+   * const perAttempt = (ms: number): Middleware => async (ctx, next) => {
+   *   ctx.request.signal = AbortSignal.timeout(ms)
+   *   return next()
+   * }
+   * middleware: [retryMiddleware(3), perAttempt(5000)]
+   * ```
+   *
+   * A timeout produces an error with `kind: 'timeout'` and `status: 0`.
+   * `result.retry()` starts a fresh budget. Non-positive or omitted means no
+   * timeout.
+   */
+  timeout?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +285,12 @@ export interface CallOptions {
    * the fetch is aborted and the result contains an error with `status: 0`.
    */
   signal?: AbortSignal
+
+  /**
+   * Overrides `RequestConfig.timeout` for this call only. Same whole-operation
+   * deadline semantics — see there for details. Non-positive means no timeout.
+   */
+  timeout?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +513,18 @@ export interface OperationConfig {
    * @default false
    */
   dedupe?: boolean
+
+  /**
+   * Abort this operation if it has not completed within this many
+   * milliseconds.
+   *
+   * **This is a whole-operation deadline, not a per-attempt budget** — see
+   * {@link RequestConfig.timeout} for the full rationale, which applies
+   * identically here. A timeout produces an error with `kind: 'timeout'` and
+   * `status: 0`. `result.retry()` starts a fresh budget. Non-positive or
+   * omitted means no timeout.
+   */
+  timeout?: number
 }
 
 /**
