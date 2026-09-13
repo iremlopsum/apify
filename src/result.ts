@@ -15,6 +15,22 @@
 import type { Result } from './types.js'
 
 // -----------------------------------------------------------------------------
+// ApiError Kind
+// -----------------------------------------------------------------------------
+
+/**
+ * What category of failure an {@link ApiError} represents.
+ *
+ * Branch on this rather than on `status`: `'network'`, `'abort'` and
+ * `'timeout'` all carry `status: 0`, and they call for completely different
+ * handling — retry, ignore, and report respectively.
+ *
+ * `'parse'` is declared for forward compatibility and is not produced by this
+ * release.
+ */
+export type ApiErrorKind = 'http' | 'network' | 'abort' | 'timeout' | 'parse'
+
+// -----------------------------------------------------------------------------
 // ApiError Options
 // -----------------------------------------------------------------------------
 
@@ -27,6 +43,9 @@ import type { Result } from './types.js'
 interface ApiErrorOptions {
   /** HTTP status code (e.g., 404, 500). Use 0 for network errors and aborts. */
   status: number
+
+  /** What category of failure this is. Optional for backward compatibility. */
+  kind?: ApiErrorKind
 
   /** HTTP status text (e.g., 'Not Found'). Use '' for network errors and aborts. */
   statusText: string
@@ -99,6 +118,14 @@ export class ApiError {
   /** HTTP status code, or 0 for network errors and aborted requests. */
   readonly status: number
 
+  /**
+   * What category of failure this is.
+   *
+   * `undefined` only if an `ApiError` was constructed without one — every
+   * error the library itself produces sets it.
+   */
+  readonly kind?: ApiErrorKind
+
   /** HTTP status text, or '' for network errors and aborted requests. */
   readonly statusText: string
 
@@ -122,6 +149,7 @@ export class ApiError {
 
   constructor(options: ApiErrorOptions) {
     this.status = options.status
+    this.kind = options.kind
     this.statusText = options.statusText
     this.body = options.body
     this.headers = options.headers

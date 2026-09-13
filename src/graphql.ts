@@ -2,6 +2,7 @@ import { ApiError, createSuccessResult, createErrorResult, createNetworkErrorRes
 import { composeMiddleware } from './middleware.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
+import { abortKind } from './utils/is-abort-error.js'
 import type { CallOptions, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -144,6 +145,7 @@ export function createGraphQL(config: any): any {
                 }
                 const error = new ApiError({
                   status: response.status,
+                  kind: 'http',
                   statusText: response.statusText,
                   body,
                   headers: response.headers,
@@ -160,6 +162,7 @@ export function createGraphQL(config: any): any {
               if (gqlBody?.errors?.length) {
                 const error = new ApiError({
                   status: 200,
+                  kind: 'http',
                   statusText: 'GraphQL Error',
                   body: gqlBody.errors,
                   headers: response.headers,
@@ -172,6 +175,7 @@ export function createGraphQL(config: any): any {
             } catch (err) {
               const error = new ApiError({
                 status: 0,
+                kind: abortKind(err) ?? 'network',
                 statusText: '',
                 body: err,
                 headers: new Headers(),
@@ -217,6 +221,7 @@ export function createGraphQL(config: any): any {
         } catch (err) {
           const error = new ApiError({
             status: 0,
+            kind: 'network',
             statusText: '',
             body: err,
             headers: new Headers(),

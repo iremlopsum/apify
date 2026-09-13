@@ -42,6 +42,7 @@ import { buildUrl, joinUrl } from './utils/path-params.js'
 import { serializeBody } from './utils/serialize.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
+import { abortKind } from './utils/is-abort-error.js'
 import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
 
 // =============================================================================
@@ -380,6 +381,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
 
                 const error = new ApiError({
                   status: response.status,
+                  kind: 'http',
                   statusText: response.statusText,
                   body,
                   headers: response.headers,
@@ -409,6 +411,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // ---------------------------------------------------------------
               const error = new ApiError({
                 status: 0,
+                kind: abortKind(err) ?? 'network',
                 statusText: '',
                 body: err,
                 headers: new Headers(),
@@ -574,6 +577,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // -----------------------------------------------------------------
           const error = new ApiError({
             status: 0,
+            kind: 'network',
             statusText: '',
             body: err,
             headers: new Headers(),

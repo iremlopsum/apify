@@ -2,6 +2,7 @@ import { describe, it, expectTypeOf } from 'vitest'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
 import type { MiddlewareContext, CallOptions } from '../src/types.js'
+import type { ApiErrorKind } from '../src/types.js'
 
 interface User { id: string; name: string }
 
@@ -38,5 +39,11 @@ describe('public type surface', () => {
       requestName: 'test',
     }
     expectTypeOf(ctx.requestName).toEqualTypeOf<string>()
+  })
+})
+
+describe('ApiErrorKind', () => {
+  it('covers every category the library can produce', () => {
+    expectTypeOf<ApiErrorKind>().toEqualTypeOf<'http' | 'network' | 'abort' | 'timeout' | 'parse'>()
   })
 })
