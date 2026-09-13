@@ -35,12 +35,19 @@ export type { RetryOptions, RetryInfo } from './types.js'
  * threading an exception through a middleware that must not throw — so on
  * abort the promise simply resolves early, and the retry loop re-checks the
  * signal itself to decide whether to stop.
+ *
+ * The abort listener is removed on both paths — timer-elapsed and
+ * abort-fired — so a long retry sequence does not accumulate one listener
+ * per attempt on `ctx.request.signal` (the same class of leak fixed in
+ * `anySignal` previously).
  */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise(resolve => {
     if (signal?.aborted) return resolve()
-    const timer = setTimeout(resolve, ms)
-    signal?.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+    const cleanup = (): void => { signal?.removeEventListener('abort', onAbort) }
+    const onAbort = (): void => { clearTimeout(timer); cleanup(); resolve() }
+    const timer = setTimeout(() => { cleanup(); resolve() }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
   })
 }
 
@@ -48,14 +55,18 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  * Parses a `Retry-After` header value in either wire format defined by the
  * HTTP spec — delta-seconds (`"120"`) or an HTTP-date (`"Wed, 21 Oct ...
  * GMT"`). Returns the delay in milliseconds, or `null` if the value is
- * missing or unparseable in both formats (so the caller can fall back to
- * the computed backoff instead of retrying with `NaN` or throwing).
+ * missing, blank, or unparseable in both formats (so the caller can fall
+ * back to the computed backoff instead of retrying with `NaN`, throwing, or
+ * — for a whitespace-only value, which `Number()` coerces to `0` — silently
+ * retrying immediately).
  */
 function parseRetryAfter(value: string | null): number | null {
   if (!value) return null
-  const seconds = Number(value)
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const seconds = Number(trimmed)
   if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000
-  const when = Date.parse(value)
+  const when = Date.parse(trimmed)
   if (Number.isNaN(when)) return null
   return Math.max(0, when - Date.now())
 }
@@ -163,8 +174,31 @@ export function retryMiddleware(options: number | RetryOptions = 3): Middleware 
   const respectRetryAfter = o.respectRetryAfter ?? true
   const retryOn = o.retryOn ?? ((r: Result<unknown>) => (r.error?.status ?? 0) >= 500)
 
+  // A user-supplied predicate must never be able to break the never-throws
+  // contract. If it throws we cannot know whether to retry, so we stop —
+  // the conservative choice, since retrying on an unknown is how you turn one
+  // failure into several. (The natural, unguarded predicate — `r =>
+  // r.error.status >= 500` without optional chaining — throws on every
+  // success, where `r.error` is null, so this is trivially reachable.)
+  const shouldRetry = (r: Result<unknown>, attempt: number): boolean => {
+    try {
+      return retryOn(r, attempt)
+    } catch {
+      return false
+    }
+  }
+
   const computeDelay = (attempt: number): number => {
-    if (typeof curve === 'function') return curve(attempt)
+    if (typeof curve === 'function') {
+      // Likewise for a custom curve: fall back to the exponential default
+      // rather than propagating, so a bad curve degrades to a sane delay
+      // instead of failing the request.
+      try {
+        return curve(attempt)
+      } catch {
+        return baseDelay * 2 ** (attempt - 1)
+      }
+    }
     return curve === 'linear' ? baseDelay * attempt : baseDelay * 2 ** (attempt - 1)
   }
 
@@ -179,12 +213,12 @@ export function retryMiddleware(options: number | RetryOptions = 3): Middleware 
     // `attempt` field reported on `RetryInfo` and passed to `retryOn`.
     let attempt = 0
 
-    // `retryOn` is always consulted with the candidate next attempt number —
-    // even once `max` is reached — so a predicate that counts attempts (or
-    // otherwise observes every call) sees a call per result, not one fewer.
-    // The `max` cap is enforced separately, after asking, so it never
-    // suppresses that final observation.
-    while (retryOn(result, attempt + 1)) {
+    // `retryOn` (guarded as `shouldRetry`) is always consulted with the
+    // candidate next attempt number — even once `max` is reached — so a
+    // predicate that counts attempts (or otherwise observes every call) sees
+    // a call per result, not one fewer. The `max` cap is enforced separately,
+    // after asking, so it never suppresses that final observation.
+    while (shouldRetry(result, attempt + 1)) {
       if (attempt >= max) break
       attempt++
 
