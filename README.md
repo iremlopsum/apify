@@ -6,7 +6,7 @@ Runtime-agnostic, type-safe HTTP client for REST and GraphQL. Built on standard 
 - **Never throws** — every call returns `{ data, error, response, retry }`, no try/catch required
 - **Composable middleware** — retry, cache, dedupe, auth, logging — applied at global, per-endpoint, or per-call level
 - **Types by inference** — declare params and response once on the endpoint definition; types flow to every call site automatically
-- **Runtime-agnostic** — Node.js 18+, browsers, Bun, Deno, Cloudflare Workers, React Native — any environment with `fetch`
+- **Runtime-agnostic** — Node.js 20+, browsers, Bun, Deno, Cloudflare Workers, React Native — any environment with `fetch`
 
 ```
 npm install @iremlopsum/apify
@@ -714,7 +714,7 @@ Type safety comes from inference, not annotation. Define `Request<TParams, TResp
 
 ### Runtime-agnostic
 
-No assumptions about Node.js, browsers, or any specific runtime. If your environment has `fetch`, the library works -- browsers, Node.js 18+, Bun, Deno, React Native, Cloudflare Workers, edge runtimes.
+No assumptions about Node.js, browsers, or any specific runtime. If your environment has `fetch`, the library works -- browsers, Node.js 20+, Bun, Deno, React Native, Cloudflare Workers, edge runtimes.
 
 ## API Reference
 
