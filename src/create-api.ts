@@ -281,10 +281,17 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // -----------------------------------------------------------------
           // Step 2: Compute the effective abort signal
           // -----------------------------------------------------------------
-          // The caller's signal is the starting point. When dedupe is enabled
+          // The caller's signal is the starting point, and it is what the
+          // context carries into the middleware chain. When dedupe is enabled
           // the real registration happens inside core() — see below — so that
           // a middleware which short-circuits (a cache hit) never cancels a
-          // live request that is genuinely in flight.
+          // live request that is genuinely in flight, and so that a signal
+          // installed by middleware is an input to dedupe rather than
+          // something dedupe overwrites.
+          //
+          // dedupeController doubles as the "already registered" flag: it is
+          // set on the first attempt that reaches core() and survives across
+          // retries, which keeps registration once per execute().
           // -----------------------------------------------------------------
           const callerSignal: AbortSignal | undefined = options.signal
           let dedupeController: AbortController | undefined
@@ -308,17 +315,27 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // -----------------------------------------------------------------
           const core = async (ctx: MiddlewareContext): Promise<Result<unknown>> => {
             try {
-              // Register with the dedupe tracker only now — we are committed
-              // to sending a request. Any middleware that short-circuits above
-              // us returned without reaching this point, so it cannot cancel
-              // a live request.
+              // Register with the dedupe tracker on the first attempt that
+              // reaches core() — we are committed to sending a request. Any
+              // middleware that short-circuits above us returned without
+              // reaching this point, so it cannot cancel a live request.
               //
-              // retryMiddleware calls next() repeatedly, so this may run more
-              // than once per execute(). Each run supersedes the previous
-              // controller, whose request has already settled — the abort is a
-              // no-op. That is the intended behaviour.
-              if (request.config.dedupe) {
-                const tracked = dedupeTracker.track(name, callerSignal)
+              // The `!dedupeController` guard makes this once per execute(),
+              // not once per attempt. retryMiddleware calls next() repeatedly;
+              // if every attempt re-registered, an older request's retry would
+              // abort a newer call for the same endpoint — the exact inverse
+              // of dedupe's newest-wins contract. Registering once also means
+              // a request that has been superseded stays cancelled: its retry
+              // reuses the signal the newer call aborted.
+              //
+              // The signal we hand to track() is ctx.request.signal, not the
+              // caller's: a middleware may have installed its own (a timeout,
+              // a deadline), and dedupe must merge that rather than discard
+              // it. Because registration happens only once, that field still
+              // holds a live signal here — never a previous attempt's already
+              // aborted dedupe signal.
+              if (request.config.dedupe && !dedupeController) {
+                const tracked = dedupeTracker.track(name, ctx.request.signal ?? callerSignal)
                 dedupeController = tracked.controller
                 ctx.request.signal = tracked.signal
               }
