@@ -18,6 +18,8 @@
   },
   "files": [
     "dist",
+    "CHANGELOG.md",
+    "MIGRATION.md",
     "LICENSE",
     "README.md"
   ],

@@ -120,5 +120,32 @@ one exception called out under Removed: the supported Node floor moves to 20.
 
 - `@types/node` pinned to `^22` to match the Node 22 runtime target
 
+## [1.0.0] — 2026-04-01
+
+Initial release of the rewritten client. Reconstructed from the release commit
+(`e996cf3`), which predates per-feature changelog entries.
+
+### Added
+
+- `createApi` — factory turning a record of `Request` definitions into a typed,
+  callable API object, with per-call options for middleware, headers and signals
+- `Request` — typed endpoint definition carrying method, path template,
+  middleware, headers, response type and body-serialisation strategy
+- `Result<T>` — `{ data, error, response, retry }` returned by every call; the
+  library never throws
+- `ApiError` — structured error with status, body, headers and request metadata.
+  Deliberately not an `Error` subclass
+- Middleware onion (`composeMiddleware`) with three layers — global,
+  per-request, per-call — plus `skipMiddleware` for per-call opt-out
+- Built-in `retryMiddleware` (5xx only) and `logMiddleware`, on the
+  `./middleware` entry point
+- Request deduplication (`dedupe: true`), auto-cancelling a previous in-flight
+  call to the same endpoint
+- Path parameter substitution and query-string building
+- Body serialisation for JSON, `FormData`, `URLSearchParams`, `Blob`,
+  `ArrayBuffer` and strings
+- Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
+
 [2.1.0]: https://github.com/iremlopsum/apify/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/iremlopsum/apify/compare/v1.0.0...v2.0.0
+[1.0.0]: https://github.com/iremlopsum/apify/releases/tag/v1.0.0
