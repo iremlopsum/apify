@@ -158,20 +158,35 @@ describe('abort signal on the middleware context', () => {
   })
 
   it('a middleware can implement a timeout by replacing the signal', async () => {
+    const seen: (AbortSignal | undefined)[] = []
     vi.stubGlobal('fetch', vi.fn((_u: string, init: RequestInit) => new Promise((_res, rej) => {
-      ;(init.signal as AbortSignal).addEventListener('abort', () => rej(new DOMException('Aborted', 'AbortError')))
+      const signal = init.signal as AbortSignal | undefined
+      seen.push(signal)
+      // Fail loudly and immediately if no signal arrived, so this test cannot
+      // pass by way of an incidental crash the way its predecessor did.
+      if (!signal) {
+        rej(new Error('no signal reached fetch'))
+        return
+      }
+      signal.addEventListener('abort', () => rej(signal.reason))
     })))
-    const timeoutMw = (ms: number) => async (ctx: any, next: any) => {
+
+    const timeoutMw = (ms: number): Middleware => async (ctx, next) => {
       ctx.request.signal = AbortSignal.timeout(ms)
       return next()
     }
+
     const api = createApi({
       baseUrl: '',
       middleware: [timeoutMw(20)],
       requests: { g: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/g' }) },
     })
+
     const r = await api.g()
+
+    expect(seen[0]).toBeInstanceOf(AbortSignal)                    // a real signal reached fetch
     expect(r.error).not.toBeNull()
     expect(r.error!.status).toBe(0)
+    expect((r.error!.body as Error).name).toBe('TimeoutError')     // aborted by OUR timeout
   })
 })
