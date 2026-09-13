@@ -85,6 +85,17 @@ function matchPath(routeSegments: string[], pathname: string): Record<string, st
 export function mockFetch(routes: Record<string, RouteValue>) {
   const parsed: ParsedRoute[] = Object.entries(routes).map(([key, value]) => {
     const spaceAt = key.indexOf(' ')
+    if (spaceAt === -1) {
+      // Fail loudly, in this module's usual style. Without this, indexOf
+      // returns -1 and the slices silently produce method `key.slice(0, -1)`
+      // ("/USER" for "/users") and a path from `key.slice(0)` — a route that
+      // can never match anything, and a test that fails with "no route
+      // matched" pointing at the request rather than at the typo'd key.
+      throw new Error(
+        `mockFetch: route key "${key}" must be "METHOD /path" — ` +
+        `an HTTP method, a space, then the path (e.g. "GET /users/:id").`
+      )
+    }
     return {
       key,
       method: key.slice(0, spaceAt).toUpperCase(),

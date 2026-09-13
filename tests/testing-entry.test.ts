@@ -104,4 +104,11 @@ describe('mockFetch', () => {
     const r = await api().flaky()
     expect(String(r.error?.body)).toMatch(/empty response array/)
   })
+  it('rejects a route key that has no method', () => {
+    // Without the check, indexOf(' ') returns -1 and the method silently
+    // becomes the key minus its last character ("/USER" for "/users"), so the
+    // route can never match and the failure points at the request instead of
+    // at the typo'd key.
+    expect(() => mockFetch({ '/users': jsonResponse({}) })).toThrow(/METHOD \/path/)
+  })
 })

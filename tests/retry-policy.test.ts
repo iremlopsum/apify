@@ -191,4 +191,64 @@ describe('retry policy', () => {
     // fired at all (this is what task 3's `kind` discriminator is for).
     expect(r.error?.kind).toBe('timeout')
   })
+
+  // ---------------------------------------------------------------------------
+  // The backoff sleep registers an abort listener on ctx.request.signal so a
+  // whole-operation deadline can cut it short. Without the removal on the
+  // timer-elapsed path, a long retry sequence leaves one dead listener per
+  // attempt on a signal that often outlives the request — and nothing else
+  // about the behaviour changes, so only watching for the removal catches it.
+  // ---------------------------------------------------------------------------
+  it('releases the backoff sleep listener when the delay elapses', async () => {
+    vi.stubGlobal('fetch', always(503))
+    const ac = new AbortController()
+    const spy = vi.spyOn(ac.signal, 'removeEventListener')
+
+    await makeApi(retryMiddleware({ max: 2, baseDelay: 5, jitter: false })).g({}, { signal: ac.signal })
+
+    expect(spy).toHaveBeenCalledWith('abort', expect.any(Function))
+    spy.mockRestore()
+  })
+
+  it('releases the backoff sleep listener when the signal aborts mid-delay', async () => {
+    vi.stubGlobal('fetch', always(503))
+    const ac = new AbortController()
+    const spy = vi.spyOn(ac.signal, 'removeEventListener')
+
+    const p = makeApi(retryMiddleware({ max: 2, baseDelay: 2000, jitter: false })).g({}, { signal: ac.signal })
+    await new Promise(r => setTimeout(r, 20))
+    ac.abort()
+    await p
+
+    expect(spy).toHaveBeenCalledWith('abort', expect.any(Function))
+    spy.mockRestore()
+  })
+  // ---------------------------------------------------------------------------
+  // A custom curve is arithmetic a consumer wrote, so it can return NaN (a
+  // stray undefined in the expression) or a negative (a sign error) just as
+  // easily as it can throw — and neither is caught by try/catch. Both reach
+  // setTimeout, where they mean "fire immediately": a backoff policy silently
+  // becomes a tight retry loop against a server that is already struggling.
+  // ---------------------------------------------------------------------------
+  it('falls back to the exponential curve when a custom delay returns NaN', async () => {
+    const seen: number[] = []
+    vi.stubGlobal('fetch', always(503))
+    await makeApi(retryMiddleware({
+      max: 2, baseDelay: 10, jitter: false,
+      delay: () => Number.NaN,
+      onRetry: ({ delay }) => { seen.push(delay) },
+    })).g()
+    expect(seen).toEqual([10, 20])
+  })
+
+  it('clamps a negative custom delay to zero', async () => {
+    const seen: number[] = []
+    vi.stubGlobal('fetch', always(503))
+    await makeApi(retryMiddleware({
+      max: 1, baseDelay: 10, jitter: false,
+      delay: () => -500,
+      onRetry: ({ delay }) => { seen.push(delay) },
+    })).g()
+    expect(seen).toEqual([0])
+  })
 })

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { anySignal } from '../src/utils/any-signal.js'
 
 describe('anySignal', () => {
@@ -75,5 +75,39 @@ describe('anySignal', () => {
 
     loser.abort(new DOMException('loser', 'AbortError'))
     expect(merged.reason).toBe(settledReason)
+  })
+
+  // ---------------------------------------------------------------------------
+  // The listener-release fix has no other observable consequence: abortWith's
+  // own `if (!controller.signal.aborted)` guard already gives the once-only
+  // semantics every behavioural test above asserts, so all of them keep
+  // passing with cleanup() neutered. The leak is only visible by watching for
+  // the removal itself. It matters because a caller's signal routinely
+  // outlives the request by a long way — one component-scoped controller
+  // reused across hundreds of calls — and every listener left on it keeps a
+  // dead merged controller reachable.
+  // ---------------------------------------------------------------------------
+  it('removes its listener from the losing signal once the race is decided', () => {
+    const a = new AbortController(), b = new AbortController()
+    const spy = vi.spyOn(b.signal, 'removeEventListener')
+
+    anySignal([a.signal, b.signal])
+    a.abort()
+
+    expect(spy).toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
+  it('removes its listener from every input, including the winner', () => {
+    const a = new AbortController(), b = new AbortController()
+    const spyA = vi.spyOn(a.signal, 'removeEventListener')
+    const spyB = vi.spyOn(b.signal, 'removeEventListener')
+
+    anySignal([a.signal, b.signal])
+    b.abort()
+
+    expect(spyA).toHaveBeenCalled()
+    expect(spyB).toHaveBeenCalled()
+    spyA.mockRestore(); spyB.mockRestore()
   })
 })
