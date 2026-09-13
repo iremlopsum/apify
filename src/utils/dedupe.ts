@@ -88,16 +88,19 @@ export class DedupeTracker {
    *
    * A fresh AbortController is created for the new request and stored in the
    * Map. If an external AbortSignal is provided (from the caller's
-   * CallOptions), it is merged so that aborting the external signal also
-   * aborts the dedupe signal.
+   * CallOptions, or installed by a middleware), it is merged with that
+   * controller's signal and the *merged* signal is what the fetch runs on.
    *
    * @param key - Unique identifier for the request type. Two calls with the
    *   same key are considered "the same request" for deduplication purposes.
    *   Typically this is the request definition's name (e.g., 'getUser').
-   * @param externalSignal - Optional AbortSignal from the caller. When this
-   *   signal aborts, the dedupe signal will also abort. This enables the
-   *   caller to cancel the request independently of the dedupe logic (e.g.,
-   *   on component unmount or timeout).
+   * @param externalSignal - Optional AbortSignal from the caller, or one a
+   *   middleware installed. It is *merged* with this tracker's controller —
+   *   not wired to abort it — so the returned signal fires when either side
+   *   does, carrying that side's own `reason` through. That is what keeps a
+   *   caller's `TimeoutError` a timeout instead of degrading into a plain
+   *   `AbortError`, and keeps the stored controller meaning only "superseded
+   *   by a newer request for this key".
    * @returns The `signal` the fetch call should use — aborted if either (a) a
    *   newer request starts for the same key, or (b) the external signal
    *   aborts — alongside the `controller` that owns it, which the caller must

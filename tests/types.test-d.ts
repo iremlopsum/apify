@@ -24,6 +24,14 @@ describe('public type surface', () => {
     expectTypeOf(api.health).parameters.toMatchTypeOf<[({} | undefined)?, (CallOptions | undefined)?]>()
   })
 
+  it('accepts timeout and skipMiddleware on CallOptions', () => {
+    // Both were added to CallOptions by 2.2.0 but neither had a type-level
+    // assertion, so either could be dropped without a single test noticing.
+    const options: CallOptions = { timeout: 5_000, skipMiddleware: [] }
+    expectTypeOf(options.timeout).toEqualTypeOf<number | undefined>()
+    expectTypeOf(api.getUser).toBeCallableWith({ id: '1' }, { timeout: 5_000 })
+  })
+
   it('lets a consumer construct a MiddlewareContext without every optional field', () => {
     // This is the 2.1.0 regression: `signal` was briefly REQUIRED, so this
     // literal stopped compiling for anyone unit-testing their own middleware.

@@ -16,6 +16,7 @@
 
 import type { Middleware, Result, RetryOptions, RetryInfo } from './types.js'
 import { CacheStore, stableStringify } from './utils/cache.js'
+import { isSpecialBody } from './utils/special-body.js'
 
 // Re-exported so consumers of the `./middleware` entry point can name these
 // types directly (e.g. a shared `onRetry` handler, or a reusable options
@@ -189,17 +190,27 @@ export function retryMiddleware(options: number | RetryOptions = 3): Middleware 
   }
 
   const computeDelay = (attempt: number): number => {
+    const fallback = baseDelay * 2 ** (attempt - 1)
     if (typeof curve === 'function') {
       // Likewise for a custom curve: fall back to the exponential default
       // rather than propagating, so a bad curve degrades to a sane delay
       // instead of failing the request.
+      let computed: number
       try {
-        return curve(attempt)
+        computed = curve(attempt)
       } catch {
-        return baseDelay * 2 ** (attempt - 1)
+        return fallback
       }
+      // A curve is arithmetic a consumer wrote, so it can just as easily
+      // return NaN (a stray `undefined` in the expression) or a negative (an
+      // off-by-one that inverts the sign) as throw. Neither is caught by
+      // try/catch, and both reach setTimeout, where they silently mean "fire
+      // immediately" — turning a backoff policy into a tight retry loop
+      // against a server that is already struggling.
+      if (!Number.isFinite(computed)) return fallback
+      return Math.max(0, computed)
     }
-    return curve === 'linear' ? baseDelay * attempt : baseDelay * 2 ** (attempt - 1)
+    return curve === 'linear' ? baseDelay * attempt : fallback
   }
 
   return async (ctx, next) => {
@@ -226,6 +237,9 @@ export function retryMiddleware(options: number | RetryOptions = 3): Middleware 
       // curve outright (still capped by maxDelay) and is never jittered.
       const header = respectRetryAfter ? parseRetryAfter(result.response?.headers.get('retry-after') ?? null) : null
       let delay = Math.min(header ?? computeDelay(attempt), maxDelay)
+      // Final backstop: maxDelay and baseDelay are consumer-supplied too, and
+      // Math.min(x, NaN) is NaN. Never hand setTimeout a non-number.
+      if (!Number.isFinite(delay) || delay < 0) delay = 0
       if (header === null && jitter) delay = Math.random() * delay
 
       // Observational only — a logging callback must never fail a request.
@@ -368,6 +382,12 @@ export type CacheMiddleware = Middleware & { clear(): void }
  * and `{ a: 1, b: 2 }` are treated as the same call). This means the cache
  * key is always derived from the original params object, not the processed URL.
  *
+ * A call whose params are a special body type — `FormData`, `Blob`,
+ * `ArrayBuffer`, `URLSearchParams`, or a raw string — is never cached and
+ * never served from cache: those cannot be told apart by the stable
+ * serialisation, so caching them could hand one caller the response to a
+ * different payload than the one it sent.
+ *
  * **What is cached:**
  *
  * Only successful results are stored. If the response has an error (4xx, 5xx,
@@ -443,6 +463,17 @@ export function cacheMiddleware(options?: {
   const debug = options?.debug ?? false
 
   const mw: Middleware = async (ctx, next) => {
+    // Params that are a special body type (FormData, Blob, ArrayBuffer,
+    // URLSearchParams, a raw string) can't be keyed: stableStringify falls
+    // through to Object.keys() for any object, and Object.keys() returns []
+    // for every one of them regardless of content, so two genuinely different
+    // payloads collapse onto the identical key `"<name>|{}"`. Whichever
+    // finished first would then be served to the other — a caller uploading
+    // payload B getting back payload A's response. Same collapse `share`
+    // guards against with the same predicate; declining to cache is always
+    // safe, serving the wrong response never is.
+    if (isSpecialBody(ctx.request.params)) return next()
+
     const paramsStr = stableStringify(ctx.request.params)
     const key = `${ctx.requestName}|${paramsStr}`
 
