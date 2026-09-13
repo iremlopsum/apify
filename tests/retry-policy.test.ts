@@ -123,5 +123,9 @@ describe('retry policy', () => {
     const r = await api.g()
     expect(Date.now() - started).toBeLessThan(2000)
     expect(r.error).not.toBeNull()
+    // The loop must call next() with the aborted signal rather than return
+    // the stale 503 — otherwise the caller could never tell the deadline
+    // fired at all (this is what task 3's `kind` discriminator is for).
+    expect(r.error?.kind).toBe('timeout')
   })
 })
