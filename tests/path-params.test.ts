@@ -106,6 +106,19 @@ describe('buildUrl', () => {
     expect(url).toBe('/items/foo')
     expect(remaining).toEqual({ id: '42' })
   })
+
+  it('substitutes every occurrence of a repeated token', () => {
+    // A template may legitimately name the same param twice. Without the `g`
+    // flag only the first was substituted, and the survivor then tripped the
+    // unresolved-token check — a working path turned into a hard throw.
+    const { url, remaining } = buildUrl('', '/orgs/:id/members/:id', { id: '42' })
+    expect(url).toBe('/orgs/42/members/42')
+    expect(remaining).toEqual({})
+  })
+
+  it('does not throw on a repeated token', () => {
+    expect(() => buildUrl('/api', '/a/:id/b/:id', { id: '1' })).not.toThrow()
+  })
 })
 
 describe('unresolved path params', () => {

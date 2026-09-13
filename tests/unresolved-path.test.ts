@@ -17,4 +17,17 @@ describe('unresolved path param surfaces as a Result', () => {
     expect(String(r.error!.body)).toContain(':userId')
     expect(globalThis.fetch).not.toHaveBeenCalled()
   })
+
+  it('reports a properly joined URL in the error metadata', async () => {
+    // The synchronous catch builds its own URL because buildUrl never
+    // returned one. It used to concatenate naively, reproducing the double
+    // slash in the very error that describes the failure.
+    const api = createApi({
+      baseUrl: 'https://x.com/',
+      requests: { health: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/health' }) },
+    })
+    const r = await api.health({ nested: { a: 1 } } as never)
+    expect(r.error).not.toBeNull()
+    expect(r.error!.request.url).toBe('https://x.com/health')
+  })
 })
