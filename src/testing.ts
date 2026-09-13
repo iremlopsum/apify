@@ -97,9 +97,16 @@ export function mockFetch(routes: Record<string, RouteValue>) {
   const calls: RecordedCall[] = []
   const matchedKeys: string[] = []
   let previousFetch: typeof globalThis.fetch | undefined
+  let installed = false
 
   const resolveValue = (route: ParsedRoute): Response | RouteHandler => {
     if (!Array.isArray(route.value)) return route.value
+    if (route.value.length === 0) {
+      // Fail loudly, in this module's usual style — an empty array would
+      // otherwise fall through to `undefined.clone()` below and throw a bare
+      // TypeError that sends the test author hunting in the wrong place.
+      throw new Error(`mockFetch: route "${route.key}" has an empty response array.`)
+    }
     // The final entry repeats once the sequence is exhausted.
     const index = Math.min(route.cursor, route.value.length - 1)
     route.cursor++
@@ -130,10 +137,16 @@ export function mockFetch(routes: Record<string, RouteValue>) {
       // The native `Request` constructor requires an absolute URL — browsers
       // resolve a relative one against the document, but Node's fetch has no
       // ambient base URL to resolve against and throws. `baseUrl: '/api'` is
-      // the common case for this library, so fall back to a dummy origin;
-      // `calls[].url` above already recorded the original, unresolved string.
+      // the common case for this library, so fall back to a dummy origin for
+      // construction only.
       const absoluteUrl = url.startsWith('http') ? url : new URL(url, 'http://localhost').href
-      return value({ params, request: new Request(absoluteUrl, init) })
+      const request = new Request(absoluteUrl, init)
+      // The dummy origin exists only so Node can parse a relative URL. Handlers
+      // must observe the URL the caller actually used, and the same string
+      // `calls[]` records — otherwise an assertion on request.url silently
+      // checks a fabricated host.
+      Object.defineProperty(request, 'url', { get: () => url })
+      return value({ params, request })
     }
 
     // Fail loudly. Returning a 404 would look like a server behaviour rather
@@ -157,11 +170,19 @@ export function mockFetch(routes: Record<string, RouteValue>) {
       return undefined
     },
     install(): void {
+      // A second install would capture the mock itself as "previous" and lose
+      // the real fetch for good, so installing twice is a no-op.
+      if (installed) return
       previousFetch = globalThis.fetch
+      installed = true
       globalThis.fetch = mockedFetch as unknown as typeof globalThis.fetch
     },
     restore(): void {
-      if (previousFetch) globalThis.fetch = previousFetch
+      // Restoring without a matching install would clobber whatever is there
+      // now with a stale value we never owned.
+      if (!installed) return
+      globalThis.fetch = previousFetch as typeof globalThis.fetch
+      installed = false
     },
   }
 }
