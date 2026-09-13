@@ -97,6 +97,27 @@ export function buildUrl(baseUrl: string, path: string, params: Record<string, u
   }
 
   // -------------------------------------------------------------------------
+  // Phase 1b: Reject any :token that no param filled in
+  // -------------------------------------------------------------------------
+  // A mismatch between the path template and the params type would otherwise
+  // ship the literal token in the URL AND duplicate the value as a query
+  // param — a silently wrong request that looks plausible in a network tab.
+  //
+  // The pattern mirrors the substitution regex: a colon followed by at least
+  // one identifier character. `/time/12:30` is not a match because `30` is
+  // preceded by a digit-only segment that never had a token shape... but to
+  // be exact we require the colon to start a path segment or follow a slash.
+  // -------------------------------------------------------------------------
+  const unresolved = resolvedPath.match(/(?<=^|\/):[a-zA-Z_][a-zA-Z0-9_]*/g)
+  if (unresolved) {
+    throw new TypeError(
+      `Unresolved path parameter${unresolved.length > 1 ? 's' : ''} ${unresolved.join(', ')} ` +
+      `in path "${path}". Provide ${unresolved.length > 1 ? 'these keys' : 'this key'} in params, ` +
+      `or correct the path template.`
+    )
+  }
+
+  // -------------------------------------------------------------------------
   // Phase 2: Construct the base URL
   // -------------------------------------------------------------------------
   let url = `${baseUrl}${resolvedPath}`
