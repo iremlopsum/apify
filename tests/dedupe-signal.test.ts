@@ -86,7 +86,9 @@ describe('dedupe + ctx.request.signal', () => {
 
     // A is the older call, and the only one carrying retry middleware — B's
     // chain stays bare so the two retry sequences cannot tangle.
-    const pA = api.search({ q: 'a' }, { middleware: [retryMiddleware(2)] }) as Promise<Result<unknown>>
+    // baseDelay: 0 keeps this test about dedupe/signal ordering, not about
+    // retryMiddleware's (now real, non-zero) default backoff.
+    const pA = api.search({ q: 'a' }, { middleware: [retryMiddleware({ max: 2, baseDelay: 0, jitter: false })] }) as Promise<Result<unknown>>
     await tick()
     expect(f.calls).toHaveLength(1)
 
@@ -120,8 +122,16 @@ describe('dedupe + ctx.request.signal', () => {
     expect(rB.data).toEqual({ ok: true })
 
     // ...and A loses: it was superseded, so its retry is cancelled too.
+    //
+    // A's tracked signal was already aborted (by B's registration) before
+    // retryMiddleware's backoff sleep for the retry elapsed. Per Task 6's
+    // design, the sleep resolves rather than rejects on abort, and the loop
+    // re-checks the signal and stops *before* attempting the now-doomed
+    // fetch — returning the last real result (A's first 503) rather than a
+    // synthetic network error. So A surfaces the 503 it actually observed,
+    // not a cancelled-request status 0.
     expect(rA.error).not.toBeNull()
-    expect(rA.error?.status).toBe(0)
+    expect(rA.error?.status).toBe(503)
   })
 
   // ---------------------------------------------------------------------------
@@ -164,7 +174,8 @@ describe('dedupe + ctx.request.signal', () => {
     const api = createApi({
       baseUrl: '',
       requests: { flaky },
-      middleware: [replaceSignal, retryMiddleware(2)]
+      // baseDelay: 0 — see the note in the first test in this file.
+      middleware: [replaceSignal, retryMiddleware({ max: 2, baseDelay: 0, jitter: false })]
     })
 
     const p = api.flaky() as Promise<Result<unknown>>
@@ -172,6 +183,10 @@ describe('dedupe + ctx.request.signal', () => {
     expect(f.calls).toHaveLength(1)
 
     f.calls[0].resolve(new Response('boom', { status: 503 }))
+    // Two ticks: one for the response to work back up to retryMiddleware,
+    // one more for its backoff sleep (a real macrotask even at baseDelay: 0)
+    // to elapse before it calls next() again.
+    await tick()
     await tick()
 
     // The retry must actually reach the network, on a signal nobody aborted.

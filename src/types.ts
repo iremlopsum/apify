@@ -475,6 +475,53 @@ export interface ApiConfig<TRequests extends Record<string, unknown>> {
 }
 
 // ---------------------------------------------------------------------------
+// Retry Options (for retryMiddleware)
+// ---------------------------------------------------------------------------
+
+/** Information handed to {@link RetryOptions.onRetry} before each retry. */
+export interface RetryInfo {
+  /** 1-based retry number — the first retry is 1. */
+  attempt: number
+  /** The configured maximum number of retries. */
+  max: number
+  /** The delay about to elapse, in ms, after jitter and `Retry-After`. */
+  delay: number
+  /** The result that triggered this retry. */
+  result: Result<unknown>
+}
+
+/** Options for {@link retryMiddleware}. */
+export interface RetryOptions {
+  /** Additional attempts after the first. Default 3. */
+  max?: number
+  /** Delay curve. Default `'exponential'`. */
+  delay?: 'exponential' | 'linear' | ((attempt: number) => number)
+  /** First delay in ms. Default 250. */
+  baseDelay?: number
+  /** Per-delay cap in ms. Default 30000. */
+  maxDelay?: number
+  /** Full jitter — uniform random in `[0, computed]`. Default true. */
+  jitter?: boolean
+  /** Honour a `Retry-After` response header when present. Default true. */
+  respectRetryAfter?: boolean
+  /**
+   * Whether to retry. Default `r => (r.error?.status ?? 0) >= 500`.
+   *
+   * 429 and network errors are deliberately not retried by default; opt in
+   * explicitly rather than having behaviour change under you on upgrade.
+   */
+  retryOn?: (result: Result<unknown>, attempt: number) => boolean
+  /**
+   * Observational hook fired before each retry's delay elapses. Its return
+   * value is ignored and a throw cannot fail the request.
+   *
+   * This exists because the call site observes nothing during retries: the
+   * promise stays pending through every attempt and resolves exactly once.
+   */
+  onRetry?: (info: RetryInfo) => void
+}
+
+// ---------------------------------------------------------------------------
 // GraphQL Types
 // ---------------------------------------------------------------------------
 
