@@ -133,3 +133,31 @@ describe('unresolved path params', () => {
     expect(() => buildUrl('/api', '/time/12:30', {})).not.toThrow()
   })
 })
+
+describe('baseUrl and path joining', () => {
+  it('collapses a double slash when baseUrl has a trailing slash', () => {
+    expect(buildUrl('https://x.com/', '/health', {}).url).toBe('https://x.com/health')
+  })
+
+  it('inserts a slash when neither side has one', () => {
+    expect(buildUrl('https://x.com', 'health', {}).url).toBe('https://x.com/health')
+  })
+
+  it('leaves a correctly formed join alone', () => {
+    expect(buildUrl('https://x.com', '/health', {}).url).toBe('https://x.com/health')
+  })
+
+  it('handles an empty baseUrl for same-origin requests', () => {
+    expect(buildUrl('', '/health', {}).url).toBe('/health')
+  })
+
+  it('does not corrupt the protocol slashes', () => {
+    expect(buildUrl('https://x.com/api/', '/v1/health', {}).url)
+      .toBe('https://x.com/api/v1/health')
+  })
+
+  it('still appends a query string after normalising', () => {
+    expect(buildUrl('https://x.com/', '/items', { page: 1 }, true).url)
+      .toBe('https://x.com/items?page=1')
+  })
+})

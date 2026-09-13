@@ -118,9 +118,21 @@ export function buildUrl(baseUrl: string, path: string, params: Record<string, u
   }
 
   // -------------------------------------------------------------------------
-  // Phase 2: Construct the base URL
+  // Phase 2: Join base and path with exactly one separating slash
   // -------------------------------------------------------------------------
-  let url = `${baseUrl}${resolvedPath}`
+  // A trailing slash on baseUrl is the shape process.env.API_URL usually has.
+  // Naive concatenation produced '//', which some servers 404 on and which
+  // can trigger a cross-origin redirect that drops the Authorization header.
+  // An empty baseUrl (same-origin usage) is passed through untouched.
+  // -------------------------------------------------------------------------
+  let url: string
+  if (!baseUrl) {
+    url = resolvedPath
+  } else {
+    const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
+    const tail = resolvedPath.startsWith('/') ? resolvedPath : `/${resolvedPath}`
+    url = `${base}${tail}`
+  }
 
   // -------------------------------------------------------------------------
   // Phase 3: Optional query string serialization
