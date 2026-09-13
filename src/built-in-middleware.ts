@@ -14,40 +14,99 @@
 // (`createApi`, `Request`, `composeMiddleware`) works perfectly without them.
 // =============================================================================
 
-import type { Middleware, Result } from './types.js'
+import type { Middleware, Result, RetryOptions, RetryInfo } from './types.js'
 import { CacheStore, stableStringify } from './utils/cache.js'
+
+// Re-exported so consumers of the `./middleware` entry point can name these
+// types directly (e.g. a shared `onRetry` handler, or a reusable options
+// object) without reaching into the core entry point for them — the same
+// reason `CacheMiddleware` is exported from this file rather than `index.ts`.
+export type { RetryOptions, RetryInfo } from './types.js'
 
 // -----------------------------------------------------------------------------
 // retryMiddleware
 // -----------------------------------------------------------------------------
 
 /**
- * Creates a middleware that automatically retries requests when the server
- * returns a 5xx (server error) status code.
+ * Resolves after `ms` milliseconds, or immediately if `signal` aborts first.
+ *
+ * This never rejects. A whole-operation deadline (see `timeout` on
+ * `RequestConfig`) must be able to cut a backoff sleep short without
+ * threading an exception through a middleware that must not throw — so on
+ * abort the promise simply resolves early, and the retry loop re-checks the
+ * signal itself to decide whether to stop.
+ */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal?.aborted) return resolve()
+    const timer = setTimeout(resolve, ms)
+    signal?.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+  })
+}
+
+/**
+ * Parses a `Retry-After` header value in either wire format defined by the
+ * HTTP spec — delta-seconds (`"120"`) or an HTTP-date (`"Wed, 21 Oct ...
+ * GMT"`). Returns the delay in milliseconds, or `null` if the value is
+ * missing or unparseable in both formats (so the caller can fall back to
+ * the computed backoff instead of retrying with `NaN` or throwing).
+ */
+function parseRetryAfter(value: string | null): number | null {
+  if (!value) return null
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000
+  const when = Date.parse(value)
+  if (Number.isNaN(when)) return null
+  return Math.max(0, when - Date.now())
+}
+
+/**
+ * Creates a middleware that retries failed requests with a real backoff
+ * policy: exponential (or linear, or custom) delay curves, full jitter,
+ * `Retry-After` support, a configurable retry predicate, and an observational
+ * `onRetry` hook.
  *
  * **How it works:**
  *
- * When the downstream middleware chain (via `next()`) returns a result with
- * an error whose status is >= 500, this middleware calls `next()` again,
- * effectively re-executing every middleware below it in the onion plus the
- * core fetch. It keeps retrying until either:
+ * When the downstream chain (via `next()`) returns a result that `retryOn`
+ * accepts, this middleware waits out a delay and calls `next()` again —
+ * re-executing every middleware below it in the onion plus the core fetch.
+ * It keeps retrying until either the predicate rejects the result, or `max`
+ * attempts have been exhausted.
  *
- *   - The request succeeds (any non-error result), OR
- *   - The maximum number of retries has been exhausted.
+ * **Delay:**
  *
- * **What it does NOT retry:**
+ * The base delay comes from the configured curve (`baseDelay * 2^(attempt-1)`
+ * for `'exponential'`, `baseDelay * attempt` for `'linear'`, or a custom
+ * function of the attempt number), capped by `maxDelay`. Full jitter then
+ * applies: the actual delay is `Math.random() * computed`, per AWS's
+ * recommendation for de-synchronising a thundering herd. A `Retry-After`
+ * response header — when present and `respectRetryAfter` is not disabled —
+ * replaces the computed delay outright (still capped by `maxDelay`) and is
+ * honoured as-is, without jitter: a server telling you exactly when to come
+ * back should not be randomised.
  *
- * - 4xx errors (client errors like 400, 401, 403, 404) — these are caused
- *   by the request itself, not transient server issues, so retrying would
- *   just produce the same error.
- * - Network errors (status 0) — these could be retried, but that's left
- *   to the consumer to decide via a custom middleware.
+ * **Abortable sleep:**
+ *
+ * The backoff sleep watches `ctx.request.signal`, so a whole-operation
+ * `timeout` cannot be outlived by a long delay. If the signal fires mid-sleep,
+ * the loop stops immediately and returns the last real result observed (e.g.
+ * the 503 that triggered the retry) rather than fabricating a timeout error —
+ * that is the most informative thing actually observed, and it explains why
+ * retries were happening.
+ *
+ * **What it does NOT retry by default:**
+ *
+ * - 4xx errors — caused by the request itself, not transient server issues.
+ * - 429 and network errors (status 0) — deliberately excluded from the
+ *   default so upgrading doesn't change behaviour under you; pass a custom
+ *   `retryOn` to opt in.
  *
  * **Retry count semantics:**
  *
- * `maxRetries` is the number of ADDITIONAL attempts after the initial one.
- * So `retryMiddleware(2)` means: 1 initial attempt + up to 2 retries = 3
- * total calls to `next()` in the worst case.
+ * `max` is the number of ADDITIONAL attempts after the initial one. So
+ * `retryMiddleware(2)` (or `{ max: 2 }`) means: 1 initial attempt + up to 2
+ * retries = 3 total calls to `next()` in the worst case.
  *
  * **Middleware position matters:**
  *
@@ -56,25 +115,55 @@ import { CacheStore, stableStringify } from './utils/cache.js'
  * on each retry (good). Placing it AFTER means the same headers are reused
  * (usually fine, but stale tokens won't be refreshed).
  *
- * @param maxRetries - Maximum number of retry attempts after the initial
- *   request. Defaults to 3 if not specified.
+ * @param options - Either a number (shorthand for `{ max: number }`, kept for
+ *   backwards compatibility) or a {@link RetryOptions} object. Defaults to 3.
  * @returns A Middleware function that can be passed to `createApi` or
  *   individual `Request` configs.
  *
  * @example
  * ```ts
- * // Retry up to 2 times on server errors (3 total attempts)
+ * // Retry up to 2 times on server errors (3 total attempts), numeric shorthand
  * const api = createApi({
  *   baseUrl: '/api',
  *   requests: { getItems },
  *   middleware: [retryMiddleware(2)],
  * })
  * ```
+ *
+ * @example
+ * ```ts
+ * // Full policy: linear backoff, a higher cap, and progress reporting
+ * const api = createApi({
+ *   baseUrl: '/api',
+ *   requests: { getItems },
+ *   middleware: [retryMiddleware({
+ *     max: 5,
+ *     delay: 'linear',
+ *     baseDelay: 200,
+ *     maxDelay: 10_000,
+ *     onRetry: ({ attempt, max, delay }) => console.log(`retry ${attempt}/${max} in ${delay}ms`),
+ *   })],
+ * })
+ * ```
  */
-export function retryMiddleware(maxRetries = 3): Middleware {
-  // Return the actual middleware function. The `maxRetries` value is captured
-  // in the closure, so each call to `retryMiddleware(n)` produces a unique
-  // middleware instance with its own retry limit.
+export function retryMiddleware(options: number | RetryOptions = 3): Middleware {
+  // The `options` value is captured in the closure, so each call to
+  // `retryMiddleware(...)` produces a unique middleware instance with its
+  // own policy.
+  const o: RetryOptions = typeof options === 'number' ? { max: options } : options
+  const max = o.max ?? 3
+  const curve = o.delay ?? 'exponential'
+  const baseDelay = o.baseDelay ?? 250
+  const maxDelay = o.maxDelay ?? 30_000
+  const jitter = o.jitter ?? true
+  const respectRetryAfter = o.respectRetryAfter ?? true
+  const retryOn = o.retryOn ?? ((r: Result<unknown>) => (r.error?.status ?? 0) >= 500)
+
+  const computeDelay = (attempt: number): number => {
+    if (typeof curve === 'function') return curve(attempt)
+    return curve === 'linear' ? baseDelay * attempt : baseDelay * 2 ** (attempt - 1)
+  }
+
   return async (ctx, next) => {
     // Make the initial request by calling next(). This traverses all
     // downstream middleware and eventually hits the core fetch function.
@@ -82,20 +171,39 @@ export function retryMiddleware(maxRetries = 3): Middleware {
 
     // Track how many retry attempts we've made so far. This counter is
     // local to each individual API call — concurrent requests each get
-    // their own counter.
-    let attempts = 0
+    // their own counter. It is 1-based once incremented, matching the
+    // `attempt` field reported on `RetryInfo` and passed to `retryOn`.
+    let attempt = 0
 
-    // Keep retrying as long as ALL three conditions are true:
-    //   1. The result has an error (the request failed)
-    //   2. The error status is a server error (5xx range)
-    //   3. We haven't exhausted our retry budget
-    //
-    // If ANY condition is false, we break out and return whatever result
-    // we have — whether it's a success or an unretryable error.
-    while (result.error && result.error.status >= 500 && attempts < maxRetries) {
-      // Increment the attempt counter BEFORE retrying, so we don't
-      // accidentally exceed the limit.
-      attempts++
+    // `retryOn` is always consulted with the candidate next attempt number —
+    // even once `max` is reached — so a predicate that counts attempts (or
+    // otherwise observes every call) sees a call per result, not one fewer.
+    // The `max` cap is enforced separately, after asking, so it never
+    // suppresses that final observation.
+    while (retryOn(result, attempt + 1)) {
+      if (attempt >= max) break
+      attempt++
+
+      // Retry-After, when present and permitted, replaces the computed
+      // curve outright (still capped by maxDelay) and is never jittered.
+      const header = respectRetryAfter ? parseRetryAfter(result.response?.headers.get('retry-after') ?? null) : null
+      let delay = Math.min(header ?? computeDelay(attempt), maxDelay)
+      if (header === null && jitter) delay = Math.random() * delay
+
+      // Observational only — a logging callback must never fail a request.
+      if (o.onRetry) {
+        const info: RetryInfo = { attempt, max, delay, result }
+        try { o.onRetry(info) } catch { /* swallowed by contract — onRetry cannot fail a request */ }
+      }
+
+      // The sleep watches the current signal, so a whole-operation deadline
+      // cannot be outlived by a long backoff. If the deadline already fired
+      // (or fires during the sleep), stop and hand back the last real
+      // result — typically the error that triggered this retry — rather
+      // than fabricate a timeout. That's the most informative thing
+      // actually observed, and it explains why retries were happening.
+      await sleep(delay, ctx.request.signal)
+      if (ctx.request.signal?.aborted) return result
 
       // Call next() again to re-execute the downstream chain. This creates
       // a completely fresh request through all middleware below this one.
@@ -106,7 +214,7 @@ export function retryMiddleware(maxRetries = 3): Middleware {
 
     // Return the final result — either the first successful response,
     // the last failed response after exhausting retries, or the original
-    // error if it wasn't a 5xx (loop never entered).
+    // error if `retryOn` rejected it (loop never entered).
     return result
   }
 }
