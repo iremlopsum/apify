@@ -314,4 +314,24 @@ describe('retry policy', () => {
     // Not capped at the default 30_000 -- Infinity really means "no cap".
     expect(seen).toEqual([40_000])
   })
+
+  // ---------------------------------------------------------------------------
+  // Review finding (2.2.1): the NaN-specific guard above, written as
+  // `!Number.isNaN(o.maxDelay)`, lets `null` straight through --
+  // `Number.isNaN(null)` is `false`. `Math.min(computed, null)` coerces
+  // `null` to `0`, so `maxDelay: null` (as reachable as `Number(env.X)` from
+  // a JSON config carrying a literal `null`) reintroduces the exact
+  // tight-retry-burst this guard exists to prevent, through a different bad
+  // input. The guard must also require the value to actually be a `number`.
+  // ---------------------------------------------------------------------------
+  it('falls back to the default maxDelay when given null, instead of collapsing backoff to zero', async () => {
+    const seen: number[] = []
+    vi.stubGlobal('fetch', always(503))
+    await makeApi(retryMiddleware({
+      max: 2, baseDelay: 10, jitter: false,
+      maxDelay: null as unknown as number,
+      onRetry: ({ delay }) => { seen.push(delay) },
+    })).g()
+    expect(seen).toEqual([10, 20])
+  })
 })
