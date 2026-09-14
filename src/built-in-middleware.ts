@@ -169,8 +169,17 @@ export function retryMiddleware(options: number | RetryOptions = 3): Middleware 
   const o: RetryOptions = typeof options === 'number' ? { max: options } : options
   const max = o.max ?? 3
   const curve = o.delay ?? 'exponential'
-  const baseDelay = o.baseDelay ?? 250
-  const maxDelay = o.maxDelay ?? 30_000
+  // `??` alone only catches omission. `baseDelay`/`maxDelay` are exactly as
+  // consumer-supplied as a custom `delay` curve (a stray `Number(env.X)`
+  // reaches here just as easily), and an explicit NaN survives `??`
+  // unchanged. Left unvalidated, it poisons `Math.min(computed, maxDelay)` —
+  // NaN whenever either argument is — which the existing backstop further
+  // down then clamps to 0, turning the whole backoff policy into a tight
+  // retry burst against a server that is already struggling: exactly what
+  // this feature exists to prevent. Validate both here, once, so a bad value
+  // falls back to the default instead of reaching the arithmetic at all.
+  const baseDelay = Number.isFinite(o.baseDelay) ? (o.baseDelay as number) : 250
+  const maxDelay = Number.isFinite(o.maxDelay) ? (o.maxDelay as number) : 30_000
   const jitter = o.jitter ?? true
   const respectRetryAfter = o.respectRetryAfter ?? true
   const retryOn = o.retryOn ?? ((r: Result<unknown>) => (r.error?.status ?? 0) >= 500)
@@ -237,8 +246,10 @@ export function retryMiddleware(options: number | RetryOptions = 3): Middleware 
       // curve outright (still capped by maxDelay) and is never jittered.
       const header = respectRetryAfter ? parseRetryAfter(result.response?.headers.get('retry-after') ?? null) : null
       let delay = Math.min(header ?? computeDelay(attempt), maxDelay)
-      // Final backstop: maxDelay and baseDelay are consumer-supplied too, and
-      // Math.min(x, NaN) is NaN. Never hand setTimeout a non-number.
+      // Final backstop, now mostly defense-in-depth since maxDelay/baseDelay
+      // are validated where they're resolved above: computeDelay and
+      // parseRetryAfter each already guard their own inputs, but never hand
+      // setTimeout a non-number regardless of which of these composes badly.
       if (!Number.isFinite(delay) || delay < 0) delay = 0
       if (header === null && jitter) delay = Math.random() * delay
 

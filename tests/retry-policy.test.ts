@@ -251,4 +251,40 @@ describe('retry policy', () => {
     })).g()
     expect(seen).toEqual([0])
   })
+
+  // ---------------------------------------------------------------------------
+  // Fix 5 (2.2.1): `maxDelay` only ever got a `??` default, so an explicit
+  // `NaN` (as consumer-supplied as baseDelay or a custom curve — a stray
+  // `Number(process.env.X)`) survived into `Math.min(computed, maxDelay)`,
+  // which is NaN whenever either argument is. The existing backstop then
+  // clamped that NaN to 0 — turning the whole backoff policy into a tight
+  // retry burst against a server that is already struggling, exactly what
+  // the feature exists to prevent. `maxDelay` must fall back to its default
+  // instead of poisoning the arithmetic.
+  // ---------------------------------------------------------------------------
+  it('falls back to the default maxDelay when given NaN, instead of collapsing backoff to zero', async () => {
+    const seen: number[] = []
+    vi.stubGlobal('fetch', always(503))
+    await makeApi(retryMiddleware({
+      max: 2, baseDelay: 10, jitter: false,
+      maxDelay: Number.NaN,
+      onRetry: ({ delay }) => { seen.push(delay) },
+    })).g()
+    // Uncapped exponential delays (10, 20) — both comfortably under the
+    // default maxDelay (30_000) — not [0, 0].
+    expect(seen).toEqual([10, 20])
+  })
+
+  // baseDelay is exactly as consumer-supplied as maxDelay, and poisons the
+  // same Math.min(computed, maxDelay) arithmetic the same way (NaN * 2 ** n
+  // is NaN), so it gets the identical validate-or-default treatment.
+  it('falls back to the default baseDelay when given NaN', async () => {
+    const seen: number[] = []
+    vi.stubGlobal('fetch', always(503))
+    await makeApi(retryMiddleware({
+      max: 1, baseDelay: Number.NaN, jitter: false,
+      onRetry: ({ delay }) => { seen.push(delay) },
+    })).g()
+    expect(seen).toEqual([250])
+  })
 })
