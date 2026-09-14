@@ -47,7 +47,7 @@ import { abortKind } from './utils/abort-kind.js'
 import { anySignal } from './utils/any-signal.js'
 import { timeoutSignalFor } from './utils/timeout.js'
 import { stableStringify } from './utils/cache.js'
-import { isSpecialBody } from './utils/special-body.js'
+import { isSpecialBody, isOpaqueParams } from './utils/special-body.js'
 import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
 
 // =============================================================================
@@ -741,15 +741,22 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
       // signal or timeout only changes *who is waiting*, so it does not
       // disable sharing: it is observed for this caller alone, below.
       //
-      // Special-body params (FormData, Blob, ArrayBuffer, URLSearchParams,
-      // a raw string) are excluded too: stableStringify falls through to
-      // Object.keys() for any object, which returns [] for all four of
-      // those types regardless of content, so two calls with genuinely
-      // different payloads would otherwise collide on the same share key,
-      // coalesce into one request, and hand one caller the response to the
-      // other's payload — the exact "security-shaped bug" this doc warns
-      // about for per-call headers, reachable through a different vector.
-      // Declining to share is always safe; corrupting a response never is.
+      // Opaque-body params (FormData, Blob, ArrayBuffer, URLSearchParams) are
+      // excluded too: stableStringify falls through to Object.keys() for any
+      // object, which returns [] for all four of those types regardless of
+      // content, so two calls with genuinely different payloads would
+      // otherwise collide on the same share key, coalesce into one request,
+      // and hand one caller the response to the other's payload — the exact
+      // "security-shaped bug" this doc warns about for per-call headers,
+      // reachable through a different vector. Declining to share is always
+      // safe; corrupting a response never is.
+      //
+      // A raw string is deliberately NOT excluded here (unlike
+      // isSpecialBody, used below for body/URL handling): stableStringify
+      // keys a string correctly, via JSON.stringify, so a string-param
+      // endpoint is soundly coalescable. Excluding it (as 2.2.0 did, sharing
+      // isSpecialBody for this check) silently disabled sharing for such
+      // endpoints — fixed in 2.2.1 by using isOpaqueParams here instead.
       //
       // The whole block is wrapped in try/catch for the same reason execute()
       // is: it runs in the bare body of the api method, so anything thrown
@@ -767,7 +774,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           request.config.share === true &&
           isEmptyHeaders(options.headers) &&
           (options.middleware === undefined || options.middleware.length === 0) &&
-          !isSpecialBody(params)
+          !isOpaqueParams(params)
         if (!canShare) return execute()
 
         const shareKey = `${name}|${stableStringify(params)}`

@@ -16,7 +16,7 @@
 
 import type { Middleware, Result, RetryOptions, RetryInfo } from './types.js'
 import { CacheStore, stableStringify } from './utils/cache.js'
-import { isSpecialBody } from './utils/special-body.js'
+import { isOpaqueParams } from './utils/special-body.js'
 
 // Re-exported so consumers of the `./middleware` entry point can name these
 // types directly (e.g. a shared `onRetry` handler, or a reusable options
@@ -393,11 +393,15 @@ export type CacheMiddleware = Middleware & { clear(): void }
  * and `{ a: 1, b: 2 }` are treated as the same call). This means the cache
  * key is always derived from the original params object, not the processed URL.
  *
- * A call whose params are a special body type — `FormData`, `Blob`,
- * `ArrayBuffer`, `URLSearchParams`, or a raw string — is never cached and
- * never served from cache: those cannot be told apart by the stable
- * serialisation, so caching them could hand one caller the response to a
- * different payload than the one it sent.
+ * A call whose params are one of four opaque body types — `FormData`,
+ * `Blob`, `ArrayBuffer`, or `URLSearchParams` — is never cached and never
+ * served from cache: those cannot be told apart by the stable
+ * serialisation (they all collapse to the literal `"{}"`), so caching them
+ * could hand one caller the response to a different payload than the one it
+ * sent. A raw string is not included in this exclusion — `stableStringify`
+ * keys a string correctly, so a string-param endpoint is cached like any
+ * other (fixed in 2.2.1; 2.2.0 excluded strings here too, which silently
+ * disabled caching for them).
  *
  * **What is cached:**
  *
@@ -474,16 +478,18 @@ export function cacheMiddleware(options?: {
   const debug = options?.debug ?? false
 
   const mw: Middleware = async (ctx, next) => {
-    // Params that are a special body type (FormData, Blob, ArrayBuffer,
-    // URLSearchParams, a raw string) can't be keyed: stableStringify falls
+    // Params that are one of four opaque body types (FormData, Blob,
+    // ArrayBuffer, URLSearchParams) can't be keyed: stableStringify falls
     // through to Object.keys() for any object, and Object.keys() returns []
     // for every one of them regardless of content, so two genuinely different
     // payloads collapse onto the identical key `"<name>|{}"`. Whichever
     // finished first would then be served to the other — a caller uploading
     // payload B getting back payload A's response. Same collapse `share`
     // guards against with the same predicate; declining to cache is always
-    // safe, serving the wrong response never is.
-    if (isSpecialBody(ctx.request.params)) return next()
+    // safe, serving the wrong response never is. A raw string is deliberately
+    // NOT included — stableStringify keys it correctly — so string-param
+    // endpoints are cached normally.
+    if (isOpaqueParams(ctx.request.params)) return next()
 
     const paramsStr = stableStringify(ctx.request.params)
     const key = `${ctx.requestName}|${paramsStr}`

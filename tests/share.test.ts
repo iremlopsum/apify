@@ -343,6 +343,37 @@ describe('share', () => {
     expect(f.calls[0].aborted()).toBe(true)   // the shared request itself was cut off
   })
 
+  // ---------------------------------------------------------------------------
+  // Fix 3 (2.2.1): canShare shared isSpecialBody with cacheMiddleware's guard
+  // for docs/FIXES.md #14, which also excludes a raw string — but
+  // stableStringify keys a string correctly (via JSON.stringify), so a
+  // string-param endpoint is soundly coalescable. Narrowed to isOpaqueParams
+  // (the four object types only); FormData/Blob/ArrayBuffer/URLSearchParams
+  // must still decline to coalesce (already covered by the tests above).
+  // ---------------------------------------------------------------------------
+  it('coalesces a string-param endpoint (a raw string is soundly keyable, unlike FormData/Blob/etc)', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    // `Request<TParams extends object, ...>` cannot name `string` itself — a
+    // raw string body is a runtime-only concept (isOpaqueParams operates on
+    // the erased `object` params createApi actually passes through), so the
+    // call site casts past the declared (but here vacuous)
+    // `Record<string, never>` params type, the same way the suite already
+    // casts a BigInt timeout past `number` elsewhere in this file.
+    const api = createApi({
+      baseUrl: '',
+      requests: { search: new Request<Record<string, never>, { ok: number }>({ method: 'POST', path: '/search', share: true }) },
+    })
+    const all = Promise.all([
+      api.search('needle' as unknown as Record<string, never>),
+      api.search('needle' as unknown as Record<string, never>),
+    ])
+    await Promise.resolve()
+    expect(f.fn.mock.calls.length).toBe(1)
+    f.calls[0].resolve()
+    const results = await all
+    expect(results.every(r => r.error === null)).toBe(true)
+  })
+
   it('does not let a late joiner extend the shared operation deadline', async () => {
     const f = controllable(); vi.stubGlobal('fetch', f.fn)
     const api = createApi({
