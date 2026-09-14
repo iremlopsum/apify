@@ -405,4 +405,37 @@ describe('cacheMiddleware', () => {
 
     expect(fetchMock.mock.calls.length).toBe(2)
   })
+
+  // ---------------------------------------------------------------------------
+  // Fix 3 (2.2.1): the guard added for docs/FIXES.md #14 reused isSpecialBody,
+  // which also excludes a raw `string` — but stableStringify keys a string
+  // correctly (via JSON.stringify), so a string-param endpoint is soundly
+  // cacheable. Sharing the predicate with isSpecialBody silently disabled
+  // caching for every string-param endpoint in 2.2.0. isOpaqueParams (the
+  // four object types only) fixes this without reopening #14: FormData, Blob,
+  // ArrayBuffer and URLSearchParams must still decline to cache.
+  // ---------------------------------------------------------------------------
+  it('caches a string-param endpoint (a raw string is soundly keyable, unlike FormData/Blob/etc)', async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    // `Request<TParams extends object, ...>` cannot name `string` itself —
+    // a raw string body is a runtime-only concept (isSpecialBody/isOpaqueParams
+    // both operate on the erased `object` params createApi actually passes
+    // through), so the call site casts past the declared (but here vacuous)
+    // `Record<string, never>` params type to exercise it, the same way the
+    // suite already casts a BigInt timeout past `number` elsewhere.
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        search: new Request<Record<string, never>, { ok: boolean }>({ method: 'POST', path: '/search', middleware: [cache] }),
+      },
+    })
+
+    await api.search('needle' as unknown as Record<string, never>)
+    await api.search('needle' as unknown as Record<string, never>)
+
+    expect(fetchMock.mock.calls.length).toBe(1) // second call is a cache hit
+  })
 })
