@@ -636,13 +636,14 @@ documented as behaviourally identical to the non-shared case from the
 caller's perspective. A dashboard or alerting rule built on `onError` counts
 would see 2-3x the real failure rate for shared endpoints.
 
-### Fix (applied)
+### Fix (applied, then corrected on review)
 
 `ShareTracker.release()` now returns whether *this* release was the one that
-dropped `refs` to zero and aborted the shared controller. The per-caller path
-in `create-api.ts` reports only when it was not:
+dropped `refs` to zero and aborted the shared controller. The first pass had
+the per-caller path in `create-api.ts` report only when it was not:
 
 ```ts
+// First pass — INCOMPLETE, see below
 const onAbort = (): void => {
   const wasLast = release(perCaller.reason)
   const result = buildFailedResult(perCaller.reason, 'abort')
@@ -651,15 +652,56 @@ const onAbort = (): void => {
 }
 ```
 
+This assumed that when `wasLast` is true, the shared `execute()`'s
+post-execution hook would always pick up the reporting duty. It doesn't: that
+hook only fires `onError` when the shared operation *resolves with an error
+Result*. Two reachable cases where it doesn't (caught on review, before this
+version shipped):
+
+- the shared middleware chain **rejects** instead of resolving (a middleware
+  that throws on abort — a token-fetching auth middleware is the realistic
+  case) — the rejection bypasses the hook's fulfillment branch entirely;
+- the shared middleware chain **short-circuits to success** regardless of the
+  abort (a `cacheMiddleware` hit, which never consults the signal) — the
+  result has no error for the hook to report.
+
+In both, the corrected-but-still-wrong first pass produced **zero** reports
+for a real cancellation — worse than the duplicate this fix set out to
+remove, and exactly the failure mode the original review called out. Fixed by
+not assuming the delegate reports, and instead watching what the shared
+promise actually does:
+
+```ts
+const onAbort = (): void => {
+  const wasLast = release(perCaller.reason)
+  const result = buildFailedResult(perCaller.reason, 'abort')
+  if (!wasLast) {
+    fireOnError(result.error as ApiError)
+  } else {
+    // execute()'s hook reports only on an error Result. If the shared chain
+    // rejects, or resolves to success regardless of the abort (a cache hit),
+    // it never will — so report here instead.
+    promise.then(
+      r => { if (!r.error) fireOnError(result.error as ApiError) },
+      () => fireOnError(result.error as ApiError)
+    )
+  }
+  finish(result)
+}
+```
+
 Covered by `tests/share.test.ts` ("duplicate onError under share (Fix 1,
 2.2.1)"), one test per acceptance row: 1 caller/timeout (2 → 1), 2
 callers/both abort (3 → 2, one each), 3 sharers/shared 500 (unchanged, 1),
-non-shared/timeout (unchanged, 1).
+non-shared/timeout (unchanged, 1) — plus two rows added on review: last
+sharer gives up while the shared chain rejects (0 → 1), and last sharer gives
+up against a `cacheMiddleware` hit (0 → 1).
 
 **Status:** fixed in 2.2.1. Identified and parked during 2.2.0's final review
 ("Known, recorded, not fixed" in that release's PR notes) — a regression
 introduced by that release's own final fix wave (I3, `docs/FIXES.md` history),
-not present before `share` existed.
+not present before `share` existed. The gate-can-produce-zero-reports gap was
+caught in this release's own code review, before shipping.
 
 ---
 
@@ -739,12 +781,14 @@ would have silently lost that behaviour on upgrade, with no error and no
 signal beyond "the cache stopped working" — the exact kind of regression that
 goes unnoticed until someone measures cache hit rate.
 
-### Fix (applied)
+### Fix (applied, then broadened on review)
 
-A new predicate, `isOpaqueParams`, narrows the check to the four object types
-only:
+A new predicate, `isOpaqueParams`, narrows the check to the object types
+whose own enumerable keys don't distinguish two different instances — first
+written as the four originally identified:
 
 ```ts
+// First pass — narrower than the actual bug class, see below
 export function isOpaqueParams(value: unknown): boolean {
   return (
     value instanceof FormData ||
@@ -755,19 +799,46 @@ export function isOpaqueParams(value: unknown): boolean {
 }
 ```
 
+Caught on review: the JSDoc read as though these four were the complete set,
+but `Date`, `Map`, and `Set` collapse the identical way — a `Date`'s time
+value and a `Map`/`Set`'s entries are internal slots, not own-enumerable
+properties, so `Object.keys()` returns `[]` for them too, regardless of
+content. That's the same leak class `isOpaqueParams` exists to close, not a
+new one — pre-existing, not a regression from this diff, but worth closing
+rather than documenting as a known hole. Added:
+
+```ts
+export function isOpaqueParams(value: unknown): boolean {
+  return (
+    value instanceof FormData ||
+    value instanceof Blob ||
+    value instanceof ArrayBuffer ||
+    value instanceof URLSearchParams ||
+    value instanceof Date ||
+    value instanceof Map ||
+    value instanceof Set
+  )
+}
+```
+
 `cacheMiddleware` and `canShare` now use `isOpaqueParams`. `isSpecialBody`
-itself is unchanged and still used for its original job — body serialization
-and URL-building's special-body bypass — where a raw string legitimately
-needs the same pass-through treatment as the other four.
+itself is unchanged and still used for its original job — deciding whether
+params can be decomposed into path/query pairs (its one call site is
+`create-api.ts`'s URL-building bypass) — where a raw string legitimately
+needs the same pass-through treatment as the other seven. `serializeBody`
+(`src/utils/serialize.ts`) is a separate concern entirely, with its own
+inline type checks; it never imports `isSpecialBody`.
 
 Covered by `tests/cache-middleware.test.ts` (a string-param endpoint is
-cached on the second identical call) and `tests/share.test.ts` (a
-string-param endpoint coalesces); the existing FormData/URLSearchParams
-exclusion tests in both files confirm those four still decline.
+cached on the second identical call; a `Map`-param endpoint never serves one
+payload's response to another's) and `tests/share.test.ts` (a string-param
+endpoint coalesces); the existing FormData/URLSearchParams exclusion tests in
+both files confirm those still decline.
 
 **Status:** fixed in 2.2.1. Identified and parked during 2.2.0's final review.
 This is a **behavioural fix to a 2.2.0 regression**, not a new capability —
-see the CHANGELOG's `[2.2.1]` entry.
+see the CHANGELOG's `[2.2.1]` entry. The `Date`/`Map`/`Set` broadening was
+caught in this release's own code review, before shipping.
 
 ---
 
@@ -828,14 +899,28 @@ custom `delay` curve returning `NaN` (fixed in 2.2.0) — but the backstop
 converts the symptom (a non-number reaching `setTimeout`) into a *different*
 bug (a zero delay) rather than preventing the cause.
 
-### Fix (applied)
+### Fix (applied, then corrected on review)
 
 `maxDelay` (and, for the identical reason, `baseDelay`) is now validated
-where it's resolved, before it ever reaches the arithmetic:
+where it's resolved, before it ever reaches the arithmetic. The first pass
+guarded against "not finite":
 
 ```ts
+// First pass — INCOMPLETE, see below
 const baseDelay = Number.isFinite(o.baseDelay) ? (o.baseDelay as number) : 250
 const maxDelay = Number.isFinite(o.maxDelay) ? (o.maxDelay as number) : 30_000
+```
+
+Caught on review: `Number.isFinite(Infinity)` is `false`, so `maxDelay:
+Infinity` — the documented "no cap" idiom, since `Math.min(computed,
+Infinity)` is always `computed` — silently fell back to the `30_000` default
+instead of actually leaving the curve uncapped. That is an undocumented
+behaviour change this patch must not make. The guard is against `NaN`
+specifically, not non-finiteness in general:
+
+```ts
+const baseDelay = o.baseDelay !== undefined && !Number.isNaN(o.baseDelay) ? o.baseDelay : 250
+const maxDelay = o.maxDelay !== undefined && !Number.isNaN(o.maxDelay) ? o.maxDelay : 30_000
 ```
 
 The later backstop is kept as defense-in-depth (it still guards `computeDelay`
@@ -844,7 +929,10 @@ this case.
 
 Covered by `tests/retry-policy.test.ts`: `maxDelay: NaN` still produces the
 computed exponential delays rather than `[0, 0]`; `baseDelay: NaN` falls back
-to its default the same way.
+to its default the same way; `maxDelay: Infinity` leaves the computed curve
+uncapped rather than falling back to the `30_000` default (a real 40s wait
+is cut short by aborting the moment `onRetry` reports the delay, before
+`sleep()` starts, so the test stays fast without changing what's observed).
 
 **Status:** fixed in 2.2.1. Identified and parked during 2.2.0's final review.
 
