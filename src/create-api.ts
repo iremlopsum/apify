@@ -859,15 +859,29 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // tracker, and this path builds its Result directly, bypassing
           // execute()'s post-execution hook entirely — so when this is NOT
           // the last release, nothing else will ever report it, and this
-          // path must. But release() also tells us when it WAS the last
-          // reference: that release aborts the shared controller, and the
-          // shared execute() will then observe that abort itself and report
-          // it through its own post-execution hook — reporting it again here
-          // would double it. So report only when this was not the last one.
+          // path must. When it WAS the last reference, that release aborts
+          // the shared controller — but the shared execute()'s hook only
+          // reports when the operation then RESOLVES WITH AN ERROR RESULT.
+          // Two reachable cases where it doesn't (review finding, 2.2.1):
+          // the shared chain REJECTS instead of resolving (a middleware that
+          // throws on abort — a token-fetching auth middleware is the
+          // realistic case), or it SHORT-CIRCUITS TO SUCCESS regardless of
+          // the abort (a cacheMiddleware hit, which we ship, never consults
+          // the signal). Assuming the delegate always reports produced ZERO
+          // reports in both — worse than the duplicate this fix removes. So
+          // don't assume: watch what the shared promise actually does, and
+          // report here whenever the delegate didn't (and won't).
           const onAbort = (): void => {
             const wasLast = release(perCaller.reason)
             const result = buildFailedResult(perCaller.reason, 'abort')
-            if (!wasLast) fireOnError(result.error as ApiError)
+            if (!wasLast) {
+              fireOnError(result.error as ApiError)
+            } else {
+              promise.then(
+                r => { if (!r.error) fireOnError(result.error as ApiError) },
+                () => fireOnError(result.error as ApiError)
+              )
+            }
             finish(result)
           }
 
