@@ -16,7 +16,7 @@
 
 import type { Middleware, Result, RetryOptions, RetryInfo } from './types.js'
 import { CacheStore, stableStringify } from './utils/cache.js'
-import { isSpecialBody } from './utils/special-body.js'
+import { isOpaqueParams } from './utils/special-body.js'
 
 // Re-exported so consumers of the `./middleware` entry point can name these
 // types directly (e.g. a shared `onRetry` handler, or a reusable options
@@ -169,8 +169,31 @@ export function retryMiddleware(options: number | RetryOptions = 3): Middleware 
   const o: RetryOptions = typeof options === 'number' ? { max: options } : options
   const max = o.max ?? 3
   const curve = o.delay ?? 'exponential'
-  const baseDelay = o.baseDelay ?? 250
-  const maxDelay = o.maxDelay ?? 30_000
+  // `??` alone only catches omission. `baseDelay`/`maxDelay` are exactly as
+  // consumer-supplied as a custom `delay` curve (a stray `Number(env.X)`
+  // reaches here just as easily), and an explicit NaN survives `??`
+  // unchanged. Left unvalidated, it poisons `Math.min(computed, maxDelay)` —
+  // NaN whenever either argument is — which the existing backstop further
+  // down then clamps to 0, turning the whole backoff policy into a tight
+  // retry burst against a server that is already struggling: exactly what
+  // this feature exists to prevent. Validate both here, once, so a bad value
+  // falls back to the default instead of reaching the arithmetic at all.
+  //
+  // Guard against NaN specifically, not "not finite": `maxDelay: Infinity`
+  // is a legitimate, documented "no cap" idiom (Math.min(computed, Infinity)
+  // is always `computed`), and Number.isFinite(Infinity) is false. Treating
+  // it the same as NaN would silently replace "uncapped" with "capped at
+  // 30_000" — an undocumented behaviour change this patch must not make.
+  //
+  // `typeof o.x === 'number'` first, not just `!Number.isNaN(o.x)`:
+  // Number.isNaN(null) is false, so null would otherwise pass straight
+  // through to Math.min(computed, null), where null coerces to 0 —
+  // reintroducing the exact tight-retry-burst this guard exists to prevent,
+  // through a different bad input from the identical class of
+  // misconfiguration (a JSON config carrying a literal null is as reachable
+  // as a stray Number(env.X)).
+  const baseDelay = typeof o.baseDelay === 'number' && !Number.isNaN(o.baseDelay) ? o.baseDelay : 250
+  const maxDelay = typeof o.maxDelay === 'number' && !Number.isNaN(o.maxDelay) ? o.maxDelay : 30_000
   const jitter = o.jitter ?? true
   const respectRetryAfter = o.respectRetryAfter ?? true
   const retryOn = o.retryOn ?? ((r: Result<unknown>) => (r.error?.status ?? 0) >= 500)
@@ -237,8 +260,10 @@ export function retryMiddleware(options: number | RetryOptions = 3): Middleware 
       // curve outright (still capped by maxDelay) and is never jittered.
       const header = respectRetryAfter ? parseRetryAfter(result.response?.headers.get('retry-after') ?? null) : null
       let delay = Math.min(header ?? computeDelay(attempt), maxDelay)
-      // Final backstop: maxDelay and baseDelay are consumer-supplied too, and
-      // Math.min(x, NaN) is NaN. Never hand setTimeout a non-number.
+      // Final backstop, now mostly defense-in-depth since maxDelay/baseDelay
+      // are validated where they're resolved above: computeDelay and
+      // parseRetryAfter each already guard their own inputs, but never hand
+      // setTimeout a non-number regardless of which of these composes badly.
       if (!Number.isFinite(delay) || delay < 0) delay = 0
       if (header === null && jitter) delay = Math.random() * delay
 
@@ -382,11 +407,16 @@ export type CacheMiddleware = Middleware & { clear(): void }
  * and `{ a: 1, b: 2 }` are treated as the same call). This means the cache
  * key is always derived from the original params object, not the processed URL.
  *
- * A call whose params are a special body type — `FormData`, `Blob`,
- * `ArrayBuffer`, `URLSearchParams`, or a raw string — is never cached and
- * never served from cache: those cannot be told apart by the stable
- * serialisation, so caching them could hand one caller the response to a
- * different payload than the one it sent.
+ * A call whose params are opaque to the stable serialisation — any value
+ * whose own enumerable keys don't distinguish it from another instance
+ * (`FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`, `Date`, `Map`, or
+ * `Set` — see `isOpaqueParams`) — is never cached and never served from
+ * cache: those all collapse to the literal `"{}"`, so caching them could
+ * hand one caller the response to a different payload than the one it sent.
+ * A raw string is not included in this exclusion — `stableStringify` keys a
+ * string correctly, so a string-param endpoint is cached like any other
+ * (fixed in 2.2.1; 2.2.0 excluded strings here too, which silently disabled
+ * caching for them).
  *
  * **What is cached:**
  *
@@ -463,16 +493,19 @@ export function cacheMiddleware(options?: {
   const debug = options?.debug ?? false
 
   const mw: Middleware = async (ctx, next) => {
-    // Params that are a special body type (FormData, Blob, ArrayBuffer,
-    // URLSearchParams, a raw string) can't be keyed: stableStringify falls
-    // through to Object.keys() for any object, and Object.keys() returns []
-    // for every one of them regardless of content, so two genuinely different
+    // Params that are opaque to the stable serialisation (see
+    // isOpaqueParams: FormData, Blob, ArrayBuffer, URLSearchParams, Date,
+    // Map, Set) can't be keyed: stableStringify falls through to
+    // Object.keys() for any object, and Object.keys() returns [] for every
+    // one of them regardless of content, so two genuinely different
     // payloads collapse onto the identical key `"<name>|{}"`. Whichever
     // finished first would then be served to the other — a caller uploading
     // payload B getting back payload A's response. Same collapse `share`
     // guards against with the same predicate; declining to cache is always
-    // safe, serving the wrong response never is.
-    if (isSpecialBody(ctx.request.params)) return next()
+    // safe, serving the wrong response never is. A raw string is deliberately
+    // NOT included — stableStringify keys it correctly — so string-param
+    // endpoints are cached normally.
+    if (isOpaqueParams(ctx.request.params)) return next()
 
     const paramsStr = stableStringify(ctx.request.params)
     const key = `${ctx.requestName}|${paramsStr}`

@@ -386,6 +386,41 @@ describe('cacheMiddleware', () => {
     expect(rB.data).toEqual({ who: 'B' })         // never A's cached response
   })
 
+  // ---------------------------------------------------------------------------
+  // Review finding 3 (2.2.1): isOpaqueParams enumerated FormData/Blob/
+  // ArrayBuffer/URLSearchParams as though that were the complete set of
+  // values whose own enumerable keys don't distinguish them -- but Date, Map
+  // and Set have the identical shape: Object.keys() returns [] for all three
+  // regardless of content, so stableStringify collapses every one of them to
+  // "{}" too. Pre-existing (not a regression from this diff), but the same
+  // leak class the predicate exists to close. Map is the example covered
+  // here; Date and Set collapse the identical way.
+  // ---------------------------------------------------------------------------
+  it('never serves one Map-param payload the response to another', async () => {
+    const bodies = ['A', 'B']
+    let n = 0
+    const fetchMock = vi.fn(async () => mockJsonResponse({ who: bodies[n++] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        upload: new Request<Map<string, string>, { who: string }>({ method: 'POST', path: '/upload', middleware: [cache] }),
+      },
+    })
+
+    const a = new Map([['payload', 'SECRET-A']])
+    const b = new Map([['payload', 'SECRET-B']])
+
+    const rA = await api.upload(a)
+    const rB = await api.upload(b)
+
+    expect(fetchMock.mock.calls.length).toBe(2)   // B must reach the network
+    expect(rA.data).toEqual({ who: 'A' })
+    expect(rB.data).toEqual({ who: 'B' })         // never A's cached response
+  })
+
   it('declines to cache special-body params at all, rather than keying them wrongly', async () => {
     const fetchMock = vi.fn(async () => mockJsonResponse({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
@@ -404,5 +439,37 @@ describe('cacheMiddleware', () => {
     await api.submit(new URLSearchParams({ q: 'x' }))
 
     expect(fetchMock.mock.calls.length).toBe(2)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Fix 3 (2.2.1): the guard added for docs/FIXES.md #14 reused isSpecialBody,
+  // which also excludes a raw `string` — but stableStringify keys a string
+  // correctly (via JSON.stringify), so a string-param endpoint is soundly
+  // cacheable. Sharing the predicate with isSpecialBody silently disabled
+  // caching for every string-param endpoint in 2.2.0. isOpaqueParams (the
+  // four object types only) fixes this without reopening #14: FormData, Blob,
+  // ArrayBuffer and URLSearchParams must still decline to cache.
+  // ---------------------------------------------------------------------------
+  it('caches a string-param endpoint (a raw string is soundly keyable, unlike FormData/Blob/etc)', async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    // `Request<TParams extends object, ...>` is satisfied by the boxed
+    // `String` type (it structurally extends `object`, unlike the lowercase
+    // primitive `string`), and a `string` literal is assignable to a
+    // `String`-typed parameter — so this is the real, no-cast consumer path
+    // for a string-param endpoint, not a type-system workaround.
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        search: new Request<String, { ok: boolean }>({ method: 'POST', path: '/search', middleware: [cache] }),
+      },
+    })
+
+    await api.search('needle')
+    await api.search('needle')
+
+    expect(fetchMock.mock.calls.length).toBe(1) // second call is a cache hit
   })
 })

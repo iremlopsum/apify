@@ -29,6 +29,11 @@ Companion document: [FEATURES.md](./FEATURES.md)
 | 12 | Tooling hygiene: dead eslint-disables, no CI, incomplete `prepublishOnly` | Low | No |
 | 13 | Path param keys are interpolated into a regex unescaped | Medium | No |
 | 14 | `cacheMiddleware` collapses special-body params (`FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`) to the same cache key — **fixed in 2.2.0** | High | No |
+| 15 | Duplicate `onError` under `share` when a sharer's own release is the last one — **fixed in 2.2.1** | Medium | No |
+| 16 | Cross-kind double `onError` report from a stale rejection handler after a caller gives up — **fixed in 2.2.1** | Medium | No |
+| 17 | `cacheMiddleware`'s and `share`'s special-body guard is broader than the bug — excludes `string`, which is soundly keyable — **fixed in 2.2.1** | Medium | No (behavioural fix) |
+| 18 | `timeout: 0.5` (or any sub-ms value) silently means "no timeout" — **fixed in 2.2.1** | Medium | No |
+| 19 | `retryMiddleware`'s `maxDelay: NaN` collapses backoff to a tight retry burst — **fixed in 2.2.1** | Medium | No |
 | —  | [Package size: roughly halved, 241 kB → 113 kB](#package-size) | — | No |
 
 Items 1, 5, 10 and 11 are behavioural/type breaking changes. **Batch them into a
@@ -593,6 +598,343 @@ in deliberately: 2.2.0 introduces `isSpecialBody` for the identical bug under
 `share` and documents the failure mode in both the README and this file, so
 shipping the guard for one while the other stayed exposed would invite a reader
 to assume the library handles it everywhere.
+
+---
+
+## 15. Duplicate `onError` under `share`
+
+**Severity:** Medium · **Files:** `src/create-api.ts` (the `share: true`
+coalescing block, `onAbort`), `src/utils/share.ts` (`ShareTracker.release`)
+
+A shared call that times out or is cancelled reported to `onError` more times
+than the identical non-shared call would — `N+1` where `N` is the non-shared
+count.
+
+### Evidence (measured on 2.2.0)
+
+```
+SHARED    1 caller, timeout     -> onError x2  ["timeout","timeout"]
+NON-SHARED same                 -> onError x1  ["timeout"]
+SHARED    2 callers, both abort -> onError x3  ["abort","abort","abort"]
+```
+
+### Root cause
+
+The per-caller `onAbort` path calls `failedResult(perCaller.reason, 'abort')`,
+which reports via `fireOnError`. That report is correct and necessary for a
+**non-last** caller's give-up: the shared request keeps running for the
+remaining sharers, so the shared `execute()` never fails on its own account,
+and nothing else would ever report this caller's give-up. But when the caller
+**is** the last sharer, `release()` also aborts the shared request — and the
+shared `execute()` then observes that abort itself and fires its own
+post-execution `onError` for the exact same failure.
+
+### Why it matters
+
+Noisy, duplicated error reports for a scenario (`share: true`) explicitly
+documented as behaviourally identical to the non-shared case from the
+caller's perspective. A dashboard or alerting rule built on `onError` counts
+would see 2-3x the real failure rate for shared endpoints.
+
+### Fix (applied, then corrected on review)
+
+`ShareTracker.release()` now returns whether *this* release was the one that
+dropped `refs` to zero and aborted the shared controller. The first pass had
+the per-caller path in `create-api.ts` report only when it was not:
+
+```ts
+// First pass — INCOMPLETE, see below
+const onAbort = (): void => {
+  const wasLast = release(perCaller.reason)
+  const result = buildFailedResult(perCaller.reason, 'abort')
+  if (!wasLast) fireOnError(result.error as ApiError)
+  finish(result)
+}
+```
+
+This assumed that when `wasLast` is true, the shared `execute()`'s
+post-execution hook would always pick up the reporting duty. It doesn't: that
+hook only fires `onError` when the shared operation *resolves with an error
+Result*. Two reachable cases where it doesn't (caught on review, before this
+version shipped):
+
+- the shared middleware chain **rejects** instead of resolving (a middleware
+  that throws on abort — a token-fetching auth middleware is the realistic
+  case) — the rejection bypasses the hook's fulfillment branch entirely;
+- the shared middleware chain **short-circuits to success** regardless of the
+  abort (a `cacheMiddleware` hit, which never consults the signal) — the
+  result has no error for the hook to report.
+
+In both, the corrected-but-still-wrong first pass produced **zero** reports
+for a real cancellation — worse than the duplicate this fix set out to
+remove, and exactly the failure mode the original review called out. Fixed by
+not assuming the delegate reports, and instead watching what the shared
+promise actually does:
+
+```ts
+const onAbort = (): void => {
+  const wasLast = release(perCaller.reason)
+  const result = buildFailedResult(perCaller.reason, 'abort')
+  if (!wasLast) {
+    fireOnError(result.error as ApiError)
+  } else {
+    // execute()'s hook reports only on an error Result. If the shared chain
+    // rejects, or resolves to success regardless of the abort (a cache hit),
+    // it never will — so report here instead.
+    promise.then(
+      r => { if (!r.error) fireOnError(result.error as ApiError) },
+      () => fireOnError(result.error as ApiError)
+    )
+  }
+  finish(result)
+}
+```
+
+Covered by `tests/share.test.ts` ("duplicate onError under share (Fix 1,
+2.2.1)"), one test per acceptance row: 1 caller/timeout (2 → 1), 2
+callers/both abort (3 → 2, one each), 3 sharers/shared 500 (unchanged, 1),
+non-shared/timeout (unchanged, 1) — plus two rows added on review: last
+sharer gives up while the shared chain rejects (0 → 1), and last sharer gives
+up against a `cacheMiddleware` hit (0 → 1).
+
+**Status:** fixed in 2.2.1. Identified and parked during 2.2.0's final review
+("Known, recorded, not fixed" in that release's PR notes) — a regression
+introduced by that release's own final fix wave (I3, `docs/FIXES.md` history),
+not present before `share` existed. The gate-can-produce-zero-reports gap was
+caught in this release's own code review, before shipping.
+
+---
+
+## 16. Cross-kind double `onError` report from a stale rejection handler
+
+**Severity:** Medium · **Files:** `src/create-api.ts` (the `share: true`
+coalescing block, the `promise.then(...)` rejection handler)
+
+A caller that already gave up (via `onAbort`) still has a live rejection
+handler registered on the shared promise. When the shared operation later
+rejects (an async middleware throwing is the realistic case), that handler
+built a Result via `failedResult(err, 'network')` and reported it — even
+though `finish`'s `done` guard immediately discarded the Result it produced.
+
+### Evidence (measured on 2.2.0)
+
+Two callers, one aborts, then a middleware rejects the shared operation:
+
+```
+['abort', 'network', 'network']
+```
+
+The already-aborted caller reports twice — once correctly for its own abort,
+once more (under a *different* kind) when the shared operation it had already
+given up on later rejects.
+
+### Why it matters
+
+Same class of problem as #15 — a caller's error tracker sees more reports
+than real failures, and here under two different `kind`s for what is, from
+that caller's point of view, one failure it already handled.
+
+### Fix (applied)
+
+The rejection handler now bails before building anything if this caller is
+already `done`:
+
+```ts
+promise.then(
+  r => finish(r),
+  (err: unknown) => {
+    if (done) return
+    finish(failedResult(err, 'network'))
+  }
+)
+```
+
+Covered by `tests/share.test.ts` ("cross-kind double report on a stale
+rejection handler (Fix 2, 2.2.1)"): a caller that aborted before the shared
+operation rejects gets exactly one report.
+
+**Status:** fixed in 2.2.1. Identified and parked during 2.2.0's final review,
+folded into the same "Duplicate onError under share" note as #15 in that
+release's PR body — a distinct root cause in the same code region.
+
+---
+
+## 17. `cacheMiddleware`'s and `share`'s special-body guard is broader than the bug
+
+**Severity:** Medium · **Files:** `src/utils/special-body.ts`,
+`src/built-in-middleware.ts` (`cacheMiddleware`), `src/create-api.ts`
+(`canShare`)
+
+The guard added for #14 (`isSpecialBody`) also excludes a raw `string`. But
+`stableStringify` (`src/utils/cache.ts`) keys a string correctly, via
+`JSON.stringify` — it is only `FormData`/`Blob`/`ArrayBuffer`/
+`URLSearchParams` that collapse to the identical literal `"{}"`, because
+`Object.keys()` returns `[]` for all four regardless of content. Excluding
+`string` too was unnecessary, and it silently disabled caching (and, in
+`share`'s `canShare`, coalescing) for every string-param endpoint that shipped
+in 2.2.0.
+
+### Why it matters
+
+Anyone whose string-param endpoints were cached (or shared) before 2.2.0
+would have silently lost that behaviour on upgrade, with no error and no
+signal beyond "the cache stopped working" — the exact kind of regression that
+goes unnoticed until someone measures cache hit rate.
+
+### Fix (applied, then broadened on review)
+
+A new predicate, `isOpaqueParams`, narrows the check to the object types
+whose own enumerable keys don't distinguish two different instances — first
+written as the four originally identified:
+
+```ts
+// First pass — narrower than the actual bug class, see below
+export function isOpaqueParams(value: unknown): boolean {
+  return (
+    value instanceof FormData ||
+    value instanceof Blob ||
+    value instanceof ArrayBuffer ||
+    value instanceof URLSearchParams
+  )
+}
+```
+
+Caught on review: the JSDoc read as though these four were the complete set,
+but `Date`, `Map`, and `Set` collapse the identical way — a `Date`'s time
+value and a `Map`/`Set`'s entries are internal slots, not own-enumerable
+properties, so `Object.keys()` returns `[]` for them too, regardless of
+content. That's the same leak class `isOpaqueParams` exists to close, not a
+new one — pre-existing, not a regression from this diff, but worth closing
+rather than documenting as a known hole. Added:
+
+```ts
+export function isOpaqueParams(value: unknown): boolean {
+  return (
+    value instanceof FormData ||
+    value instanceof Blob ||
+    value instanceof ArrayBuffer ||
+    value instanceof URLSearchParams ||
+    value instanceof Date ||
+    value instanceof Map ||
+    value instanceof Set
+  )
+}
+```
+
+`cacheMiddleware` and `canShare` now use `isOpaqueParams`. `isSpecialBody`
+itself is unchanged and still used for its original job — deciding whether
+params can be decomposed into path/query pairs (its one call site is
+`create-api.ts`'s URL-building bypass) — where a raw string legitimately
+needs the same pass-through treatment as the other seven. `serializeBody`
+(`src/utils/serialize.ts`) is a separate concern entirely, with its own
+inline type checks; it never imports `isSpecialBody`.
+
+Covered by `tests/cache-middleware.test.ts` (a string-param endpoint is
+cached on the second identical call; a `Map`-param endpoint never serves one
+payload's response to another's) and `tests/share.test.ts` (a string-param
+endpoint coalesces); the existing FormData/URLSearchParams exclusion tests in
+both files confirm those still decline.
+
+**Status:** fixed in 2.2.1. Identified and parked during 2.2.0's final review.
+This is a **behavioural fix to a 2.2.0 regression**, not a new capability —
+see the CHANGELOG's `[2.2.1]` entry. The `Date`/`Map`/`Set` broadening was
+caught in this release's own code review, before shipping.
+
+---
+
+## 18. `timeout: 0.5` silently means "no timeout"
+
+**Severity:** Medium · **Files:** `src/utils/timeout.ts`
+
+`timeoutSignalFor` computed `Math.floor(Math.min(...))` before checking
+`ms > 0`. A positive but sub-millisecond deadline (`timeout: 0.5`) floors to
+`0`, fails that check, and the request ships with **no deadline at all** —
+the opposite of what a positive value asked for.
+
+### Why it matters
+
+A caller who explicitly asked for a bound gets none, with no error and no
+indication anything was wrong — the request simply never times out.
+
+### Fix (applied)
+
+The positivity check now happens on the raw (pre-floor) value; only once a
+genuine positive deadline is established does flooring happen, and the
+result is clamped up to a 1ms minimum rather than down to nothing:
+
+```ts
+const raw = Math.min(callTimeout ?? requestTimeout ?? 0, 2 ** 31 - 1)
+if (!(raw > 0)) return undefined
+const ms = Math.max(1, Math.floor(raw))
+return AbortSignal.timeout(ms)
+```
+
+`0`, negative, `NaN`, and omitted are unaffected — all still mean "no
+timeout".
+
+Covered by `tests/timeout.test.ts`: `timeout: 0.5` aborts the request rather
+than leaving it unbounded; `0` and a negative value both still disable it.
+
+**Status:** fixed in 2.2.1. Identified and parked during 2.2.0's final review.
+
+---
+
+## 19. `retryMiddleware`'s `maxDelay: NaN` collapses backoff to a tight retry burst
+
+**Severity:** Medium · **Files:** `src/built-in-middleware.ts`
+(`retryMiddleware`)
+
+`baseDelay` and `maxDelay` only ever got a `??` default, so an explicit `NaN`
+(as consumer-supplied as either — a stray `Number(process.env.X)`) survives
+unchanged. `Math.min(computed, maxDelay)` is `NaN` whenever either argument
+is, and the existing backstop (`if (!Number.isFinite(delay) || delay < 0)
+delay = 0`) then clamped that `NaN` down to `0` — turning the whole backoff
+policy into a tight retry loop against a server that is already struggling,
+exactly what the feature exists to prevent.
+
+### Why it matters
+
+This is the same failure mode the backstop was written to prevent for a
+custom `delay` curve returning `NaN` (fixed in 2.2.0) — but the backstop
+converts the symptom (a non-number reaching `setTimeout`) into a *different*
+bug (a zero delay) rather than preventing the cause.
+
+### Fix (applied, then corrected on review)
+
+`maxDelay` (and, for the identical reason, `baseDelay`) is now validated
+where it's resolved, before it ever reaches the arithmetic. The first pass
+guarded against "not finite":
+
+```ts
+// First pass — INCOMPLETE, see below
+const baseDelay = Number.isFinite(o.baseDelay) ? (o.baseDelay as number) : 250
+const maxDelay = Number.isFinite(o.maxDelay) ? (o.maxDelay as number) : 30_000
+```
+
+Caught on review: `Number.isFinite(Infinity)` is `false`, so `maxDelay:
+Infinity` — the documented "no cap" idiom, since `Math.min(computed,
+Infinity)` is always `computed` — silently fell back to the `30_000` default
+instead of actually leaving the curve uncapped. That is an undocumented
+behaviour change this patch must not make. The guard is against `NaN`
+specifically, not non-finiteness in general:
+
+```ts
+const baseDelay = o.baseDelay !== undefined && !Number.isNaN(o.baseDelay) ? o.baseDelay : 250
+const maxDelay = o.maxDelay !== undefined && !Number.isNaN(o.maxDelay) ? o.maxDelay : 30_000
+```
+
+The later backstop is kept as defense-in-depth (it still guards `computeDelay`
+and `parseRetryAfter` composing badly), but is no longer load-bearing for
+this case.
+
+Covered by `tests/retry-policy.test.ts`: `maxDelay: NaN` still produces the
+computed exponential delays rather than `[0, 0]`; `baseDelay: NaN` falls back
+to its default the same way; `maxDelay: Infinity` leaves the computed curve
+uncapped rather than falling back to the `30_000` default (a real 40s wait
+is cut short by aborting the moment `onRetry` reports the delay, before
+`sleep()` starts, so the test stays fast without changing what's observed).
+
+**Status:** fixed in 2.2.1. Identified and parked during 2.2.0's final review.
 
 ---
 

@@ -2,7 +2,17 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
 import { ApiError } from '../src/result.js'
+import { cacheMiddleware } from '../src/built-in-middleware.js'
 import type { Middleware } from '../src/types.js'
+
+/**
+ * Flushes the entire microtask queue: a macrotask (`setTimeout`) only runs
+ * once every pending microtask has drained, so this guarantees any onError
+ * report still in flight through a promise chain has fired before we assert
+ * on it — regardless of how many `.then` hops separate it from the last
+ * `await` in the test.
+ */
+const flush = () => new Promise<void>(resolve => setTimeout(resolve, 0))
 
 function controllable() {
   const calls: { resolve: () => void; aborted: () => boolean }[] = []
@@ -343,6 +353,37 @@ describe('share', () => {
     expect(f.calls[0].aborted()).toBe(true)   // the shared request itself was cut off
   })
 
+  // ---------------------------------------------------------------------------
+  // Fix 3 (2.2.1): canShare shared isSpecialBody with cacheMiddleware's guard
+  // for docs/FIXES.md #14, which also excludes a raw string — but
+  // stableStringify keys a string correctly (via JSON.stringify), so a
+  // string-param endpoint is soundly coalescable. Narrowed to isOpaqueParams
+  // (the four object types only); FormData/Blob/ArrayBuffer/URLSearchParams
+  // must still decline to coalesce (already covered by the tests above).
+  // ---------------------------------------------------------------------------
+  it('coalesces a string-param endpoint (a raw string is soundly keyable, unlike FormData/Blob/etc)', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    // `Request<TParams extends object, ...>` cannot name `string` itself — a
+    // raw string body is a runtime-only concept (isOpaqueParams operates on
+    // the erased `object` params createApi actually passes through), so the
+    // call site casts past the declared (but here vacuous)
+    // `Record<string, never>` params type, the same way the suite already
+    // casts a BigInt timeout past `number` elsewhere in this file.
+    const api = createApi({
+      baseUrl: '',
+      requests: { search: new Request<Record<string, never>, { ok: number }>({ method: 'POST', path: '/search', share: true }) },
+    })
+    const all = Promise.all([
+      api.search('needle' as unknown as Record<string, never>),
+      api.search('needle' as unknown as Record<string, never>),
+    ])
+    await Promise.resolve()
+    expect(f.fn.mock.calls.length).toBe(1)
+    f.calls[0].resolve()
+    const results = await all
+    expect(results.every(r => r.error === null)).toBe(true)
+  })
+
   it('does not let a late joiner extend the shared operation deadline', async () => {
     const f = controllable(); vi.stubGlobal('fetch', f.fn)
     const api = createApi({
@@ -368,5 +409,241 @@ describe('share', () => {
     expect(a.error?.kind).toBe('timeout')
     expect(b.error?.kind).toBe('timeout')
     expect(Date.now() - started).toBeLessThan(1000)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix 1 (2.2.1, docs/FIXES.md "Duplicate onError under share"): a sharer that
+// gives up reports its own failure via failedResult, which is correct and
+// necessary for a non-last release — the shared execute() never fails on its
+// own account, so nothing else would report it. But when the release IS the
+// last one, it also aborts the shared controller (ShareTracker.release), and
+// the shared execute()'s own post-execution hook then reports that same
+// failure a second time. Target counts, per the four acceptance rows:
+//
+//   1 caller,  share, times out           -> was 2, now 1
+//   2 callers, share, both abort          -> was 3, now 2 (one each)
+//   3 sharers, shared request 500s        -> unchanged, 1
+//   non-shared, times out                 -> unchanged, 1
+// ---------------------------------------------------------------------------
+describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('row 1: reports exactly once when the lone sharer times out', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const kinds: (string | undefined)[] = []
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: { get: new Request<{ id: string }, { ok: number }>({ method: 'GET', path: '/x/:id', share: true }) },
+    })
+
+    const r = await api.get({ id: '1' }, { timeout: 20 })
+    expect(r.error?.kind).toBe('timeout')
+
+    await flush()
+    expect(kinds).toEqual(['timeout'])
+  })
+
+  it('row 2: reports once per caller when two sharers both abort', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const kinds: (string | undefined)[] = []
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: { get: new Request<{ id: string }, { ok: number }>({ method: 'GET', path: '/x/:id', share: true }) },
+    })
+
+    const a1 = new AbortController()
+    const a2 = new AbortController()
+    const a = api.get({ id: '1' }, { signal: a1.signal })
+    const b = api.get({ id: '1' }, { signal: a2.signal })
+    await Promise.resolve()
+
+    a1.abort()
+    expect((await a).error?.kind).toBe('abort')
+
+    a2.abort()
+    expect((await b).error?.kind).toBe('abort')
+
+    await flush()
+    expect(kinds).toEqual(['abort', 'abort']) // one report per caller, not three
+  })
+
+  it('row 3 (unchanged): reports exactly once when the shared request itself 500s for 3 sharers', async () => {
+    const kinds: (string | undefined)[] = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 500 })))
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: { get: new Request<{ id: string }, { ok: number }>({ method: 'GET', path: '/x/:id', share: true }) },
+    })
+
+    const all = await Promise.all([api.get({ id: '1' }), api.get({ id: '1' }), api.get({ id: '1' })])
+    expect(all.every(r => r.error?.kind === 'http')).toBe(true)
+
+    await flush()
+    expect(kinds).toEqual(['http'])
+  })
+
+  it('row 4 (unchanged): reports exactly once for a non-shared timeout', async () => {
+    const kinds: (string | undefined)[] = []
+    vi.stubGlobal('fetch', vi.fn((_u: string, init: RequestInit) => new Promise<Response>((_res, rej) => {
+      const s = init.signal as AbortSignal | undefined
+      if (s?.aborted) { rej(s.reason); return }
+      s?.addEventListener('abort', () => rej(s.reason))
+    })))
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      // No `share` — the plain execute() path.
+      requests: { get: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/slow', timeout: 20 }) },
+    })
+
+    const r = await api.get()
+    expect(r.error?.kind).toBe('timeout')
+
+    await flush()
+    expect(kinds).toEqual(['timeout'])
+  })
+
+  // ---------------------------------------------------------------------------
+  // Review finding (2.2.1): `onAbort` inferred "the shared execute() will
+  // report this" purely from `wasLast` — but the delegate (execute()'s
+  // post-execution hook) only reports when the shared operation RESOLVES
+  // WITH AN ERROR RESULT. Two reachable cases where it doesn't, both
+  // reintroducing the zero-report gap the original fix set out to close:
+  //
+  //   row 5: the shared chain REJECTS (a middleware throws on abort — a
+  //          token-fetching auth middleware is the realistic case)
+  //   row 6: the shared chain SHORT-CIRCUITS TO SUCCESS (a cacheMiddleware
+  //          hit, which we ship, ignores the abort signal entirely)
+  //
+  // In both, the last sharer's own onAbort skipped reporting (wasLast was
+  // true) and the delegate never got a chance to report either — zero
+  // reports for a real cancellation, worse than the duplicate this fix set
+  // out to remove.
+  // ---------------------------------------------------------------------------
+  it('row 5: reports exactly once when the last sharer gives up and the shared chain rejects', async () => {
+    const kinds: (string | undefined)[] = []
+    // Simulates a token-fetching auth middleware that awaits the shared
+    // signal and throws (rather than returning a Result) when it aborts —
+    // never calling next(), so the rejection escapes execute() entirely.
+    const throwsOnAbort: Middleware = ctx => new Promise((_resolve, reject) => {
+      const s = ctx.request.signal
+      if (s?.aborted) { reject(s.reason); return }
+      s?.addEventListener('abort', () => reject(s.reason), { once: true })
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: {
+        get: new Request<{ id: string }, { ok: number }>({
+          method: 'GET', path: '/x/:id', share: true, middleware: [throwsOnAbort],
+        }),
+      },
+    })
+
+    const ac = new AbortController()
+    const p = api.get({ id: '1' }, { signal: ac.signal }) // the only (thus last) sharer
+    await Promise.resolve()
+    ac.abort()
+
+    const r = await p
+    expect(r.error?.kind).toBe('abort')
+
+    await flush()
+    expect(kinds).toEqual(['abort']) // exactly one report, not zero
+  })
+
+  it('row 6: reports exactly once when the last sharer gives up against a cacheMiddleware hit', async () => {
+    const kinds: (string | undefined)[] = []
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const fetchMock = vi.fn(async () => new Response('{"ok":1}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: {
+        get: new Request<{ id: string }, { ok: number }>({
+          method: 'GET', path: '/x/:id', share: true, middleware: [cache],
+        }),
+      },
+    })
+
+    // Warm the cache with an ordinary, uncontested call.
+    await api.get({ id: '1' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    // The only (thus last) sharer aborts before the cache hit's own promise
+    // settles — no `await` in between, so the abort is observed before the
+    // cache middleware's `return cached` has a chance to resolve. The cache
+    // hit succeeds regardless of the abort (cacheMiddleware never looks at
+    // the signal), so execute()'s post-execution hook sees a SUCCESS and has
+    // nothing to report.
+    const ac = new AbortController()
+    const p = api.get({ id: '1' }, { signal: ac.signal })
+    ac.abort()
+
+    const r = await p
+    expect(r.error?.kind).toBe('abort')          // the caller's own Result is still an abort
+    expect(fetchMock).toHaveBeenCalledTimes(1)    // still a cache hit, no second network call
+
+    await flush()
+    expect(kinds).toEqual(['abort']) // exactly one report, not zero
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix 2 (2.2.1): a caller that already gave up still has a live rejection
+// handler on the shared promise. When the shared operation later rejects (an
+// async middleware throwing is the realistic case), that handler used to
+// build and report a Result even though `finish`'s `done` guard discards it —
+// a second, differently-kinded report for a failure this caller already
+// reported once. Measured on 2.2.0 with two callers (one aborts, then the
+// shared middleware rejects): ['abort','network','network']. The aborted
+// caller must report exactly once.
+// ---------------------------------------------------------------------------
+describe('cross-kind double report on a stale rejection handler (Fix 2, 2.2.1)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('does not double-report a caller that already aborted when the shared operation later rejects', async () => {
+    const kinds: (string | undefined)[] = []
+    let releaseMiddleware: (() => void) | undefined
+    const exploding: Middleware = async () => {
+      await new Promise<void>(resolve => { releaseMiddleware = resolve })
+      throw new Error('middleware exploded')
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: {
+        get: new Request<{ id: string }, { ok: number }>({
+          method: 'GET', path: '/x/:id', share: true, middleware: [exploding],
+        }),
+      },
+    })
+
+    const ac = new AbortController()
+    const aborted = api.get({ id: '1' }, { signal: ac.signal })
+    const patient = api.get({ id: '1' }) // keeps the shared request alive
+    await Promise.resolve()
+
+    ac.abort()
+    const abortedResult = await aborted
+    expect(abortedResult.error?.kind).toBe('abort')
+
+    await flush()
+    expect(kinds).toEqual(['abort']) // exactly one report so far
+
+    // Now let the shared middleware reject.
+    releaseMiddleware!()
+    const patientResult = await patient
+    expect(patientResult.error?.kind).toBe('network')
+
+    await flush()
+    expect(kinds).toEqual(['abort', 'network']) // the aborted caller did not report again
   })
 })

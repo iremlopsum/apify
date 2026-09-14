@@ -47,7 +47,7 @@ import { abortKind } from './utils/abort-kind.js'
 import { anySignal } from './utils/any-signal.js'
 import { timeoutSignalFor } from './utils/timeout.js'
 import { stableStringify } from './utils/cache.js'
-import { isSpecialBody } from './utils/special-body.js'
+import { isSpecialBody, isOpaqueParams } from './utils/special-body.js'
 import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
 
 // =============================================================================
@@ -348,13 +348,20 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
     // =========================================================================
     api[name] = (params: object = {}, options: CallOptions = {}): Promise<Result<unknown>> => {
       /**
-       * A `Result` for a failure with no `Response` behind it, reported to
-       * `onError` on the way out. A function declaration rather than a const
-       * so it can name `execute` (as the Result's `retry`) before that
-       * binding exists further down.
+       * A `Result` for a failure with no `Response` behind it — construction
+       * only, no reporting. A function declaration rather than a const so it
+       * can name `execute` (as the Result's `retry`) before that binding
+       * exists further down.
+       *
+       * Split out of `failedResult` (below) so the share path's `onAbort` can
+       * build the Result it hands back to a caller WITHOUT necessarily
+       * reporting it: when this release was the last one, the shared
+       * `execute()` will observe the resulting abort itself and report it
+       * through the normal post-execution hook, so reporting it again here
+       * would double it (docs/FIXES.md, "Duplicate onError under share").
        */
-      function failedResult(reason: unknown, fallbackKind: 'abort' | 'network'): Result<unknown> {
-        const result = syntheticResult(
+      function buildFailedResult(reason: unknown, fallbackKind: 'abort' | 'network'): Result<unknown> {
+        return syntheticResult(
           reason,
           fallbackKind,
           request.config.method,
@@ -362,6 +369,14 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           params,
           execute
         )
+      }
+
+      /**
+       * `buildFailedResult` plus reporting to `onError` — the common case,
+       * used everywhere a failure has no other path to the error tracker.
+       */
+      function failedResult(reason: unknown, fallbackKind: 'abort' | 'network'): Result<unknown> {
+        const result = buildFailedResult(reason, fallbackKind)
         fireOnError(result.error as ApiError)
         return result
       }
@@ -741,15 +756,22 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
       // signal or timeout only changes *who is waiting*, so it does not
       // disable sharing: it is observed for this caller alone, below.
       //
-      // Special-body params (FormData, Blob, ArrayBuffer, URLSearchParams,
-      // a raw string) are excluded too: stableStringify falls through to
-      // Object.keys() for any object, which returns [] for all four of
-      // those types regardless of content, so two calls with genuinely
-      // different payloads would otherwise collide on the same share key,
-      // coalesce into one request, and hand one caller the response to the
-      // other's payload — the exact "security-shaped bug" this doc warns
-      // about for per-call headers, reachable through a different vector.
-      // Declining to share is always safe; corrupting a response never is.
+      // Opaque-body params (FormData, Blob, ArrayBuffer, URLSearchParams) are
+      // excluded too: stableStringify falls through to Object.keys() for any
+      // object, which returns [] for all four of those types regardless of
+      // content, so two calls with genuinely different payloads would
+      // otherwise collide on the same share key, coalesce into one request,
+      // and hand one caller the response to the other's payload — the exact
+      // "security-shaped bug" this doc warns about for per-call headers,
+      // reachable through a different vector. Declining to share is always
+      // safe; corrupting a response never is.
+      //
+      // A raw string is deliberately NOT excluded here (unlike
+      // isSpecialBody, used below for body/URL handling): stableStringify
+      // keys a string correctly, via JSON.stringify, so a string-param
+      // endpoint is soundly coalescable. Excluding it (as 2.2.0 did, sharing
+      // isSpecialBody for this check) silently disabled sharing for such
+      // endpoints — fixed in 2.2.1 by using isOpaqueParams here instead.
       //
       // The whole block is wrapped in try/catch for the same reason execute()
       // is: it runs in the bare body of the api method, so anything thrown
@@ -767,7 +789,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           request.config.share === true &&
           isEmptyHeaders(options.headers) &&
           (options.middleware === undefined || options.middleware.length === 0) &&
-          !isSpecialBody(params)
+          !isOpaqueParams(params)
         if (!canShare) return execute()
 
         const shareKey = `${name}|${stableStringify(params)}`
@@ -796,9 +818,12 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
         // `const { data, error } = await api.get(...)` then yields
         // undefined/undefined, `if (error)` is false, and the consumer carries
         // on as if the call had succeeded with no data. Convert it instead.
-        const settled = promise.then(r => r, (err: unknown) => failedResult(err, 'network'))
-
-        if (!perCaller) return settled
+        //
+        // No `perCaller` signal/timeout means there's no separate give-up path
+        // for this caller to race against — it can only ever learn its result
+        // from `promise` settling, so this is the whole story for it, same as
+        // it always reported.
+        if (!perCaller) return promise.then(r => r, (err: unknown) => failedResult(err, 'network'))
 
         // Race this caller's own giving-up against the shared result settling.
         // Giving up calls release(), which only decrements the refcount — the
@@ -813,17 +838,51 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             resolve(r)
           }
 
-          settled.then(finish)
+          promise.then(
+            r => finish(r),
+            (err: unknown) => {
+              // Fix 2 (2.2.1, "cross-kind double report"): this caller may
+              // already be `done` — most commonly because `onAbort` below
+              // already gave it a Result. `finish` would discard whatever we
+              // build here anyway, but `failedResult` reports to onError as a
+              // side effect of being built, which would report the SAME
+              // underlying give-up a second time, under a DIFFERENT kind
+              // ('network' here vs. whatever `onAbort` already reported).
+              // Bail before constructing anything.
+              if (done) return
+              finish(failedResult(err, 'network'))
+            }
+          )
 
-          // failedResult reports to onError on the way out. A sharer's own
-          // timeout is a genuine failure that belongs in an error tracker, and
-          // it reached none before: this path builds its Result directly and
-          // so bypasses execute()'s post-execution hook entirely, which made a
-          // shared timeout behave differently from the identical non-shared
-          // one. (Guarded, so a throwing handler cannot break this path.)
+          // Fix 1 (2.2.1, "Duplicate onError under share"): a sharer's own
+          // timeout or abort is a genuine failure that belongs in an error
+          // tracker, and this path builds its Result directly, bypassing
+          // execute()'s post-execution hook entirely — so when this is NOT
+          // the last release, nothing else will ever report it, and this
+          // path must. When it WAS the last reference, that release aborts
+          // the shared controller — but the shared execute()'s hook only
+          // reports when the operation then RESOLVES WITH AN ERROR RESULT.
+          // Two reachable cases where it doesn't (review finding, 2.2.1):
+          // the shared chain REJECTS instead of resolving (a middleware that
+          // throws on abort — a token-fetching auth middleware is the
+          // realistic case), or it SHORT-CIRCUITS TO SUCCESS regardless of
+          // the abort (a cacheMiddleware hit, which we ship, never consults
+          // the signal). Assuming the delegate always reports produced ZERO
+          // reports in both — worse than the duplicate this fix removes. So
+          // don't assume: watch what the shared promise actually does, and
+          // report here whenever the delegate didn't (and won't).
           const onAbort = (): void => {
-            release(perCaller.reason)
-            finish(failedResult(perCaller.reason, 'abort'))
+            const wasLast = release(perCaller.reason)
+            const result = buildFailedResult(perCaller.reason, 'abort')
+            if (!wasLast) {
+              fireOnError(result.error as ApiError)
+            } else {
+              promise.then(
+                r => { if (!r.error) fireOnError(result.error as ApiError) },
+                () => fireOnError(result.error as ApiError)
+              )
+            }
+            finish(result)
           }
 
           if (perCaller.aborted) onAbort()

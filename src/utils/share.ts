@@ -32,7 +32,7 @@ export class ShareTracker {
   acquire(
     key: string,
     exec: (signal: AbortSignal) => Promise<Result<unknown>>
-  ): { promise: Promise<Result<unknown>>; release: (reason?: unknown) => void } {
+  ): { promise: Promise<Result<unknown>>; release: (reason?: unknown) => boolean } {
     let entry = this.inflight.get(key)
 
     // A dying entry: every sharer has already released (refs <= 0) or its
@@ -70,13 +70,23 @@ export class ShareTracker {
 
     return {
       promise: held.promise,
-      release: (reason?: unknown) => {
-        if (released) return
+      // Returns whether THIS call was the one that dropped refs to zero and
+      // aborted the shared controller — the caller (create-api.ts) uses this
+      // to decide whether it must report the failure itself. A non-last
+      // release leaves the shared request running: it will never see this
+      // caller's give-up, so nothing else would ever report it, and the
+      // caller must. A last release aborts the shared request, whose own
+      // execute() will observe that abort and report it through the normal
+      // post-execution hook — reporting it again here would double it.
+      release: (reason?: unknown): boolean => {
+        if (released) return false
         released = true
         held.refs--
         if (held.refs <= 0 && !held.controller.signal.aborted) {
           held.controller.abort(reason)
+          return true
         }
+        return false
       },
     }
   }
