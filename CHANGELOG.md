@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] — 2026-09-14
+
+Five fixes closing findings that were identified and deliberately parked
+during 2.2.0's final review (see "Known, recorded, not fixed" in that
+release's notes, and `docs/FIXES.md`). No public API change.
+
+### Fixed
+
+- **`cacheMiddleware` no longer skips caching string-param endpoints — a
+  behavioural regression introduced by 2.2.0.** The special-body guard added
+  that release (for the pre-existing `FormData`/`Blob`/`ArrayBuffer`/
+  `URLSearchParams` cache-key collapse) reused `isSpecialBody`, which also
+  excludes a raw `string`. But `stableStringify` keys a string correctly —
+  unlike those four object types, which all collapse to the literal `"{}"` —
+  so excluding it was never necessary and silently stopped caching any
+  string-param endpoint. **If your string-param endpoints stopped being
+  cached after upgrading to 2.2.0, this restores it.** A new predicate,
+  `isOpaqueParams`, narrows the guard to the four object types only, and is
+  used by both `cacheMiddleware` and `share`'s coalescing gate; a
+  string-param endpoint under `share: true` is now soundly coalesced too.
+  `isSpecialBody` itself is unchanged and still used for body serialization,
+  where a raw string legitimately needs the same treatment as those four.
+- **A shared call under `share: true` no longer reports to `onError` more
+  times than the identical non-shared call would.** A sharer that gives up
+  reports its own failure directly — correct when it isn't the last
+  reference, since the shared request keeps running and nothing else would
+  ever report that give-up. But when it *is* the last reference, releasing
+  also aborts the shared request, and the shared operation then reports that
+  same failure again through its own, normal post-execution hook — doubling
+  it. `ShareTracker.release()` now reports whether its release was the one
+  that aborted the shared request, and the per-caller path reports only when
+  it was not. A related "cross-kind" duplicate — a caller that already gave
+  up still had a live rejection handler on the shared promise, which built
+  and reported a *second*, differently-kinded failure when the shared
+  operation later rejected, even though the Result it built was discarded —
+  is fixed the same way: a caller that has already finished no longer reports
+  again.
+- **`timeout: 0.5` (or any sub-millisecond value) no longer silently means "no
+  timeout".** `Math.floor` flooring a positive-but-fractional deadline to `0`
+  failed the "must be positive" check and left the request unbounded — the
+  opposite of the caller's intent. A resolved deadline greater than zero is
+  now clamped up to a 1ms minimum instead of down to nothing; `0`, negative,
+  `NaN`, and omitted still all mean "no timeout".
+- **`retryMiddleware`'s `maxDelay: NaN` no longer collapses backoff to a tight
+  retry burst.** `Math.min(computed, maxDelay)` is `NaN` whenever `maxDelay`
+  is, and the existing backstop then clamped that `NaN` down to `0` — turning
+  the whole point of a backoff policy (bounding retries, not eliminating the
+  delay) inside out. `maxDelay` is now validated where it's resolved and
+  falls back to its default (`30_000`) when not a finite number, before it
+  ever reaches the arithmetic; `baseDelay` gets the identical treatment, for
+  the identical reason (it poisons the same computation the same way).
+
 ## [2.2.0] — 2026-09-13
 
 Four new capabilities — a whole-operation `timeout`, a real retry backoff
