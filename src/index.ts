@@ -34,7 +34,8 @@ export type {
   Result,
   Middleware,
   MiddlewareContext,
-  MiddlewareNext
+  MiddlewareNext,
+  ApiErrorKind
 } from './types.js'
 
 // ---------------------------------------------------------------------------

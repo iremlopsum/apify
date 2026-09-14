@@ -21,8 +21,8 @@
 // reference it without creating a circular dependency at runtime.
 // At runtime, modules that need the actual class import directly from result.ts.
 // ---------------------------------------------------------------------------
-import type { ApiError } from './result.js'
-export type { ApiError }
+import type { ApiError, ApiErrorKind } from './result.js'
+export type { ApiError, ApiErrorKind }
 
 // ---------------------------------------------------------------------------
 // HTTP Method
@@ -134,6 +134,51 @@ export interface RequestConfig {
   dedupe?: boolean
 
   /**
+   * Join identical concurrent calls onto a single in-flight request.
+   *
+   * Sibling of {@link RequestConfig.dedupe}, not a replacement: dedupe
+   * **cancels** the older request, share **joins** the existing one. Setting
+   * both throws at `createApi` time.
+   *
+   * Identity is the request name plus a stable serialisation of the params.
+   * A call carrying per-call `headers` or `middleware` is never shared — those
+   * change *what* is requested, and handing one caller another's response
+   * would be a security-shaped bug. (Emptiness is what counts: `headers: {}`
+   * and `middleware: []` still share.) A per-call `signal` or `timeout` does
+   * not prevent sharing: those bound *who is still waiting*, not what is asked
+   * for, and a sharer that gives up receives its own error `Result`
+   * (`kind: 'timeout'` or `'abort'`) and reports it to `onError` exactly as
+   * the same non-shared call would. A per-*request*
+   * {@link RequestConfig.timeout}, by contrast, bounds the shared request
+   * itself for everyone.
+   * A call whose params are a special body type — `FormData`, `Blob`,
+   * `ArrayBuffer`, `URLSearchParams`, or a raw string — is also never shared:
+   * the stable serialisation used for identity can't distinguish two
+   * different payloads of these types from each other, so sharing them could
+   * hand one caller the response to a *different* payload than the one it
+   * sent.
+   *
+   * `result.retry()` on a shared result re-runs the pipeline using the
+   * **acquiring caller's** own per-call options (headers, signal, timeout) —
+   * whichever call first started the shared request — not the options of
+   * whichever caller happens to invoke `retry()`. This falls out of every
+   * non-aborting sharer receiving the literal same `Result` object; it is
+   * unavoidable given that design, but worth knowing before relying on it.
+   *
+   * **Known limitation:** middleware (global or per-request) that replaces
+   * `ctx.request.signal` — see {@link MiddlewareContext.request.signal} — is
+   * re-merged with the dedupe signal under `dedupe: true`, but is **not**
+   * currently re-merged with the share refcount controller. Combining
+   * `share` with signal-replacing middleware means that middleware's signal,
+   * not the refcount, ends up controlling the shared request: one sharer's
+   * middleware-installed signal could cancel the request for every other
+   * sharer.
+   *
+   * @default false
+   */
+  share?: boolean
+
+  /**
    * Override the default body serialization strategy.
    *
    * By default, GET/DELETE serialize params as query strings, and
@@ -154,6 +199,38 @@ export interface RequestConfig {
    * ```
    */
   bodyAs?: 'query' | 'body'
+
+  /**
+   * Abort this request if it has not completed within this many milliseconds.
+   *
+   * **This is a whole-operation deadline, not a per-attempt budget.** It covers
+   * the entire middleware chain including every retry and every backoff delay,
+   * so `timeout: 5000` with `retryMiddleware(3)` still means "an answer within
+   * 5 seconds" — not five seconds per attempt. This deliberately differs from
+   * axios, XHR and `got`, which apply timeouts per attempt.
+   *
+   * For a per-attempt budget, use a signal-replacing middleware placed inside
+   * the retry middleware instead:
+   *
+   * ```ts
+   * const perAttempt = (ms: number): Middleware => async (ctx, next) => {
+   *   ctx.request.signal = AbortSignal.timeout(ms)
+   *   return next()
+   * }
+   * middleware: [retryMiddleware(3), perAttempt(5000)]
+   * ```
+   *
+   * A timeout produces an error with `kind: 'timeout'` and `status: 0`.
+   * `result.retry()` starts a fresh budget. Non-positive or omitted means no
+   * timeout.
+   *
+   * Under {@link RequestConfig.share} this deadline belongs to the *operation*:
+   * it bounds the single shared request, measured from when that request
+   * started rather than from when each caller joined, so every sharer is
+   * bounded by it and no individual caller can extend or disable it. A caller's
+   * own {@link CallOptions.timeout} bounds only that caller.
+   */
+  timeout?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +336,21 @@ export interface CallOptions {
    * the fetch is aborted and the result contains an error with `status: 0`.
    */
   signal?: AbortSignal
+
+  /**
+   * Overrides `RequestConfig.timeout` for this call only. Same whole-operation
+   * deadline semantics — see there for details. Non-positive means no timeout.
+   *
+   * Under `share: true` this bounds only *this* caller's wait. The operation's
+   * own `RequestConfig.timeout` still bounds the shared request for everyone,
+   * so a per-call `timeout: 0` cannot lift it and a longer per-call timeout
+   * cannot outlast it.
+   *
+   * A fractional or out-of-range value is normalised rather than rejected:
+   * rounded down to whole milliseconds, clamped to the platform timer ceiling,
+   * and treated as "no timeout" if it is `NaN` or non-positive.
+   */
+  timeout?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -307,10 +399,13 @@ export interface MiddlewareContext {
      * call superseding this one.
      *
      * While middleware runs — before `next()` reaches the core fetch — this
-     * holds whatever the caller passed as `CallOptions.signal`, so it is
-     * `undefined` when the caller passed none. That is true whether or not
-     * dedupe is enabled: the dedupe signal is installed here by the core
-     * fetch, so middleware only observes it after `next()` returns.
+     * holds the caller's `CallOptions.signal` merged with the timeout signal
+     * (via `anySignal`) when a `timeout` is configured on the request,
+     * operation, or call. It is `undefined` only when neither is present —
+     * no `CallOptions.signal` and no effective `timeout`. This is true
+     * whether or not dedupe is enabled: the dedupe signal is installed here
+     * by the core fetch, so middleware only observes it after `next()`
+     * returns.
      *
      * @example
      * ```ts
@@ -440,6 +535,53 @@ export interface ApiConfig<TRequests extends Record<string, unknown>> {
 }
 
 // ---------------------------------------------------------------------------
+// Retry Options (for retryMiddleware)
+// ---------------------------------------------------------------------------
+
+/** Information handed to {@link RetryOptions.onRetry} before each retry. */
+export interface RetryInfo {
+  /** 1-based retry number — the first retry is 1. */
+  attempt: number
+  /** The configured maximum number of retries. */
+  max: number
+  /** The delay about to elapse, in ms, after jitter and `Retry-After`. */
+  delay: number
+  /** The result that triggered this retry. */
+  result: Result<unknown>
+}
+
+/** Options for {@link retryMiddleware}. */
+export interface RetryOptions {
+  /** Additional attempts after the first. Default 3. */
+  max?: number
+  /** Delay curve. Default `'exponential'`. */
+  delay?: 'exponential' | 'linear' | ((attempt: number) => number)
+  /** First delay in ms. Default 250. */
+  baseDelay?: number
+  /** Per-delay cap in ms. Default 30000. */
+  maxDelay?: number
+  /** Full jitter — uniform random in `[0, computed]`. Default true. */
+  jitter?: boolean
+  /** Honour a `Retry-After` response header when present. Default true. */
+  respectRetryAfter?: boolean
+  /**
+   * Whether to retry. Default `r => (r.error?.status ?? 0) >= 500`.
+   *
+   * 429 and network errors are deliberately not retried by default; opt in
+   * explicitly rather than having behaviour change under you on upgrade.
+   */
+  retryOn?: (result: Result<unknown>, attempt: number) => boolean
+  /**
+   * Observational hook fired before each retry's delay elapses. Its return
+   * value is ignored and a throw cannot fail the request.
+   *
+   * This exists because the call site observes nothing during retries: the
+   * promise stays pending through every attempt and resolves exactly once.
+   */
+  onRetry?: (info: RetryInfo) => void
+}
+
+// ---------------------------------------------------------------------------
 // GraphQL Types
 // ---------------------------------------------------------------------------
 
@@ -481,6 +623,18 @@ export interface OperationConfig {
    * @default false
    */
   dedupe?: boolean
+
+  /**
+   * Abort this operation if it has not completed within this many
+   * milliseconds.
+   *
+   * **This is a whole-operation deadline, not a per-attempt budget** — see
+   * {@link RequestConfig.timeout} for the full rationale, which applies
+   * identically here. A timeout produces an error with `kind: 'timeout'` and
+   * `status: 0`. `result.retry()` starts a fresh budget. Non-positive or
+   * omitted means no timeout.
+   */
+  timeout?: number
 }
 
 /**

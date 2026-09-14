@@ -41,7 +41,13 @@ import { composeMiddleware } from './middleware.js'
 import { buildUrl, joinUrl } from './utils/path-params.js'
 import { serializeBody } from './utils/serialize.js'
 import { DedupeTracker } from './utils/dedupe.js'
+import { ShareTracker } from './utils/share.js'
 import { mergeHeaders } from './utils/headers.js'
+import { abortKind } from './utils/abort-kind.js'
+import { anySignal } from './utils/any-signal.js'
+import { timeoutSignalFor } from './utils/timeout.js'
+import { stableStringify } from './utils/cache.js'
+import { isSpecialBody } from './utils/special-body.js'
 import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
 
 // =============================================================================
@@ -157,6 +163,61 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
   }
 }
 
+/**
+ * Builds a `Result` for a failure that never reached (or never came back
+ * from) `core()`, so there is no `Response` to report and no HTTP status.
+ *
+ * Three situations produce one:
+ *
+ * - a sharer giving up before the shared request settles (`'abort'`) — the
+ *   shared request itself is unaffected unless this was the last reference,
+ *   which is the refcount's job, not this function's;
+ * - a synchronous error during request setup (`'network'`), most often the
+ *   `TypeError` `buildUrl` throws for a nested query-string object;
+ * - a rejection escaping the middleware chain (`'network'`).
+ *
+ * `reason` is classified first, so an abort or timeout keeps its own kind
+ * regardless of which caller built the Result; `fallbackKind` only applies
+ * when it is neither.
+ */
+function syntheticResult(
+  reason: unknown,
+  fallbackKind: 'abort' | 'network',
+  method: string,
+  url: string,
+  params: unknown,
+  retry: () => Promise<Result<unknown>>
+): Result<unknown> {
+  const error = new ApiError({
+    kind: abortKind(reason) ?? fallbackKind,
+    status: 0,
+    statusText: '',
+    body: reason,
+    headers: new Headers(),
+    request: { method, url, params }
+  })
+  return createNetworkErrorResult(error, retry)
+}
+
+/**
+ * True when a `HeadersInit` carries no entries at all.
+ *
+ * The `share` gate needs *emptiness*, not truthiness: `headers: {}` and
+ * `middleware: []` are both truthy, so a plain `!options.headers` test would
+ * silently disable coalescing for a caller that passed an empty object —
+ * exactly the shape a `...spread` of an optional config produces.
+ */
+function isEmptyHeaders(init: HeadersInit | undefined): boolean {
+  if (init === undefined) return true
+  if (init instanceof Headers) {
+    let empty = true
+    init.forEach(() => { empty = false })
+    return empty
+  }
+  if (Array.isArray(init)) return init.length === 0
+  return Object.keys(init).length === 0
+}
+
 // =============================================================================
 // createApi — the main export
 // =============================================================================
@@ -222,6 +283,26 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
   // empty array so we don't need null checks throughout the function.
   const { baseUrl, requests, middleware: globalMiddleware = [], headers: globalHeaders, onError } = config
 
+  /**
+   * Calls the consumer's `onError`, swallowing anything it throws.
+   *
+   * `onError` is a user callback on the one path that must never fail: it
+   * runs *after* the result is in hand, so an exception from it would reject
+   * a promise that already has a perfectly good `Result` to hand back — the
+   * caller would see a throw for a request that merely returned a 500. A
+   * Sentry client in a misconfigured environment, or a logger dereferencing
+   * `error.response.status`, is all it takes. Same stance as `retryOn`,
+   * `onRetry` and the custom `delay` curve in `built-in-middleware.ts`.
+   */
+  const fireOnError = (error: ApiError): void => {
+    if (!onError) return
+    try {
+      onError(error)
+    } catch {
+      /* swallowed by contract — onError cannot fail a request */
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Dedupe tracker — shared across all endpoints in this API instance.
   //
@@ -230,6 +311,27 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
   // because different API instances should have independent dedupe state.
   // ---------------------------------------------------------------------------
   const dedupeTracker = new DedupeTracker()
+
+  // ---------------------------------------------------------------------------
+  // Share tracker — shared across all endpoints in this API instance, same
+  // per-createApi lifetime rationale as dedupeTracker above.
+  //
+  // share and dedupe are opposites (share joins the existing call, dedupe
+  // cancels it), so a Request that sets both is a contradiction with no
+  // sensible combined semantics. Validate this up front, at construction
+  // time, rather than at call time: it's the one sanctioned throw outside a
+  // Result, because it's a configuration mistake, not a request failure.
+  // ---------------------------------------------------------------------------
+  const shareTracker = new ShareTracker()
+
+  for (const [name, request] of Object.entries(requests)) {
+    if (request.config.share && request.config.dedupe) {
+      throw new Error(
+        `Request "${name}" sets both share and dedupe. They are opposites — ` +
+        `dedupe cancels the previous call, share joins it. Pick one.`
+      )
+    }
+  }
 
   // The api object is built up imperatively by iterating over the requests
   // record. Each key becomes a method on the api object.
@@ -246,6 +348,25 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
     // =========================================================================
     api[name] = (params: object = {}, options: CallOptions = {}): Promise<Result<unknown>> => {
       /**
+       * A `Result` for a failure with no `Response` behind it, reported to
+       * `onError` on the way out. A function declaration rather than a const
+       * so it can name `execute` (as the Result's `retry`) before that
+       * binding exists further down.
+       */
+      function failedResult(reason: unknown, fallbackKind: 'abort' | 'network'): Result<unknown> {
+        const result = syntheticResult(
+          reason,
+          fallbackKind,
+          request.config.method,
+          joinUrl(baseUrl, request.config.path),
+          params,
+          execute
+        )
+        fireOnError(result.error as ApiError)
+        return result
+      }
+
+      /**
        * The execute function encapsulates the entire request lifecycle.
        *
        * It is defined as a named function (not an arrow) so that it can be
@@ -260,8 +381,18 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * passed as a query string param). These are returned as Result
        * errors rather than unhandled rejections, keeping the "never throws"
        * contract intact.
+       *
+       * `overrideSignal`, when given, replaces the caller's own `options.signal`
+       * / timeout as the signal that actually drives the fetch. This is used
+       * only by the `share: true` path below: the first caller to acquire a
+       * shared slot hands `execute` the ShareTracker's own refcounted signal,
+       * so the real network request is governed by "has every sharer given
+       * up?" rather than by any single caller's personal signal or timeout.
+       * `result.retry()` calls `execute` with no argument, so a retry (shared
+       * or not) always falls back to this caller's own `options.signal` /
+       * timeout — a retry is a fresh, unshared request.
        */
-      const execute = (): Promise<Result<unknown>> => {
+      const execute = (overrideSignal?: AbortSignal): Promise<Result<unknown>> => {
         try {
           // -----------------------------------------------------------------
           // Step 1: Compose the middleware chain
@@ -293,7 +424,29 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // set on the first attempt that reaches core() and survives across
           // retries, which keeps registration once per execute().
           // -----------------------------------------------------------------
-          const callerSignal: AbortSignal | undefined = options.signal
+          // Resolve the deadline: per-call beats per-request, and non-positive
+          // means none. The signal is created once here — not inside core() —
+          // so a retry sequence draws from a single budget rather than getting
+          // a fresh one per attempt.
+          //
+          // Under `share` (overrideSignal supplied) only the *per-request*
+          // deadline applies here, merged with the refcount signal rather than
+          // replacing it. `RequestConfig.timeout` is a property of the
+          // operation — "this endpoint must answer within 5s" — so it belongs
+          // to the one real request every sharer is waiting on, and is measured
+          // from when that request started. Suppressing it here instead, and
+          // applying it per-caller at the share site, is what let a steady
+          // arrival of joiners hold one socket open indefinitely: each new
+          // joiner's clock started at *its* join time, and the request itself
+          // had no deadline at all.
+          //
+          // `CallOptions.timeout` is deliberately absent from this branch: a
+          // single caller's patience must not shorten (or lengthen) the shared
+          // operation for everyone else, so it is observed per-caller at the
+          // share site instead.
+          const callerSignal: AbortSignal | undefined = overrideSignal
+            ? anySignal([overrideSignal, timeoutSignalFor(undefined, request.config.timeout)])
+            : anySignal([options.signal, timeoutSignalFor(options.timeout, request.config.timeout)])
           let dedupeController: AbortController | undefined
 
           // -----------------------------------------------------------------
@@ -380,6 +533,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
 
                 const error = new ApiError({
                   status: response.status,
+                  kind: 'http',
                   statusText: response.statusText,
                   body,
                   headers: response.headers,
@@ -409,6 +563,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // ---------------------------------------------------------------
               const error = new ApiError({
                 status: 0,
+                kind: abortKind(err) ?? 'network',
                 statusText: '',
                 body: err,
                 headers: new Headers(),
@@ -437,12 +592,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // key-value pairs for path param substitution or query string serialization.
           // When a special body type is detected, we skip buildUrl entirely for the
           // body portion and pass the params directly to serializeBody.
-          const isSpecialBody =
-            params instanceof FormData ||
-            params instanceof Blob ||
-            params instanceof ArrayBuffer ||
-            params instanceof URLSearchParams ||
-            typeof params === 'string'
+          const paramsIsSpecialBody = isSpecialBody(params)
 
           // For special body types, we still need to build the URL (for baseUrl + path),
           // but we pass an empty params object since there are no key-value pairs to
@@ -450,7 +600,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           const { url, remaining } = buildUrl(
             baseUrl,
             request.config.path,
-            isSpecialBody ? {} : (params as Record<string, unknown>),
+            paramsIsSpecialBody ? {} : (params as Record<string, unknown>),
             asQuery
           )
 
@@ -479,11 +629,11 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           if (!asQuery) {
             // Decide what to serialize: the original params (for special types)
             // or the remaining params after path substitution (for plain objects)
-            const toSerialize = isSpecialBody ? params : remaining
+            const toSerialize = paramsIsSpecialBody ? params : remaining
 
             // Only serialize if there's something to serialize — avoid sending
             // empty bodies ({}) for endpoints with no body params.
-            if (isSpecialBody || Object.keys(remaining).length > 0) {
+            if (paramsIsSpecialBody || Object.keys(remaining).length > 0) {
               const serialized = serializeBody(toSerialize)
               body = serialized.body
 
@@ -554,8 +704,9 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
 
             // Fire the global error handler if the final result has an error.
             // This is the "last chance" error hook — middleware has already had
-            // its opportunity to handle/recover the error.
-            if (result.error && onError) onError(result.error as ApiError)
+            // its opportunity to handle/recover the error. Guarded: a throwing
+            // handler must not reject a promise that already holds a Result.
+            if (result.error) fireOnError(result.error as ApiError)
 
             return result
           })
@@ -572,23 +723,115 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // throws" contract — callers always get a Result, never an
           // unhandled rejection.
           // -----------------------------------------------------------------
-          const error = new ApiError({
-            status: 0,
-            statusText: '',
-            body: err,
-            headers: new Headers(),
-            request: { method: request.config.method, url: joinUrl(baseUrl, request.config.path), params }
-          })
-
-          // Fire onError for synchronous errors too — they're still errors
-          if (onError) onError(error)
-
-          return Promise.resolve(createNetworkErrorResult(error, execute))
+          // Fire onError for synchronous errors too — they're still errors.
+          return Promise.resolve(failedResult(err, 'network'))
         }
       }
 
-      // Kick off the execute function for the initial call
-      return execute()
+      // -----------------------------------------------------------------------
+      // Coalescing (share: true)
+      // -----------------------------------------------------------------------
+      // Coalescing wraps the whole chain — unlike dedupe, which registers
+      // inside core(). Running the middleware once for ten callers is the
+      // actual saving; ten auth injections and ten cache lookups for one
+      // network call would be most of the cost.
+      //
+      // Per-call headers or middleware change *what* is requested, so such a
+      // call never shares — it always gets its own execute(). A per-call
+      // signal or timeout only changes *who is waiting*, so it does not
+      // disable sharing: it is observed for this caller alone, below.
+      //
+      // Special-body params (FormData, Blob, ArrayBuffer, URLSearchParams,
+      // a raw string) are excluded too: stableStringify falls through to
+      // Object.keys() for any object, which returns [] for all four of
+      // those types regardless of content, so two calls with genuinely
+      // different payloads would otherwise collide on the same share key,
+      // coalesce into one request, and hand one caller the response to the
+      // other's payload — the exact "security-shaped bug" this doc warns
+      // about for per-call headers, reachable through a different vector.
+      // Declining to share is always safe; corrupting a response never is.
+      //
+      // The whole block is wrapped in try/catch for the same reason execute()
+      // is: it runs in the bare body of the api method, so anything thrown
+      // here — by isSpecialBody, stableStringify, timeoutSignalFor, or the
+      // synchronous part of the Promise executor — escapes as a rejection
+      // rather than a Result. This is the one region of the request path where
+      // "every call returns a Result" would otherwise not be enforced by
+      // construction.
+      // -----------------------------------------------------------------------
+      try {
+        // Emptiness, not truthiness: `headers: {}` and `middleware: []` are
+        // both truthy, and neither changes what is requested, so neither is a
+        // reason to decline coalescing.
+        const canShare =
+          request.config.share === true &&
+          isEmptyHeaders(options.headers) &&
+          (options.middleware === undefined || options.middleware.length === 0) &&
+          !isSpecialBody(params)
+        if (!canShare) return execute()
+
+        const shareKey = `${name}|${stableStringify(params)}`
+
+        // This caller's own signal and per-call timeout, kept entirely separate
+        // from the signal the real fetch runs on. It bounds only whether THIS
+        // caller keeps waiting — it must never reach into the shared request.
+        //
+        // Deliberately *not* `request.config.timeout`: that one belongs to the
+        // operation, is shared by every caller, and is applied inside execute()
+        // against the request's own start time. Computed before acquire() so a
+        // throw from here cannot strand a shared request that this caller then
+        // never releases.
+        const perCaller = anySignal([options.signal, timeoutSignalFor(options.timeout, undefined)])
+
+        // acquire() either starts the real request (first caller — exec is
+        // called with the tracker's own refcounted signal, which becomes the
+        // signal that actually drives fetch) or joins an identical one already
+        // in flight. Either way every sharer gets the same promise back.
+        const { promise, release } = shareTracker.acquire(shareKey, signal => execute(signal))
+
+        // execute() converts synchronous errors to Results, but a *rejection*
+        // from the middleware chain (an async middleware that throws) escapes
+        // it and would arrive here as a bare reason. Handing that to a caller
+        // as though it were a Result is worse than the rejection it replaces:
+        // `const { data, error } = await api.get(...)` then yields
+        // undefined/undefined, `if (error)` is false, and the consumer carries
+        // on as if the call had succeeded with no data. Convert it instead.
+        const settled = promise.then(r => r, (err: unknown) => failedResult(err, 'network'))
+
+        if (!perCaller) return settled
+
+        // Race this caller's own giving-up against the shared result settling.
+        // Giving up calls release(), which only decrements the refcount — the
+        // underlying request is aborted by ShareTracker itself, and only once
+        // every sharer (including this one) has released.
+        return new Promise<Result<unknown>>(resolve => {
+          let done = false
+          const finish = (r: Result<unknown>): void => {
+            if (done) return
+            done = true
+            perCaller.removeEventListener('abort', onAbort)
+            resolve(r)
+          }
+
+          settled.then(finish)
+
+          // failedResult reports to onError on the way out. A sharer's own
+          // timeout is a genuine failure that belongs in an error tracker, and
+          // it reached none before: this path builds its Result directly and
+          // so bypasses execute()'s post-execution hook entirely, which made a
+          // shared timeout behave differently from the identical non-shared
+          // one. (Guarded, so a throwing handler cannot break this path.)
+          const onAbort = (): void => {
+            release(perCaller.reason)
+            finish(failedResult(perCaller.reason, 'abort'))
+          }
+
+          if (perCaller.aborted) onAbort()
+          else perCaller.addEventListener('abort', onAbort, { once: true })
+        })
+      } catch (err) {
+        return Promise.resolve(failedResult(err, 'network'))
+      }
     }
   }
 
