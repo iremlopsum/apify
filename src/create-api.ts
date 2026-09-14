@@ -348,13 +348,20 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
     // =========================================================================
     api[name] = (params: object = {}, options: CallOptions = {}): Promise<Result<unknown>> => {
       /**
-       * A `Result` for a failure with no `Response` behind it, reported to
-       * `onError` on the way out. A function declaration rather than a const
-       * so it can name `execute` (as the Result's `retry`) before that
-       * binding exists further down.
+       * A `Result` for a failure with no `Response` behind it — construction
+       * only, no reporting. A function declaration rather than a const so it
+       * can name `execute` (as the Result's `retry`) before that binding
+       * exists further down.
+       *
+       * Split out of `failedResult` (below) so the share path's `onAbort` can
+       * build the Result it hands back to a caller WITHOUT necessarily
+       * reporting it: when this release was the last one, the shared
+       * `execute()` will observe the resulting abort itself and report it
+       * through the normal post-execution hook, so reporting it again here
+       * would double it (docs/FIXES.md, "Duplicate onError under share").
        */
-      function failedResult(reason: unknown, fallbackKind: 'abort' | 'network'): Result<unknown> {
-        const result = syntheticResult(
+      function buildFailedResult(reason: unknown, fallbackKind: 'abort' | 'network'): Result<unknown> {
+        return syntheticResult(
           reason,
           fallbackKind,
           request.config.method,
@@ -362,6 +369,14 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           params,
           execute
         )
+      }
+
+      /**
+       * `buildFailedResult` plus reporting to `onError` — the common case,
+       * used everywhere a failure has no other path to the error tracker.
+       */
+      function failedResult(reason: unknown, fallbackKind: 'abort' | 'network'): Result<unknown> {
+        const result = buildFailedResult(reason, fallbackKind)
         fireOnError(result.error as ApiError)
         return result
       }
@@ -803,9 +818,12 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
         // `const { data, error } = await api.get(...)` then yields
         // undefined/undefined, `if (error)` is false, and the consumer carries
         // on as if the call had succeeded with no data. Convert it instead.
-        const settled = promise.then(r => r, (err: unknown) => failedResult(err, 'network'))
-
-        if (!perCaller) return settled
+        //
+        // No `perCaller` signal/timeout means there's no separate give-up path
+        // for this caller to race against — it can only ever learn its result
+        // from `promise` settling, so this is the whole story for it, same as
+        // it always reported.
+        if (!perCaller) return promise.then(r => r, (err: unknown) => failedResult(err, 'network'))
 
         // Race this caller's own giving-up against the shared result settling.
         // Giving up calls release(), which only decrements the refcount — the
@@ -820,17 +838,37 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             resolve(r)
           }
 
-          settled.then(finish)
+          promise.then(
+            r => finish(r),
+            (err: unknown) => {
+              // Fix 2 (2.2.1, "cross-kind double report"): this caller may
+              // already be `done` — most commonly because `onAbort` below
+              // already gave it a Result. `finish` would discard whatever we
+              // build here anyway, but `failedResult` reports to onError as a
+              // side effect of being built, which would report the SAME
+              // underlying give-up a second time, under a DIFFERENT kind
+              // ('network' here vs. whatever `onAbort` already reported).
+              // Bail before constructing anything.
+              if (done) return
+              finish(failedResult(err, 'network'))
+            }
+          )
 
-          // failedResult reports to onError on the way out. A sharer's own
-          // timeout is a genuine failure that belongs in an error tracker, and
-          // it reached none before: this path builds its Result directly and
-          // so bypasses execute()'s post-execution hook entirely, which made a
-          // shared timeout behave differently from the identical non-shared
-          // one. (Guarded, so a throwing handler cannot break this path.)
+          // Fix 1 (2.2.1, "Duplicate onError under share"): a sharer's own
+          // timeout or abort is a genuine failure that belongs in an error
+          // tracker, and this path builds its Result directly, bypassing
+          // execute()'s post-execution hook entirely — so when this is NOT
+          // the last release, nothing else will ever report it, and this
+          // path must. But release() also tells us when it WAS the last
+          // reference: that release aborts the shared controller, and the
+          // shared execute() will then observe that abort itself and report
+          // it through its own post-execution hook — reporting it again here
+          // would double it. So report only when this was not the last one.
           const onAbort = (): void => {
-            release(perCaller.reason)
-            finish(failedResult(perCaller.reason, 'abort'))
+            const wasLast = release(perCaller.reason)
+            const result = buildFailedResult(perCaller.reason, 'abort')
+            if (!wasLast) fireOnError(result.error as ApiError)
+            finish(result)
           }
 
           if (perCaller.aborted) onAbort()
