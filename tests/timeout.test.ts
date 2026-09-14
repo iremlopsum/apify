@@ -139,6 +139,43 @@ describe('timeout', () => {
     expect(r.data).toEqual({ ok: 1 })
   })
 
+  // ---------------------------------------------------------------------------
+  // Fix 4 (2.2.1): Math.floor(Math.min(...)) floors a sub-millisecond deadline
+  // to 0, which fails the `ms > 0` test and leaves the request UNBOUNDED — the
+  // opposite of the caller's intent. `timeout: 0.5` must still produce a real
+  // deadline (clamped up to 1ms), not silently mean "no timeout".
+  // ---------------------------------------------------------------------------
+  it('treats a sub-millisecond timeout as a real deadline, not "no timeout"', async () => {
+    vi.stubGlobal('fetch', hangingFetch())
+    const api = createApi({
+      baseUrl: '',
+      requests: { slow: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/slow', timeout: 0.5 }) },
+    })
+    const r = await api.slow()
+    expect(r.error).not.toBeNull()
+    expect(r.error!.kind).toBe('timeout')
+  })
+
+  it('still treats 0 as no timeout', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":1}', { status: 200 })))
+    const api = createApi({
+      baseUrl: '',
+      requests: { z: new Request<Record<string, never>, { ok: number }>({ method: 'GET', path: '/z', timeout: 0 }) },
+    })
+    const r = await api.z()
+    expect(r.error).toBeNull()
+  })
+
+  it('still treats a negative timeout as no timeout', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":1}', { status: 200 })))
+    const api = createApi({
+      baseUrl: '',
+      requests: { z: new Request<Record<string, never>, { ok: number }>({ method: 'GET', path: '/z', timeout: -5 }) },
+    })
+    const r = await api.z()
+    expect(r.error).toBeNull()
+  })
+
   it('gives retry() a fresh budget', async () => {
     let n = 0
     vi.stubGlobal('fetch', vi.fn(async () => { n++; return new Response('{"n":' + n + '}', { status: 200 }) }))
