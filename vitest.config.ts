@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
-    environment: 'node'
+    environment: 'node',
+    typecheck: { tsconfig: './tsconfig.test.json', include: ['tests/**/*.test.ts', 'tests/**/*.test-d.ts'], only: true },
   }
 })

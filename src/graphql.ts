@@ -2,6 +2,9 @@ import { ApiError, createSuccessResult, createErrorResult, createNetworkErrorRes
 import { composeMiddleware } from './middleware.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
+import { abortKind } from './utils/abort-kind.js'
+import { anySignal } from './utils/any-signal.js'
+import { timeoutSignalFor } from './utils/timeout.js'
 import type { CallOptions, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -78,6 +81,25 @@ export function createGraphQL(config: any): any {
 
   const dedupeTracker = new DedupeTracker()
 
+  /**
+   * Calls the consumer's `onError`, swallowing anything it throws.
+   *
+   * `onError` runs *after* the result is in hand, so an exception from it
+   * would reject a promise that already holds a perfectly good `Result` — the
+   * caller would see a throw for an operation that merely came back with
+   * GraphQL errors. A Sentry client in a misconfigured environment, or a
+   * logger dereferencing `error.response.status`, is all it takes. Same stance
+   * as the retry policy's user callbacks in `built-in-middleware.ts`.
+   */
+  const fireOnError = (error: ApiError): void => {
+    if (!onError) return
+    try {
+      onError(error)
+    } catch {
+      /* swallowed by contract — onError cannot fail an operation */
+    }
+  }
+
   function buildMethod(name: string, operation: Operation<any, any>) {
     return (variables: object = {}, options: CallOptions = {}): Promise<Result<unknown>> => {
       const execute = (): Promise<Result<unknown>> => {
@@ -99,7 +121,12 @@ export function createGraphQL(config: any): any {
           // dedupeController doubles as the "already registered" flag: it is
           // set on the first attempt that reaches core() and survives across
           // retries, which keeps registration once per execute().
-          const callerSignal: AbortSignal | undefined = options.signal
+          // Resolve the deadline: per-call beats per-operation, and non-positive
+          // means none. The signal is created once here — not inside core() —
+          // so a retry sequence draws from a single budget rather than getting
+          // a fresh one per attempt.
+          const timeoutSignal = timeoutSignalFor(options.timeout, operation.config.timeout)
+          const callerSignal: AbortSignal | undefined = anySignal([options.signal, timeoutSignal])
           let dedupeController: AbortController | undefined
 
           const core = async (ctx: MiddlewareContext): Promise<Result<unknown>> => {
@@ -144,6 +171,7 @@ export function createGraphQL(config: any): any {
                 }
                 const error = new ApiError({
                   status: response.status,
+                  kind: 'http',
                   statusText: response.statusText,
                   body,
                   headers: response.headers,
@@ -160,6 +188,7 @@ export function createGraphQL(config: any): any {
               if (gqlBody?.errors?.length) {
                 const error = new ApiError({
                   status: 200,
+                  kind: 'http',
                   statusText: 'GraphQL Error',
                   body: gqlBody.errors,
                   headers: response.headers,
@@ -172,6 +201,7 @@ export function createGraphQL(config: any): any {
             } catch (err) {
               const error = new ApiError({
                 status: 0,
+                kind: abortKind(err) ?? 'network',
                 statusText: '',
                 body: err,
                 headers: new Headers(),
@@ -211,18 +241,19 @@ export function createGraphQL(config: any): any {
             // request registered by someone else under the same name. So
             // only clear when this execute() actually registered.
             if (operation.config.dedupe && dedupeController) dedupeTracker.clear(name, dedupeController)
-            if (result.error && onError) onError(result.error as ApiError)
+            if (result.error) fireOnError(result.error as ApiError)
             return result
           })
         } catch (err) {
           const error = new ApiError({
             status: 0,
+            kind: 'network',
             statusText: '',
             body: err,
             headers: new Headers(),
             request: { method: 'POST', url: endpoint, params: variables },
           })
-          if (onError) onError(error)
+          fireOnError(error)
           return Promise.resolve(createNetworkErrorResult(error, execute))
         }
       }

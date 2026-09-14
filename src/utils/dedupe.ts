@@ -38,6 +38,8 @@
 // whichever newer request replaced it — see clear()'s doc comment below.
 // =============================================================================
 
+import { anySignal } from './any-signal.js'
+
 /**
  * Tracks in-flight requests by key and auto-aborts previous calls when a new
  * one starts for the same key. This prevents stale responses from overwriting
@@ -86,16 +88,19 @@ export class DedupeTracker {
    *
    * A fresh AbortController is created for the new request and stored in the
    * Map. If an external AbortSignal is provided (from the caller's
-   * CallOptions), it is merged so that aborting the external signal also
-   * aborts the dedupe signal.
+   * CallOptions, or installed by a middleware), it is merged with that
+   * controller's signal and the *merged* signal is what the fetch runs on.
    *
    * @param key - Unique identifier for the request type. Two calls with the
    *   same key are considered "the same request" for deduplication purposes.
    *   Typically this is the request definition's name (e.g., 'getUser').
-   * @param externalSignal - Optional AbortSignal from the caller. When this
-   *   signal aborts, the dedupe signal will also abort. This enables the
-   *   caller to cancel the request independently of the dedupe logic (e.g.,
-   *   on component unmount or timeout).
+   * @param externalSignal - Optional AbortSignal from the caller, or one a
+   *   middleware installed. It is *merged* with this tracker's controller —
+   *   not wired to abort it — so the returned signal fires when either side
+   *   does, carrying that side's own `reason` through. That is what keeps a
+   *   caller's `TimeoutError` a timeout instead of degrading into a plain
+   *   `AbortError`, and keeps the stored controller meaning only "superseded
+   *   by a newer request for this key".
    * @returns The `signal` the fetch call should use — aborted if either (a) a
    *   newer request starts for the same key, or (b) the external signal
    *   aborts — alongside the `controller` that owns it, which the caller must
@@ -124,31 +129,15 @@ export class DedupeTracker {
     // Step 3: Merge with external signal (if provided)
     // -------------------------------------------------------------------------
     // The external signal comes from the caller (e.g., CallOptions.signal).
-    // We need to propagate its abort to our internal controller so that the
-    // fetch is cancelled from the caller's perspective too.
-    //
-    // Two cases to handle:
-    // a) The external signal is ALREADY aborted — abort immediately
-    // b) The external signal is NOT yet aborted — listen for the abort event
-    if (externalSignal) {
-      if (externalSignal.aborted) {
-        // Case (a): The caller's signal was already aborted before we even
-        // started. This can happen if a component unmounted between the time
-        // the API call was queued and when it actually starts executing.
-        // We abort immediately — no point starting a fetch that's DOA.
-        controller.abort()
-      } else {
-        // Case (b): The caller's signal is still active. Set up a one-time
-        // listener so that when it aborts in the future, our controller
-        // also aborts. Using { once: true } ensures the listener is cleaned
-        // up automatically after firing, preventing memory leaks.
-        externalSignal.addEventListener('abort', () => controller.abort(), { once: true })
-      }
-    }
+    // Merge the caller's signal so cancellation flows from both directions:
+    // this tracker aborts when a newer request supersedes, and the caller's
+    // own signal aborts when they give up. anySignal carries the reason
+    // through, so a TimeoutError does not degrade into a plain AbortError.
+    const signal = anySignal([controller.signal, externalSignal]) ?? controller.signal
 
     // Return the controller alongside the signal so the caller can pass it
     // back to clear() and prove ownership — see clear()'s identity check.
-    return { signal: controller.signal, controller }
+    return { signal, controller }
   }
 
   /**

@@ -353,4 +353,56 @@ describe('cacheMiddleware', () => {
 
     expect(callCount).toBe(2)
   })
+  // ---------------------------------------------------------------------------
+  // docs/FIXES.md #14: stableStringify collapses FormData, Blob, ArrayBuffer
+  // and URLSearchParams to the literal string "{}" — it falls through to
+  // Object.keys() for any object, and Object.keys() returns [] for all of them
+  // regardless of content. Two different uploads through one cache therefore
+  // produced the identical key and served each other's responses. `share` was
+  // given a guard against this exact collapse in 2.2.0; the cache had none.
+  // ---------------------------------------------------------------------------
+  it('never serves one special-body payload the response to another', async () => {
+    const bodies = ['A', 'B']
+    let n = 0
+    const fetchMock = vi.fn(async () => mockJsonResponse({ who: bodies[n++] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        upload: new Request<FormData, { who: string }>({ method: 'POST', path: '/upload', middleware: [cache] }),
+      },
+    })
+
+    const a = new FormData(); a.append('payload', 'SECRET-A')
+    const b = new FormData(); b.append('payload', 'SECRET-B')
+
+    const rA = await api.upload(a)
+    const rB = await api.upload(b)
+
+    expect(fetchMock.mock.calls.length).toBe(2)   // B must reach the network
+    expect(rA.data).toEqual({ who: 'A' })
+    expect(rB.data).toEqual({ who: 'B' })         // never A's cached response
+  })
+
+  it('declines to cache special-body params at all, rather than keying them wrongly', async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        submit: new Request<URLSearchParams, { ok: boolean }>({ method: 'POST', path: '/submit', middleware: [cache] }),
+      },
+    })
+
+    // The same params twice: still two real requests. Declining to cache is
+    // always safe; serving the wrong response never is.
+    await api.submit(new URLSearchParams({ q: 'x' }))
+    await api.submit(new URLSearchParams({ q: 'x' }))
+
+    expect(fetchMock.mock.calls.length).toBe(2)
+  })
 })

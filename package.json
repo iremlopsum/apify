@@ -1,6 +1,6 @@
 {
   "name": "@iremlopsum/apify",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Runtime-agnostic, type-safe API client built on standard fetch. Zero dependencies.",
   "type": "module",
   "sideEffects": false,
@@ -14,6 +14,10 @@
     "./middleware": {
       "types": "./dist/built-in-middleware.d.ts",
       "import": "./dist/built-in-middleware.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
     }
   },
   "files": [
@@ -30,7 +34,8 @@
     "test:run": "vitest run",
     "test:integration": "vitest run --config vitest.integration.ts",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck && npm run test:run && npm run test:integration && npm run build"
+    "test:types": "vitest run --typecheck",
+    "prepublishOnly": "npm run typecheck && npm run test:types && npm run test:run && npm run test:integration && npm run build"
   },
   "repository": {
     "type": "git",
