@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
 import { ApiError } from '../src/result.js'
+import { cacheMiddleware } from '../src/built-in-middleware.js'
 import type { Middleware } from '../src/types.js'
 
 /**
@@ -504,6 +505,93 @@ describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
 
     await flush()
     expect(kinds).toEqual(['timeout'])
+  })
+
+  // ---------------------------------------------------------------------------
+  // Review finding (2.2.1): `onAbort` inferred "the shared execute() will
+  // report this" purely from `wasLast` — but the delegate (execute()'s
+  // post-execution hook) only reports when the shared operation RESOLVES
+  // WITH AN ERROR RESULT. Two reachable cases where it doesn't, both
+  // reintroducing the zero-report gap the original fix set out to close:
+  //
+  //   row 5: the shared chain REJECTS (a middleware throws on abort — a
+  //          token-fetching auth middleware is the realistic case)
+  //   row 6: the shared chain SHORT-CIRCUITS TO SUCCESS (a cacheMiddleware
+  //          hit, which we ship, ignores the abort signal entirely)
+  //
+  // In both, the last sharer's own onAbort skipped reporting (wasLast was
+  // true) and the delegate never got a chance to report either — zero
+  // reports for a real cancellation, worse than the duplicate this fix set
+  // out to remove.
+  // ---------------------------------------------------------------------------
+  it('row 5: reports exactly once when the last sharer gives up and the shared chain rejects', async () => {
+    const kinds: (string | undefined)[] = []
+    // Simulates a token-fetching auth middleware that awaits the shared
+    // signal and throws (rather than returning a Result) when it aborts —
+    // never calling next(), so the rejection escapes execute() entirely.
+    const throwsOnAbort: Middleware = ctx => new Promise((_resolve, reject) => {
+      const s = ctx.request.signal
+      if (s?.aborted) { reject(s.reason); return }
+      s?.addEventListener('abort', () => reject(s.reason), { once: true })
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: {
+        get: new Request<{ id: string }, { ok: number }>({
+          method: 'GET', path: '/x/:id', share: true, middleware: [throwsOnAbort],
+        }),
+      },
+    })
+
+    const ac = new AbortController()
+    const p = api.get({ id: '1' }, { signal: ac.signal }) // the only (thus last) sharer
+    await Promise.resolve()
+    ac.abort()
+
+    const r = await p
+    expect(r.error?.kind).toBe('abort')
+
+    await flush()
+    expect(kinds).toEqual(['abort']) // exactly one report, not zero
+  })
+
+  it('row 6: reports exactly once when the last sharer gives up against a cacheMiddleware hit', async () => {
+    const kinds: (string | undefined)[] = []
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const fetchMock = vi.fn(async () => new Response('{"ok":1}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: {
+        get: new Request<{ id: string }, { ok: number }>({
+          method: 'GET', path: '/x/:id', share: true, middleware: [cache],
+        }),
+      },
+    })
+
+    // Warm the cache with an ordinary, uncontested call.
+    await api.get({ id: '1' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    // The only (thus last) sharer aborts before the cache hit's own promise
+    // settles — no `await` in between, so the abort is observed before the
+    // cache middleware's `return cached` has a chance to resolve. The cache
+    // hit succeeds regardless of the abort (cacheMiddleware never looks at
+    // the signal), so execute()'s post-execution hook sees a SUCCESS and has
+    // nothing to report.
+    const ac = new AbortController()
+    const p = api.get({ id: '1' }, { signal: ac.signal })
+    ac.abort()
+
+    const r = await p
+    expect(r.error?.kind).toBe('abort')          // the caller's own Result is still an abort
+    expect(fetchMock).toHaveBeenCalledTimes(1)    // still a cache hit, no second network call
+
+    await flush()
+    expect(kinds).toEqual(['abort']) // exactly one report, not zero
   })
 })
 
