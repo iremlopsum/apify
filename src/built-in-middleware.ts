@@ -184,8 +184,16 @@ export function retryMiddleware(options: number | RetryOptions = 3): Middleware 
   // is always `computed`), and Number.isFinite(Infinity) is false. Treating
   // it the same as NaN would silently replace "uncapped" with "capped at
   // 30_000" — an undocumented behaviour change this patch must not make.
-  const baseDelay = o.baseDelay !== undefined && !Number.isNaN(o.baseDelay) ? o.baseDelay : 250
-  const maxDelay = o.maxDelay !== undefined && !Number.isNaN(o.maxDelay) ? o.maxDelay : 30_000
+  //
+  // `typeof o.x === 'number'` first, not just `!Number.isNaN(o.x)`:
+  // Number.isNaN(null) is false, so null would otherwise pass straight
+  // through to Math.min(computed, null), where null coerces to 0 —
+  // reintroducing the exact tight-retry-burst this guard exists to prevent,
+  // through a different bad input from the identical class of
+  // misconfiguration (a JSON config carrying a literal null is as reachable
+  // as a stray Number(env.X)).
+  const baseDelay = typeof o.baseDelay === 'number' && !Number.isNaN(o.baseDelay) ? o.baseDelay : 250
+  const maxDelay = typeof o.maxDelay === 'number' && !Number.isNaN(o.maxDelay) ? o.maxDelay : 30_000
   const jitter = o.jitter ?? true
   const respectRetryAfter = o.respectRetryAfter ?? true
   const retryOn = o.retryOn ?? ((r: Result<unknown>) => (r.error?.status ?? 0) >= 500)
@@ -399,15 +407,16 @@ export type CacheMiddleware = Middleware & { clear(): void }
  * and `{ a: 1, b: 2 }` are treated as the same call). This means the cache
  * key is always derived from the original params object, not the processed URL.
  *
- * A call whose params are one of four opaque body types — `FormData`,
- * `Blob`, `ArrayBuffer`, or `URLSearchParams` — is never cached and never
- * served from cache: those cannot be told apart by the stable
- * serialisation (they all collapse to the literal `"{}"`), so caching them
- * could hand one caller the response to a different payload than the one it
- * sent. A raw string is not included in this exclusion — `stableStringify`
- * keys a string correctly, so a string-param endpoint is cached like any
- * other (fixed in 2.2.1; 2.2.0 excluded strings here too, which silently
- * disabled caching for them).
+ * A call whose params are opaque to the stable serialisation — any value
+ * whose own enumerable keys don't distinguish it from another instance
+ * (`FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`, `Date`, `Map`, or
+ * `Set` — see `isOpaqueParams`) — is never cached and never served from
+ * cache: those all collapse to the literal `"{}"`, so caching them could
+ * hand one caller the response to a different payload than the one it sent.
+ * A raw string is not included in this exclusion — `stableStringify` keys a
+ * string correctly, so a string-param endpoint is cached like any other
+ * (fixed in 2.2.1; 2.2.0 excluded strings here too, which silently disabled
+ * caching for them).
  *
  * **What is cached:**
  *
@@ -484,10 +493,11 @@ export function cacheMiddleware(options?: {
   const debug = options?.debug ?? false
 
   const mw: Middleware = async (ctx, next) => {
-    // Params that are one of four opaque body types (FormData, Blob,
-    // ArrayBuffer, URLSearchParams) can't be keyed: stableStringify falls
-    // through to Object.keys() for any object, and Object.keys() returns []
-    // for every one of them regardless of content, so two genuinely different
+    // Params that are opaque to the stable serialisation (see
+    // isOpaqueParams: FormData, Blob, ArrayBuffer, URLSearchParams, Date,
+    // Map, Set) can't be keyed: stableStringify falls through to
+    // Object.keys() for any object, and Object.keys() returns [] for every
+    // one of them regardless of content, so two genuinely different
     // payloads collapse onto the identical key `"<name>|{}"`. Whichever
     // finished first would then be served to the other — a caller uploading
     // payload B getting back payload A's response. Same collapse `share`
