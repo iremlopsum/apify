@@ -22,26 +22,41 @@ release's notes, and `docs/FIXES.md`). No public API change.
   so excluding it was never necessary and silently stopped caching any
   string-param endpoint. **If your string-param endpoints stopped being
   cached after upgrading to 2.2.0, this restores it.** A new predicate,
-  `isOpaqueParams`, narrows the guard to the four object types only, and is
-  used by both `cacheMiddleware` and `share`'s coalescing gate; a
-  string-param endpoint under `share: true` is now soundly coalesced too.
-  `isSpecialBody` itself is unchanged and still used for body serialization,
-  where a raw string legitimately needs the same treatment as those four.
-- **A shared call under `share: true` no longer reports to `onError` more
-  times than the identical non-shared call would.** A sharer that gives up
-  reports its own failure directly — correct when it isn't the last
+  `isOpaqueParams`, narrows the guard to the object types whose own
+  enumerable keys don't distinguish two different instances, and is used by
+  both `cacheMiddleware` and `share`'s coalescing gate; a string-param
+  endpoint under `share: true` is now soundly coalesced too. `isSpecialBody`
+  itself is unchanged and still used for body serialization, where a raw
+  string legitimately needs the same treatment. **`isOpaqueParams` also now
+  recognises `Date`, `Map`, and `Set`** (in addition to `FormData`, `Blob`,
+  `ArrayBuffer`, `URLSearchParams`) — the identical collapse-to-`"{}"` shape,
+  closed as one class rather than left as a known gap for three of the seven.
+  A `Date`/`Map`/`Set`-param endpoint is now correctly excluded from caching
+  and coalescing instead of risking one caller's response being served to
+  another's different payload.
+- **A shared call under `share: true` no longer reports to `onError` more (or
+  fewer) times than the identical non-shared call would.** A sharer that
+  gives up reports its own failure directly — correct when it isn't the last
   reference, since the shared request keeps running and nothing else would
   ever report that give-up. But when it *is* the last reference, releasing
-  also aborts the shared request, and the shared operation then reports that
-  same failure again through its own, normal post-execution hook — doubling
-  it. `ShareTracker.release()` now reports whether its release was the one
-  that aborted the shared request, and the per-caller path reports only when
-  it was not. A related "cross-kind" duplicate — a caller that already gave
-  up still had a live rejection handler on the shared promise, which built
-  and reported a *second*, differently-kinded failure when the shared
-  operation later rejected, even though the Result it built was discarded —
-  is fixed the same way: a caller that has already finished no longer reports
-  again.
+  also aborts the shared request, and the shared operation *usually* then
+  reports that same failure again through its own, normal post-execution
+  hook — doubling it. `ShareTracker.release()` now reports whether its
+  release was the one that aborted the shared request, and the per-caller
+  path reports only when it was not — **except** when the shared operation's
+  own hook would never report at all: if the shared middleware chain rejects
+  instead of resolving (a middleware that throws on abort — a token-fetching
+  auth middleware is the realistic case), or short-circuits to a *success*
+  regardless of the abort (a `cacheMiddleware` hit, which ignores the
+  signal). Both used to mean the cancellation vanished from `onError`
+  entirely — worse than the duplicate this fix removes — so the last-release
+  path now watches what the shared operation actually does and reports
+  itself whenever the delegate didn't (and won't). A related "cross-kind"
+  duplicate — a caller that already gave up still had a live rejection
+  handler on the shared promise, which built and reported a *second*,
+  differently-kinded failure when the shared operation later rejected, even
+  though the Result it built was discarded — is fixed the same way: a caller
+  that has already finished no longer reports again.
 - **`timeout: 0.5` (or any sub-millisecond value) no longer silently means "no
   timeout".** `Math.floor` flooring a positive-but-fractional deadline to `0`
   failed the "must be positive" check and left the request unbounded — the
@@ -53,9 +68,13 @@ release's notes, and `docs/FIXES.md`). No public API change.
   is, and the existing backstop then clamped that `NaN` down to `0` — turning
   the whole point of a backoff policy (bounding retries, not eliminating the
   delay) inside out. `maxDelay` is now validated where it's resolved and
-  falls back to its default (`30_000`) when not a finite number, before it
-  ever reaches the arithmetic; `baseDelay` gets the identical treatment, for
-  the identical reason (it poisons the same computation the same way).
+  falls back to its default (`30_000`) when it is specifically `NaN`, before
+  it ever reaches the arithmetic; `baseDelay` gets the identical treatment,
+  for the identical reason (it poisons the same computation the same way).
+  **`maxDelay: Infinity` (and `baseDelay: Infinity`) are accepted, not
+  redirected to the default** — `Infinity` is the documented "no cap" idiom
+  (`Math.min(computed, Infinity)` is always `computed`), so only `NaN` is
+  guarded against, not "not finite" generally.
 
 ## [2.2.0] — 2026-09-13
 

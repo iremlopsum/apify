@@ -287,4 +287,31 @@ describe('retry policy', () => {
     })).g()
     expect(seen).toEqual([250])
   })
+
+  // ---------------------------------------------------------------------------
+  // Review finding 2 (2.2.1): the NaN guard above used Number.isFinite, which
+  // is also false for Infinity -- so `maxDelay: Infinity` (the documented "no
+  // cap" idiom: Math.min(computed, Infinity) is always `computed`) silently
+  // fell back to the 30_000 default instead of actually leaving the curve
+  // uncapped. That is an undocumented behaviour change for a patch release.
+  // Guard against NaN specifically; Infinity (and any other finite number,
+  // including a deliberately small or negative one) must pass through as-is.
+  //
+  // The observed delay must stay well above the default 30_000 cap to prove
+  // it wasn't clamped there -- but a real 40s wait is unacceptable in a test,
+  // so the caller's own signal aborts the moment onRetry reports the value
+  // (before `sleep()` starts), cutting the wait short without touching the
+  // reported number.
+  // ---------------------------------------------------------------------------
+  it('leaves the computed delay uncapped when maxDelay is Infinity (the "no cap" idiom)', async () => {
+    const seen: number[] = []
+    vi.stubGlobal('fetch', always(503))
+    const ac = new AbortController()
+    await makeApi(retryMiddleware({
+      max: 1, baseDelay: 40_000, jitter: false, maxDelay: Infinity,
+      onRetry: ({ delay }) => { seen.push(delay); ac.abort() },
+    })).g({}, { signal: ac.signal })
+    // Not capped at the default 30_000 -- Infinity really means "no cap".
+    expect(seen).toEqual([40_000])
+  })
 })

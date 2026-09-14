@@ -178,8 +178,14 @@ export function retryMiddleware(options: number | RetryOptions = 3): Middleware 
   // retry burst against a server that is already struggling: exactly what
   // this feature exists to prevent. Validate both here, once, so a bad value
   // falls back to the default instead of reaching the arithmetic at all.
-  const baseDelay = Number.isFinite(o.baseDelay) ? (o.baseDelay as number) : 250
-  const maxDelay = Number.isFinite(o.maxDelay) ? (o.maxDelay as number) : 30_000
+  //
+  // Guard against NaN specifically, not "not finite": `maxDelay: Infinity`
+  // is a legitimate, documented "no cap" idiom (Math.min(computed, Infinity)
+  // is always `computed`), and Number.isFinite(Infinity) is false. Treating
+  // it the same as NaN would silently replace "uncapped" with "capped at
+  // 30_000" — an undocumented behaviour change this patch must not make.
+  const baseDelay = o.baseDelay !== undefined && !Number.isNaN(o.baseDelay) ? o.baseDelay : 250
+  const maxDelay = o.maxDelay !== undefined && !Number.isNaN(o.maxDelay) ? o.maxDelay : 30_000
   const jitter = o.jitter ?? true
   const respectRetryAfter = o.respectRetryAfter ?? true
   const retryOn = o.retryOn ?? ((r: Result<unknown>) => (r.error?.status ?? 0) >= 500)
