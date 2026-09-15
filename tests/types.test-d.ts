@@ -52,7 +52,9 @@ describe('public type surface', () => {
 
 describe('ApiErrorKind', () => {
   it('covers every category the library can produce', () => {
-    expectTypeOf<ApiErrorKind>().toEqualTypeOf<'http' | 'network' | 'abort' | 'timeout' | 'parse'>()
+    expectTypeOf<ApiErrorKind>().toEqualTypeOf<
+      'http' | 'network' | 'abort' | 'timeout' | 'parse' | 'middleware'
+    >()
   })
 })
 
