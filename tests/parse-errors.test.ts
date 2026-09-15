@@ -26,11 +26,19 @@ describe('malformed body on a successful response', () => {
     expect(r.response!.status).toBe(200)
   })
 
+  // Boundary check, not a fix discriminator: the SyntaxError lands in `body`
+  // regardless of which catch block captures it, so this passes identically
+  // before and after the fix. It documents that `body` still carries the
+  // native parse error once routing is corrected.
   it('puts the SyntaxError in body', async () => {
     expect(String((await api().g()).error?.body)).toContain('JSON')
   })
 })
 
+// Boundary check, not a fix discriminator: this exercises the fetch-throw
+// (network) path, which the parse-routing fix never touches. It passes
+// identically before and after, and exists to pin that a genuine network
+// failure is not accidentally reclassified as 'parse'.
 describe('a genuine network failure is still kind "network"', () => {
   beforeEach(() => vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed') })))
   afterEach(() => vi.restoreAllMocks())
@@ -43,12 +51,18 @@ describe('a genuine network failure is still kind "network"', () => {
   })
 })
 
-describe('a parse failure on a 5xx is retryable', () => {
+// Non-regression check, not a fix discriminator: `!response.ok` is evaluated
+// before the new parse try/catch, so no 4xx/5xx can ever reach it -- a 5xx
+// with an unparseable body already took the http path (kind 'http') before
+// this task, and still does. This test passes identically before and after
+// the fix; it exists to catch a *future* refactor (e.g. merging the http and
+// success parse try/catches) that inverts or collapses that branch order.
+describe('a 5xx with an unparseable body is unaffected by this task', () => {
   beforeEach(() => vi.stubGlobal('fetch', vi.fn(async () =>
     new Response('not json', { status: 503, statusText: 'Service Unavailable' }))))
   afterEach(() => vi.restoreAllMocks())
 
-  it('retryMiddleware sees the real status and retries', async () => {
+  it('retryMiddleware already saw the real status and retried -- ordering unchanged', async () => {
     const { retryMiddleware } = await import('../src/built-in-middleware.js')
     const a = createApi({
       baseUrl: '', middleware: [retryMiddleware({ max: 2, baseDelay: 1 })],
