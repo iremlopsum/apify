@@ -45,7 +45,7 @@ import { ShareTracker, isAbandoned } from './utils/share.js'
 import { mergeHeaders } from './utils/headers.js'
 import { abortKind } from './utils/abort-kind.js'
 import { anySignal } from './utils/any-signal.js'
-import { resolveBudget } from './utils/budget.js'
+import { operationBudget, perCallerBudget } from './utils/budget.js'
 import { stableStringify } from './utils/cache.js'
 import { isSpecialBody, isOpaqueParams } from './utils/special-body.js'
 import type { ApiConfig, CallOptions, ErrorResult, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
@@ -414,8 +414,13 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * `result.retry()` calls `execute` with no argument, so a retry (shared
        * or not) always falls back to this caller's own `options.signal` /
        * timeout — a retry is a fresh, unshared request.
+       *
+       * `onSettled`, when given, is invoked the instant this operation has a
+       * `Result` and BEFORE that Result is reported to `onError`. The share
+       * site uses it to tell a genuine give-up from a vestigial one; see the
+       * post-execution hook.
        */
-      const execute = (sharedSignal?: AbortSignal): Promise<Result<unknown>> => {
+      const execute = (sharedSignal?: AbortSignal, onSettled?: () => void): Promise<Result<unknown>> => {
         try {
           // -----------------------------------------------------------------
           // Step 1: Compose the middleware chain
@@ -485,15 +490,19 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // so does every `result.retry()`. Both are ordinary unshared calls
           // and must keep this caller's own `options.signal` and
           // `options.timeout`; keying on the config would silently drop them.
-          const budget = resolveBudget(
+          // Only the operation half is built here: the per-caller half is the
+          // share site's business, and constructing it here would leave a
+          // retained `abort` listener on the caller's signal for a value this
+          // branch never reads.
+          const operation = operationBudget(
             options.timeout,
             request.config.timeout,
             options.signal,
             sharedSignal !== undefined
           )
           const callerSignal: AbortSignal | undefined = sharedSignal
-            ? anySignal([sharedSignal, budget.operation])
-            : budget.operation
+            ? anySignal([sharedSignal, operation])
+            : operation
           let dedupeController: AbortController | undefined
 
           // -----------------------------------------------------------------
@@ -534,6 +543,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // it. Because registration happens only once, that field still
               // holds a live signal here — never a previous attempt's already
               // aborted dedupe signal.
+
               // A middleware may have replaced ctx.request.signal with its own
               // (a deadline, a circuit breaker), dropping the shared
               // controller — the same hazard the dedupe registration below
@@ -746,6 +756,13 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           //    (only fires on final error — if retry middleware recovered, no fire)
           // -----------------------------------------------------------------
           return resultPromise.then(result => {
+            // This operation now has a Result. Announce it before reporting
+            // anything: a sharer whose own signal is aborted from inside the
+            // `onError` below must be able to tell, synchronously, that it was
+            // never left waiting. Every later hop is too late — see the share
+            // site's `onAbort`.
+            onSettled?.()
+
             // Clean up dedupe tracking after the request completes.
             // This must happen before onError so that onError handlers can
             // immediately fire a new request without triggering a dedupe abort.
@@ -772,6 +789,24 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // rather than the error's body because the tracker's abort reason
             // is authoritative: it says *why the request ended*, whereas the
             // error body is whatever `fetch` happened to reject with.
+            //
+            // "Every caller has already reported" rests on two legs, and both
+            // are load-bearing:
+            //
+            //  1. `release()` has exactly one call site — the share site's
+            //     `onAbort` — and that path always accounts for its caller:
+            //     it reports, unless this very hook already did (the
+            //     vestigial-abort case, which is still one report).
+            //  2. A sharer with no `perCaller` budget never releases at all.
+            //     It takes the `if (!perCaller) return promise.then(...)`
+            //     fast path, so it holds its reference for as long as it
+            //     waits, which keeps `refs > 0` and makes abandonment
+            //     unreachable while any such caller is still waiting.
+            //
+            // Leg 2 is why abandonment can never fire out from under a caller
+            // that has no give-up path of its own and would therefore never
+            // report. Adding a second `release()` call site, or giving that
+            // fast path one, breaks the invariant this suppression assumes.
             const abandoned = sharedSignal?.aborted === true && isAbandoned(sharedSignal.reason)
             if (result.error && !abandoned) fireOnError(result.error as ApiError)
 
@@ -852,18 +887,21 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
         //
         // Deliberately *not* `request.config.timeout`: that one belongs to the
         // operation, is shared by every caller, and is applied inside execute()
-        // against the request's own start time. `resolveBudget` is the single
-        // place that knows that split — asking it for the shared form here and
-        // reading only `perCaller` is what keeps the two straight. Computed
-        // before acquire() so a throw from here cannot strand a shared request
-        // that this caller then never releases.
-        const { perCaller } = resolveBudget(options.timeout, request.config.timeout, options.signal, true)
+        // against the request's own start time. `perCallerBudget` is the half
+        // of the budget that knows only about this caller — asking for exactly
+        // that half is what keeps the two straight, and avoids allocating an
+        // operation deadline nobody here reads. Computed before acquire() so a
+        // throw from here cannot strand a shared request that this caller then
+        // never releases.
+        const perCaller = perCallerBudget(options.timeout, options.signal)
 
         // acquire() either starts the real request (first caller — exec is
         // called with the tracker's own refcounted signal, which becomes the
         // signal that actually drives fetch) or joins an identical one already
         // in flight. Either way every sharer gets the same promise back.
-        const { promise, release } = shareTracker.acquire(shareKey, signal => execute(signal))
+        const { promise, release, hasSettled } = shareTracker.acquire(shareKey, (signal, markSettled) =>
+          execute(signal, markSettled)
+        )
 
         // execute() converts synchronous errors to Results, but a *rejection*
         // from the middleware chain (an async middleware that throws) escapes
@@ -918,10 +956,26 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // that sentinel existed this had to guess whether the delegate would
           // report, and guessed wrong in both directions — twice producing a
           // duplicate, twice producing zero.
+          //
+          // "Gave up" is the load-bearing word. A caller whose operation has
+          // already produced a Result was never left waiting: its abort is
+          // vestigial, and the operation has already reported that Result
+          // itself. The realistic source is an `onError` handler that cancels
+          // the rest of a batch on the first failure — it runs inside the
+          // hook above, so the abort lands while this listener is still
+          // armed. Reporting then produces two reports ('http' and 'abort')
+          // where an identical non-shared call produces one.
+          //
+          // `hasSettled()` is the operation's own synchronous answer, taken
+          // before it reported. Neither `done` nor any flag set from
+          // `promise.then` can serve here: the hook fires ~3 microtask hops
+          // ahead of them, so both are still false in exactly the window this
+          // guards. The Result handed back is unchanged either way — only the
+          // report is suppressed.
           const onAbort = (): void => {
             release()
             const result = buildFailedResult(perCaller.reason, 'abort')
-            fireOnError(result.error as ApiError)
+            if (!hasSettled()) fireOnError(result.error as ApiError)
             finish(result)
           }
 
