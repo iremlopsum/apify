@@ -12,7 +12,7 @@
 // 3. Network error (offline, DNS, abort) → createNetworkErrorResult (no Response)
 // =============================================================================
 
-import type { Result } from './types.js'
+import type { Result, SuccessResult, ErrorResult } from './types.js'
 
 // -----------------------------------------------------------------------------
 // ApiError Kind
@@ -182,7 +182,7 @@ export function createSuccessResult<TResponse>(
   data: TResponse,
   response: Response,
   retry: () => Promise<Result<TResponse>>
-): Result<TResponse> {
+): SuccessResult<TResponse> {
   return { data, error: null, response, retry }
 }
 
@@ -203,7 +203,7 @@ export function createErrorResult<TResponse>(
   error: ApiError,
   response: Response,
   retry: () => Promise<Result<TResponse>>
-): Result<TResponse> {
+): ErrorResult<TResponse> {
   return { data: null, error, response, retry }
 }
 
@@ -221,6 +221,6 @@ export function createErrorResult<TResponse>(
 export function createNetworkErrorResult<TResponse>(
   error: ApiError,
   retry: () => Promise<Result<TResponse>>
-): Result<TResponse> {
+): ErrorResult<TResponse> {
   return { data: null, error, response: null, retry }
 }

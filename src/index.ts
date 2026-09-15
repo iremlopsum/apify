@@ -32,6 +32,8 @@ export type {
   ApiConfig,
   CallOptions,
   Result,
+  SuccessResult,
+  ErrorResult,
   Middleware,
   MiddlewareContext,
   MiddlewareNext,
