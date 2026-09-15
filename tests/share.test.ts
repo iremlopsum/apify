@@ -358,7 +358,9 @@ describe('share', () => {
     expect(kinds).toEqual(['timeout'])   // the sharer that succeeded reports nothing
   })
 
-  it("reports a sharer's own abort to onError", async () => {
+  // The abort variant of this scenario is now suppressed — onError does not
+  // fire for kind: 'abort'. See tests/on-error.test.ts for that coverage.
+  it("does not report a sharer's own abort to onError", async () => {
     const f = controllable(); vi.stubGlobal('fetch', f.fn)
     const kinds: (string | undefined)[] = []
     const api = createApi({
@@ -374,7 +376,7 @@ describe('share', () => {
     ac.abort()
 
     expect((await cancelled).error?.kind).toBe('abort')
-    expect(kinds).toEqual(['abort'])
+    expect(kinds).toEqual([])
   })
 
   // ---------------------------------------------------------------------------
@@ -496,6 +498,10 @@ describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
     expect(kinds).toEqual(['timeout'])
   })
 
+  // The abort variant of this scenario is now suppressed — onError does not
+  // fire for kind: 'abort'. See tests/on-error.test.ts for that coverage, and
+  // row 2b below for the timeout-driven twin that keeps the once-per-caller
+  // count pinned for multiple callers.
   it('row 2: reports once per caller when two sharers both abort', async () => {
     const f = controllable(); vi.stubGlobal('fetch', f.fn)
     const kinds: (string | undefined)[] = []
@@ -518,7 +524,26 @@ describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
     expect((await b).error?.kind).toBe('abort')
 
     await flush()
-    expect(kinds).toEqual(['abort', 'abort']) // one report per caller, not three
+    expect(kinds).toEqual([])
+  })
+
+  it('row 2b: reports once per caller when two sharers both time out', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const kinds: (string | undefined)[] = []
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: { get: new Request<{ id: string }, { ok: number }>({ method: 'GET', path: '/x/:id', share: true }) },
+    })
+
+    const a = api.get({ id: '1' }, { timeout: 10 })
+    const b = api.get({ id: '1' }, { timeout: 10 })
+
+    expect((await a).error?.kind).toBe('timeout')
+    expect((await b).error?.kind).toBe('timeout')
+
+    await flush()
+    expect(kinds).toEqual(['timeout', 'timeout']) // one report per caller, not three
   })
 
   it('row 3 (unchanged): reports exactly once when the shared request itself 500s for 3 sharers', async () => {
@@ -573,7 +598,12 @@ describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
   // In both, the last sharer's own onAbort skipped reporting (wasLast was
   // true) and the delegate never got a chance to report either — zero
   // reports for a real cancellation, worse than the duplicate this fix set
-  // out to remove.
+  // out to remove. Both rows below now give up via a per-call timeout rather
+  // than an aborted signal: Task 10 stops onError firing for plain aborts, so
+  // an abort-driven give-up here would report zero by design, not by defect,
+  // and could no longer tell the two apart. A timeout still reports, and
+  // drives the identical onAbort path on budget.perCaller, so the zero-report
+  // pin survives with only the kind changed.
   // ---------------------------------------------------------------------------
   it('row 5: reports exactly once when the last sharer gives up and the shared chain rejects', async () => {
     const kinds: (string | undefined)[] = []
@@ -596,16 +626,14 @@ describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
       },
     })
 
-    const ac = new AbortController()
-    const p = api.get({ id: '1' }, { signal: ac.signal }) // the only (thus last) sharer
-    await Promise.resolve()
-    ac.abort()
+    const p = api.get({ id: '1' }, { timeout: 10 }) // the only (thus last) sharer
+    await flush()
 
     const r = await p
-    expect(r.error?.kind).toBe('abort')
+    expect(r.error?.kind).toBe('timeout')
 
     await flush()
-    expect(kinds).toEqual(['abort']) // exactly one report, not zero
+    expect(kinds).toEqual(['timeout']) // exactly one report, not zero
   })
 
   it('row 6: reports exactly once when the last sharer gives up against a cacheMiddleware hit', async () => {
@@ -627,22 +655,34 @@ describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
     await api.get({ id: '1' })
     expect(fetchMock).toHaveBeenCalledTimes(1)
 
-    // The only (thus last) sharer aborts before the cache hit's own promise
-    // settles — no `await` in between, so the abort is observed before the
-    // cache middleware's `return cached` has a chance to resolve. The cache
-    // hit succeeds regardless of the abort (cacheMiddleware never looks at
-    // the signal), so execute()'s post-execution hook sees a SUCCESS and has
-    // nothing to report.
+    // The only (thus last) sharer gives up (now via a timeout-shaped signal,
+    // not a plain abort — see the comment above row 5) before the cache hit's
+    // own promise settles, so the give-up is observed before the cache
+    // middleware's `return cached` has a chance to resolve.
+    //
+    // A real per-call `timeout` cannot reproduce that race: it resolves
+    // through `AbortSignal.timeout()`, a real timer (a macrotask), and an
+    // in-memory cache hit always resolves on a microtask — which the
+    // JavaScript event loop always drains before the next macrotask, no
+    // matter how small the configured timeout. A `{ timeout: 10 }` here would
+    // never win: the cache hit always settles first, and this test would
+    // stop pinning anything. Aborting synchronously with a `TimeoutError`-
+    // named reason takes the identical `onAbort`/`budget.perCaller` path a
+    // real timeout would (`abortKind` classifies by `.name`, not by which
+    // timer produced it), while preserving the synchronous race this pin
+    // depends on. The cache hit succeeds regardless (cacheMiddleware never
+    // looks at the signal), so execute()'s post-execution hook sees a SUCCESS
+    // and has nothing to report.
     const ac = new AbortController()
     const p = api.get({ id: '1' }, { signal: ac.signal })
-    ac.abort()
+    ac.abort(new DOMException('The operation timed out.', 'TimeoutError'))
 
     const r = await p
-    expect(r.error?.kind).toBe('abort')          // the caller's own Result is still an abort
+    expect(r.error?.kind).toBe('timeout')         // the caller's own Result is still a give-up
     expect(fetchMock).toHaveBeenCalledTimes(1)    // still a cache hit, no second network call
 
     await flush()
-    expect(kinds).toEqual(['abort']) // exactly one report, not zero
+    expect(kinds).toEqual(['timeout']) // exactly one report, not zero
   })
 })
 
@@ -675,6 +715,10 @@ describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
 describe('cross-kind double report on a stale rejection handler (Fix 2, 2.2.1)', () => {
   afterEach(() => vi.restoreAllMocks())
 
+  // The aborted caller's own report is now suppressed (kind: 'abort') — see
+  // tests/on-error.test.ts. What this test still pins is that its suppressed
+  // give-up does not somehow reappear once the operation's own failure
+  // reports afterwards.
   it('does not double-report a caller that already aborted when the shared operation later rejects', async () => {
     const kinds: (string | undefined)[] = []
     let releaseMiddleware: (() => void) | undefined
@@ -703,7 +747,7 @@ describe('cross-kind double report on a stale rejection handler (Fix 2, 2.2.1)',
     expect(abortedResult.error?.kind).toBe('abort')
 
     await flush()
-    expect(kinds).toEqual(['abort']) // exactly one report so far
+    expect(kinds).toEqual([]) // the aborted caller's give-up is suppressed (kind: 'abort')
 
     // Now let the shared middleware reject.
     releaseMiddleware!()
@@ -711,6 +755,6 @@ describe('cross-kind double report on a stale rejection handler (Fix 2, 2.2.1)',
     expect(patientResult.error?.kind).toBe('middleware')
 
     await flush()
-    expect(kinds).toEqual(['abort', 'middleware']) // the aborted caller did not report again
+    expect(kinds).toEqual(['middleware']) // only the operation's own failure reports
   })
 })

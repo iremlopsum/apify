@@ -91,6 +91,11 @@ export function createGraphQL(config: any): any {
    * as the retry policy's user callbacks in `built-in-middleware.ts`.
    */
   const fireOnError = (error: ApiError): void => {
+    // Aborts are cancellations we caused — a caller's own signal, or a newer
+    // request superseding this one under dedupe. Reporting them to an error
+    // tracker is noise. Timeouts are deliberately NOT suppressed: a deadline
+    // you missed is a genuine failure, which is why the two kinds are separate.
+    if (error.kind === 'abort') return
     if (!onError) return
     try {
       onError(error)
@@ -234,6 +239,7 @@ export function createGraphQL(config: any): any {
                   body: gqlBody.errors,
                   headers: response.headers,
                   request: { method: 'POST', url: ctx.request.url, params: variables },
+                  partialData: gqlBody.data ?? undefined,
                 })
                 return createErrorResult(error, response, execute)
               }

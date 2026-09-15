@@ -648,3 +648,33 @@ describe('createGraphQL — malformed body on a successful response', () => {
     expect(response?.status).toBe(200)
   })
 })
+
+describe('GraphQL partial data', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('preserves partial data alongside the errors', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      data: { user: { name: 'Ada' }, posts: null },
+      errors: [{ message: 'posts unavailable' }],
+    }), { status: 200 })))
+    const client = createGraphQL({
+      endpoint: '/gql',
+      operations: { getUser: new Operation<Record<string, never>, { user: { name: string } }>({ operation: 'query { user { name } }' }) },
+    })
+    const r = await client.getUser()
+    expect(r.error).not.toBeNull()
+    expect(r.data).toBeNull()
+    expect(r.error!.partialData).toEqual({ user: { name: 'Ada' }, posts: null })
+  })
+
+  it('leaves partialData undefined when no data came back', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      errors: [{ message: 'totally broken' }],
+    }), { status: 200 })))
+    const client = createGraphQL({
+      endpoint: '/gql',
+      operations: { getUser: new Operation<Record<string, never>, unknown>({ operation: 'query { user { name } }' }) },
+    })
+    expect((await client.getUser()).error!.partialData).toBeUndefined()
+  })
+})
