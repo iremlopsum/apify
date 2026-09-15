@@ -4,7 +4,6 @@ interface Entry {
   promise: Promise<Result<unknown>>
   controller: AbortController
   refs: number
-  dead: boolean
 }
 
 /**
@@ -61,20 +60,24 @@ export class ShareTracker {
     //   controller.abort()      // last sharer releases; refs -> 0, aborts
     //   api.get(params)         // no await in between — must NOT join this
     //
-    // `dead` is a third, synchronous signal for the same window: `release`
-    // sets it *before* calling `controller.abort()`, so a caller re-entering
-    // `acquire` synchronously during that abort call — e.g. from an `abort`
-    // event listener the abort itself triggers — already sees the entry as
-    // gone, even before `refs` or `signal.aborted` would reflect it.
+    // No third, synchronous flag is needed to close that window: `release`
+    // decrements `refs` unconditionally, before it ever calls `abort()`, so
+    // `refs <= 0` is already true for any caller arriving synchronously
+    // during (or after) that abort call — including one arriving from
+    // *inside* an `abort` event listener the call triggers, since
+    // `AbortController.abort()` sets `signal.aborted` before it fires any
+    // listeners. Both were verified empirically: forcing a would-be "dead"
+    // marker to be set after `abort()` instead of before never changed a
+    // single test's outcome, in this guard or in a listener-nested re-entry.
     //
     // Treat it as if no entry exists so a fresh one is started instead.
-    if (entry && (entry.dead || entry.refs <= 0 || entry.controller.signal.aborted)) {
+    if (entry && (entry.refs <= 0 || entry.controller.signal.aborted)) {
       entry = undefined
     }
 
     if (!entry) {
       const controller = new AbortController()
-      const created: Entry = { controller, refs: 0, dead: false, promise: undefined as unknown as Promise<Result<unknown>> }
+      const created: Entry = { controller, refs: 0, promise: undefined as unknown as Promise<Result<unknown>> }
       created.promise = exec(controller.signal).finally(() => {
         // Identity check: only clear the entry if it is still ours. An entry
         // replaced while this one was settling belongs to a newer call, and
@@ -105,11 +108,6 @@ export class ShareTracker {
         released = true
         held.refs--
         if (held.refs <= 0 && !held.controller.signal.aborted) {
-          // Mark dead before aborting: a caller that re-enters `acquire`
-          // synchronously — e.g. from an `abort` event listener this very
-          // call triggers — must see this entry as gone even though
-          // `.finally()` (and therefore the Map delete) hasn't run yet.
-          held.dead = true
           // A caller that already has its own abort/timeout reason keeps it
           // (create-api.ts still relies on that reason to classify its own
           // Result — that's Task 7's territory, not this one's). Only a
