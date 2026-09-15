@@ -198,6 +198,11 @@ export function mockFetch(routes: Record<string, RouteValue>) {
   }
 }
 
+// The `SuccessResult<T>` / `ErrorResult<T>` locals below (rather than `Result<T>`)
+// are what make a future `Result` change fail loudly here — that's enforced by
+// `npm run typecheck` (tsc over src/), not by tests/types.test-d.ts, which
+// asserts the public `Result<T>` contract these builders still expose.
+
 /**
  * A success `Result`, for consumers stubbing at the api level.
  *

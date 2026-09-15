@@ -96,6 +96,9 @@ describe('Request generics are not structurally interchangeable', () => {
   })
 })
 
+// These assert the builders' PUBLIC contract — that `Result<T>` narrowing
+// still works for consumers. The internal migration to `SuccessResult<T>` /
+// `ErrorResult<T>` locals is enforced by `npm run typecheck`, not by these.
 describe('testing builders produce valid union members', () => {
   it('successResult is a SuccessResult', () => {
     const r = successResult({ id: '1' })
