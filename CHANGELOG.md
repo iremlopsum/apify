@@ -29,10 +29,11 @@ worked before/after examples for every one of them.
 - **BREAKING: `Result<T>` is now a discriminated union**,
   `SuccessResult<TResponse> | ErrorResult<TResponse>`, not an interface with
   independently-nullable fields. `if (error) return` now narrows `data` to
-  `TResponse` — the README's own headline example has compiled without
-  actually narrowing since 2.0.0, forcing a `data!` assertion or a redundant
-  null check at every call site. Middleware that synthesises a success
-  `Result` must supply a non-null `Response`. See
+  `TResponse` — `data` was never actually narrowed before, so the README's own
+  headline example (`console.log(data.name)` with no assertion, right after
+  checking `error`) has **not** compiled since 2.0.0 without a `data!`
+  assertion or a redundant null check at every call site. Middleware that
+  synthesises a success `Result` must supply a non-null `Response`. See
   [MIGRATION.md](./MIGRATION.md#upgrading-to-300).
 - **BREAKING: `Request<TParams, TResponse>` generics are no longer
   interchangeable.** Phantom fields make the class's own generics

@@ -196,11 +196,12 @@ Four consequences:
   reason to *also* hit that branch, it no longer will. Branch on `kind ===
   'abort'` explicitly if you still want to observe your own cancellations.
 
-- **A middleware that propagates the library's own abort reason is now
-  silent, not reported as `'middleware'`.** This covers both re-throwing the
-  exact reason (`throw ctx.request.signal.reason`) and the shape
-  `node:timers/promises` and most abortable helpers actually produce — a
-  fresh `AbortError` whose `.cause` is the signal's reason:
+- **A middleware that propagates the library's own abort reason now returns a
+  silent `kind: 'abort'` `Result`, instead of rejecting the caller's promise
+  outright.** This covers both re-throwing the exact reason (`throw
+  ctx.request.signal.reason`) and the shape `node:timers/promises` and most
+  abortable helpers actually produce — a fresh `AbortError` whose `.cause` is
+  the signal's reason:
 
   ```ts
   import { setTimeout as delay } from 'node:timers/promises'
@@ -211,32 +212,56 @@ Four consequences:
   }
   // if ctx.request.signal aborts during the delay, `delay` rejects with an
   // AbortError whose `.cause` is ctx.request.signal.reason
-  // 2.x   → error.kind === 'middleware' (the AbortError didn't match by identity), reported
-  // 3.0.0 → error.kind === 'abort' (recognised as propagating our own signal), not reported
+  // 2.x   → non-shared: composeMiddleware's chain had no rejection handler at
+  //         all, so the caller's own promise rejects with the raw AbortError
+  //         — no Result, "kind" does not apply, onError never runs.
+  //         Under `share: true` specifically, this *was* already converted to
+  //         a Result (the share site's own rejection handler, present since
+  //         2.2.0), classified `kind: 'abort'` by sniffing the thrown value's
+  //         `.name` — the same name-based sniff #7's intro paragraph
+  //         describes, so it could not tell this genuine propagation apart
+  //         from bullet 3's unrelated-failure case below. Reported either way
+  //         (no abort suppression existed yet).
+  // 3.0.0 → error.kind === 'abort' (recognised as propagating our own signal,
+  //         not merely name-matched), returned as an ordinary Result on every
+  //         path, not reported
   ```
 
-  **What to do:** if you were matching `kind === 'middleware'` to catch
-  failures from this kind of abortable helper, those events disappear from
-  that branch — they're cancellations now, correctly. Middleware authors:
-  see the "worth knowing" note below about not attaching `signal.reason` as
-  `.cause` to your *own* unrelated failures — doing so makes them
-  indistinguishable from this propagation case.
+  **What to do:** delete any `try`/`catch` you placed around this kind of
+  call for the same reason as #5. Code was already correct if it treated this
+  as `kind: 'abort'` — it just could not have relied on that being *reliable*
+  (see bullet 3, which used to collide with this one under the old
+  name-based sniff). Middleware authors: see the "worth knowing" note below
+  about not attaching `signal.reason` as `.cause` to your *own* unrelated
+  failures — doing so makes them indistinguishable from this propagation
+  case.
 
 - **A middleware throwing its own, unrelated `AbortError`-named failure now
-  starts reporting.** An IndexedDB quota abort, say, rethrown by a caching
-  middleware, has nothing to do with this request's own signal, but used to
-  match the old name-based sniff and get silently swallowed as `'abort'`. It
-  now correctly stays `'middleware'` and reaches `onError`:
+  reaches `onError` classified as `'middleware'`, as an ordinary `Result`,
+  instead of rejecting the caller's promise outright.** An IndexedDB quota
+  abort, say, rethrown by a caching middleware, has nothing to do with this
+  request's own signal:
 
   ```ts
-  // 2.x   → error.kind === 'abort' (matched by name), swallowed, not reported
-  // 3.0.0 → error.kind === 'middleware' (not a propagation of our signal), reported
+  // 2.x   → non-shared: composeMiddleware's chain had no rejection handler at
+  //         all, so the caller's own promise rejects with the raw AbortError
+  //         — no Result, "kind" does not apply, onError never runs.
+  //         Under `share: true`, this was already converted to a Result, but
+  //         misclassified `kind: 'abort'` by the same name-based sniff as
+  //         bullet 2 above — 'middleware' did not exist as a kind at all
+  //         before this release, on either path — and was reported (no
+  //         suppression existed for 'abort' yet either).
+  // 3.0.0 → error.kind === 'middleware' (not a propagation of our signal),
+  //         returned as an ordinary Result on every path, reported
   ```
 
   **What to do:** nothing to change in your code, but expect to *start*
-  seeing these in `onError`/Sentry if you have middleware that can throw an
-  `AbortError`-named failure unrelated to request cancellation. That's the
-  point — it was a real bug being swallowed before.
+  seeing these correctly labelled `kind: 'middleware'` instead of either an
+  unhandled rejection (non-shared) or a misleading `kind: 'abort'` (shared) —
+  if you have middleware that can throw an `AbortError`-named failure
+  unrelated to request cancellation. See #5 above: this is the same
+  "throwing middleware now returns a Result" change, just for a failure that
+  happens to be named like an abort.
 
 - **Any abort of the exact signal handed to `fetch` — including one installed
   by middleware — is now `'abort'`/`'timeout'` and silent**, not classified by
@@ -254,27 +279,34 @@ now wrong in the specific ways above.
 
 Aborting after headers arrive but while the body is still downloading — a
 component unmounting mid-fetch, a deadline firing mid-download — used to be
-misclassified by what stage it happened to interrupt, for **both** 2xx and
-non-2xx responses:
+misclassified for a **non-2xx** response specifically. The **2xx** case
+already produced the right `kind`/`status`/`response` shape in 2.2.1; only
+whether it was *reported* changes there, which is entirely #6 (`onError` no
+longer fires for `'abort'`), not a distinct shape change:
 
 ```ts
 // A slow response body, aborted partway through download:
-// 2xx response:
-//   2.x   → kind: 'parse', status: 200, response present — reported
-//   3.0.0 → kind: 'abort' (or 'timeout'), status: 0, response: null — not reported
-// non-2xx response (e.g. a slow 502 gateway page):
-//   2.x   → kind: 'http', the real status, response present, body: null — reported
+// 2xx response (e.g. a slow success payload):
+//   2.x   → kind: 'abort' (or 'network', if the thrown value wasn't
+//           name-recognisable as AbortError/TimeoutError), status: 0,
+//           response: null — reported (2.2.1 had no abort suppression at all)
+//   3.0.0 → kind: 'abort' (or 'timeout'), status: 0, response: null — not
+//           reported (same shape, see #6 for why reporting stops)
+// non-2xx response (e.g. a slow 502 gateway page) — this is the real shape change:
+//   2.x   → kind: 'http', the real status, response present, body: null —
+//           reported, regardless of whether the cancellation was ours
 //   3.0.0 → kind: 'abort' (or 'timeout'), status: 0, response: null — not reported
 ```
 
-Two concrete hazards to check for:
+Two concrete hazards to check for, both specific to the **non-2xx** case:
 
-- **Code branching on `kind === 'parse'` or reading `error.status` in that
-  window** now sees `'abort'`/`'timeout'` and `status: 0` instead — the same
-  "was this reported?" question as #6/#7 applies.
+- **Code branching on `error.status` for a cancellation that lands while a
+  non-2xx body downloads** now sees `status: 0` instead of the real status —
+  the same "was this reported?" question as #6/#7 applies.
 - **Code reading `result.response!.headers` (or any non-null assertion on
-  `response`)** must now handle `response === null` — a cancellation mid-download
-  has no response at all, where it previously had one.
+  `response`) for that same non-2xx-cancellation case** must now handle
+  `response === null` — it previously had a real `response` (with `body:
+  null`), even though the request never actually finished.
 
 **Also:** `retryMiddleware`'s default `retryOn` (and any custom `retryOn`
 keyed on `status >= 500`) no longer retries a cancellation caught in this
