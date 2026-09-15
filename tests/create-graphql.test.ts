@@ -618,3 +618,33 @@ describe('createGraphQL — error kind', () => {
     expect(error!.status).toBe(200)
   })
 })
+
+describe('createGraphQL — malformed body on a successful response', () => {
+  it('reports kind "parse" with the real status and a non-null response', async () => {
+    const fakeResponse = {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers(),
+      text: () => Promise.resolve('<html>oops</html>'),
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(fakeResponse))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { broken: new Operation<Record<string, never>, unknown>({ operation: 'query { broken }' }) },
+    })
+
+    const { data, error, response } = await client.broken()
+
+    // Mirrors the REST parse-errors.test.ts assertions: the server answered
+    // (2xx), but the body was not JSON. This must report as what it is --
+    // kind 'parse' with the real status and Response -- not fall through to
+    // the network catch (status 0, response null).
+    expect(data).toBeNull()
+    expect(error?.kind).toBe('parse')
+    expect(error?.status).toBe(200)
+    expect(response).not.toBeNull()
+    expect(response?.status).toBe(200)
+  })
+})
