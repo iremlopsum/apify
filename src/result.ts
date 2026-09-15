@@ -25,10 +25,14 @@ import type { Result, SuccessResult, ErrorResult } from './types.js'
  * `'timeout'` all carry `status: 0`, and they call for completely different
  * handling — retry, ignore, and report respectively.
  *
- * `'parse'` is declared for forward compatibility and is not produced by this
- * release.
+ * `'parse'` is produced starting this release, for a response body that
+ * failed to parse according to the request's `responseType`.
+ *
+ * `'middleware'` means a middleware threw rather than the request itself
+ * failing — a bug in consumer code you would fix, not a transient failure
+ * you would retry.
  */
-export type ApiErrorKind = 'http' | 'network' | 'abort' | 'timeout' | 'parse'
+export type ApiErrorKind = 'http' | 'network' | 'abort' | 'timeout' | 'parse' | 'middleware'
 
 // -----------------------------------------------------------------------------
 // ApiError Options
@@ -44,8 +48,8 @@ interface ApiErrorOptions {
   /** HTTP status code (e.g., 404, 500). Use 0 for network errors and aborts. */
   status: number
 
-  /** What category of failure this is. Optional for backward compatibility. */
-  kind?: ApiErrorKind
+  /** What category of failure this is. */
+  kind: ApiErrorKind
 
   /** HTTP status text (e.g., 'Not Found'). Use '' for network errors and aborts. */
   statusText: string
@@ -118,13 +122,8 @@ export class ApiError {
   /** HTTP status code, or 0 for network errors and aborted requests. */
   readonly status: number
 
-  /**
-   * What category of failure this is.
-   *
-   * `undefined` only if an `ApiError` was constructed without one — every
-   * error the library itself produces sets it.
-   */
-  readonly kind?: ApiErrorKind
+  /** What category of failure this is. */
+  readonly kind: ApiErrorKind
 
   /** HTTP status text, or '' for network errors and aborted requests. */
   readonly statusText: string
