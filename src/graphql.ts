@@ -183,10 +183,27 @@ export function createGraphQL(config: any): any {
                 return createErrorResult(error, response, execute)
               }
 
+              // Parse in its own try so a malformed body is reported as what it
+              // is: the server responded, we could not read it. Falling through
+              // to the network catch would report status 0 and discard the
+              // Response, telling the caller they are offline when they are not.
               const text = await response.text()
-              const gqlBody = text
-                ? (JSON.parse(text) as { data?: unknown; errors?: GraphQLError[] })
-                : null
+              let gqlBody: { data?: unknown; errors?: GraphQLError[] } | null
+              try {
+                gqlBody = text
+                  ? (JSON.parse(text) as { data?: unknown; errors?: GraphQLError[] })
+                  : null
+              } catch (parseErr) {
+                const error = new ApiError({
+                  kind: 'parse',
+                  status: response.status,
+                  statusText: response.statusText,
+                  body: parseErr,
+                  headers: response.headers,
+                  request: { method: 'POST', url: ctx.request.url, params: variables },
+                })
+                return createErrorResult(error, response, execute)
+              }
 
               if (gqlBody?.errors?.length) {
                 const error = new ApiError({

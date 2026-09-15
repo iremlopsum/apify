@@ -614,7 +614,25 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // ---------------------------------------------------------------
               // Handle successful responses (2xx)
               // ---------------------------------------------------------------
-              const data = await parseResponse(response, request.config.responseType)
+              // Parse in its own try so a malformed body is reported as what it
+              // is: the server responded, we could not read it. Falling through
+              // to the network catch would report status 0 and discard the
+              // Response, telling the caller they are offline when they are not.
+              let data: unknown
+              try {
+                data = await parseResponse(response, request.config.responseType)
+              } catch (parseErr) {
+                const error = new ApiError({
+                  kind: 'parse',
+                  status: response.status,
+                  statusText: response.statusText,
+                  body: parseErr,
+                  headers: response.headers,
+                  request: { method: ctx.request.method, url: ctx.request.url, params }
+                })
+                return createErrorResult(error, response, execute)
+              }
+
               return createSuccessResult(data, response, execute)
             } catch (err) {
               // ---------------------------------------------------------------
