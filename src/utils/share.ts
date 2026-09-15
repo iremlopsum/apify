@@ -4,6 +4,16 @@ interface Entry {
   promise: Promise<Result<unknown>>
   controller: AbortController
   refs: number
+  /**
+   * Whether the operation has produced a `Result` yet.
+   *
+   * Set by the operation itself, synchronously, before it reports anything —
+   * which is the only moment at which this is knowable. Every hop downstream
+   * of that (this class's own `.finally`, a sharer's `.then`) runs strictly
+   * later, so a flag set there is always still false during the window that
+   * matters. See `hasSettled`.
+   */
+  settled: boolean
 }
 
 /**
@@ -40,14 +50,17 @@ export class ShareTracker {
    *
    * @param key - Identity of the call; identical keys share.
    * @param exec - Starts the real request. Called only for the first caller,
-   *   and given the shared signal to pass to `fetch`.
-   * @returns The shared promise and a `release` this caller must call if it
-   *   gives up waiting.
+   *   and given the shared signal to pass to `fetch`, plus a `markSettled`
+   *   callback it must invoke the moment it has a `Result` — before it reports
+   *   that Result anywhere.
+   * @returns The shared promise, a `release` this caller must call if it gives
+   *   up waiting, and `hasSettled` — a synchronous reader every sharer of this
+   *   operation shares, not a per-caller closure.
    */
   acquire(
     key: string,
-    exec: (signal: AbortSignal) => Promise<Result<unknown>>
-  ): { promise: Promise<Result<unknown>>; release: () => boolean } {
+    exec: (signal: AbortSignal, markSettled: () => void) => Promise<Result<unknown>>
+  ): { promise: Promise<Result<unknown>>; release: () => boolean; hasSettled: () => boolean } {
     let entry = this.inflight.get(key)
 
     // A dying entry: every sharer has already released (refs <= 0) or its
@@ -77,8 +90,13 @@ export class ShareTracker {
 
     if (!entry) {
       const controller = new AbortController()
-      const created: Entry = { controller, refs: 0, promise: undefined as unknown as Promise<Result<unknown>> }
-      created.promise = exec(controller.signal).finally(() => {
+      const created: Entry = {
+        controller,
+        refs: 0,
+        settled: false,
+        promise: undefined as unknown as Promise<Result<unknown>>,
+      }
+      created.promise = exec(controller.signal, () => { created.settled = true }).finally(() => {
         // Identity check: only clear the entry if it is still ours. An entry
         // replaced while this one was settling belongs to a newer call, and
         // deleting it would silently disable sharing for that key — the same
@@ -95,6 +113,9 @@ export class ShareTracker {
 
     return {
       promise: held.promise,
+      // Per-operation, so a joiner sees it too — the give-up this guards
+      // against can arrive on any sharer's signal, not just the first one's.
+      hasSettled: (): boolean => held.settled,
       // Returns whether THIS call was the one that dropped refs to zero and
       // aborted the shared controller. It is part of the tracker's own
       // contract (tests/share-tracker.test.ts asserts it), not a signal for
