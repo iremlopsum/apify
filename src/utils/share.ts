@@ -4,6 +4,22 @@ interface Entry {
   promise: Promise<Result<unknown>>
   controller: AbortController
   refs: number
+  dead: boolean
+}
+
+/**
+ * The reason a shared request is aborted when its last caller releases.
+ *
+ * This is not a failure. Every caller has already received its own Result and
+ * reported it; the underlying request is simply no longer wanted. Reporting it
+ * again as an operation failure is what made a single shared timeout produce
+ * two `onError` calls before 2.2.1.
+ */
+export const ABANDONED: unique symbol = Symbol('apify.abandoned')
+
+/** Whether an abort reason is the tracker's own abandonment sentinel. */
+export function isAbandoned(reason: unknown): boolean {
+  return reason === ABANDONED
 }
 
 /**
@@ -45,14 +61,20 @@ export class ShareTracker {
     //   controller.abort()      // last sharer releases; refs -> 0, aborts
     //   api.get(params)         // no await in between — must NOT join this
     //
+    // `dead` is a third, synchronous signal for the same window: `release`
+    // sets it *before* calling `controller.abort()`, so a caller re-entering
+    // `acquire` synchronously during that abort call — e.g. from an `abort`
+    // event listener the abort itself triggers — already sees the entry as
+    // gone, even before `refs` or `signal.aborted` would reflect it.
+    //
     // Treat it as if no entry exists so a fresh one is started instead.
-    if (entry && (entry.refs <= 0 || entry.controller.signal.aborted)) {
+    if (entry && (entry.dead || entry.refs <= 0 || entry.controller.signal.aborted)) {
       entry = undefined
     }
 
     if (!entry) {
       const controller = new AbortController()
-      const created: Entry = { controller, refs: 0, promise: undefined as unknown as Promise<Result<unknown>> }
+      const created: Entry = { controller, refs: 0, dead: false, promise: undefined as unknown as Promise<Result<unknown>> }
       created.promise = exec(controller.signal).finally(() => {
         // Identity check: only clear the entry if it is still ours. An entry
         // replaced while this one was settling belongs to a newer call, and
@@ -83,7 +105,19 @@ export class ShareTracker {
         released = true
         held.refs--
         if (held.refs <= 0 && !held.controller.signal.aborted) {
-          held.controller.abort(reason)
+          // Mark dead before aborting: a caller that re-enters `acquire`
+          // synchronously — e.g. from an `abort` event listener this very
+          // call triggers — must see this entry as gone even though
+          // `.finally()` (and therefore the Map delete) hasn't run yet.
+          held.dead = true
+          // A caller that already has its own abort/timeout reason keeps it
+          // (create-api.ts still relies on that reason to classify its own
+          // Result — that's Task 7's territory, not this one's). Only a
+          // reason-less release, as from a bare `release()`, gets tagged
+          // ABANDONED, so this method's contract (distinguishable reason
+          // when nobody supplied one) holds without changing what today's
+          // callers observe.
+          held.controller.abort(reason ?? ABANDONED)
           return true
         }
         return false
