@@ -285,10 +285,19 @@ describe('share', () => {
   // though the call had succeeded with no data. Worse than the rejection it
   // replaced, because a rejection is at least loud.
   //
-  // Kind is 'middleware', not 'network', since Task 9 (the never-throws fix):
-  // execute()'s own guard now converts the rejection into a Result before it
-  // ever reaches the share site, so both sharers see the operation's own
-  // classification rather than the share site's generic 'network' fallback.
+  // What this pins TODAY, after Task 9 (the never-throws fix), is narrower
+  // than the name suggests: `execute()` itself now converts the middleware's
+  // throw into a Result (kind 'middleware') before the shared `promise` can
+  // ever reject, so both sharers below resolve through the ordinary success
+  // arm at the share site (`r => r` / `r => finish(r)`) — they no longer
+  // exercise the share site's *own* rejection-handling arms
+  // (`!perCaller`'s `promise.then(r => r, err => ...)` and the per-caller
+  // race's rejection handler) at all. Those two arms are dead code in normal
+  // operation now and are pinned separately, directly, in
+  // `tests/share-tracker.test.ts` (which injects a rejecting `exec` to reach
+  // them without going through `execute()`). This test still earns its name
+  // one level up: it proves a shared operation's middleware failure reaches
+  // every sharer as a real Result, whichever mechanism gets it there.
   // ---------------------------------------------------------------------------
   it('hands every sharer a real Result when the shared operation rejects', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
@@ -646,10 +655,20 @@ describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
 // shared middleware rejects): ['abort','network','network']. The aborted
 // caller must report exactly once.
 //
-// The patient caller's own kind is 'middleware', not 'network', since Task 9
-// (the never-throws fix): the operation itself now classifies the failure
-// before the share site ever sees it, rather than the chain rejecting and
-// the share site falling back to its own generic 'network' kind.
+// What this pins TODAY, after Task 9 (the never-throws fix): `execute()`
+// itself converts the middleware's throw into a Result (kind 'middleware')
+// before the shared `promise` can ever reject, so NEITHER caller below still
+// reaches the rejection handler this test was originally written to guard —
+// `patient` has no per-caller budget, so it takes the `!perCaller` fast path,
+// which now resolves through `r => r` instead of the rejection arm; `aborted`
+// was never in that handler to begin with, it settles via `onAbort`. That
+// handler (`done`-bail included) is dead code in normal operation now and is
+// pinned separately, directly, in `tests/share-tracker.test.ts` (which
+// injects a rejecting `exec` to reach it without going through `execute()`).
+// This test still earns its describe block's name one level up: it proves
+// the ALREADY-ABORTED caller does not get a second report when the
+// operation's own failure is reported afterwards, regardless of which
+// mechanism produces that operation-level report.
 // ---------------------------------------------------------------------------
 describe('cross-kind double report on a stale rejection handler (Fix 2, 2.2.1)', () => {
   afterEach(() => vi.restoreAllMocks())
