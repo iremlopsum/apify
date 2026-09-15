@@ -62,6 +62,20 @@ describe('a 5xx with an unparseable body is unaffected by this task', () => {
     new Response('not json', { status: 503, statusText: 'Service Unavailable' }))))
   afterEach(() => vi.restoreAllMocks())
 
+  // Round 5 review, Finding M3: no test committed so far actually asserts
+  // kind: 'http' + body: null for a genuinely unparseable non-2xx body --
+  // the integration suite's "slow-but-uncancelled" control test exercises a
+  // *parseable* (if slowly-delivered) 503 body, and the retry test below
+  // only counts fetch calls. This is the direct pin the retry test's own
+  // comment claims already existed.
+  it('classifies as http with a null body, not swallowed as an abort or a parse failure', async () => {
+    const r = await api().g()
+    expect(r.error?.kind).toBe('http')
+    expect(r.error?.status).toBe(503)
+    expect(r.error?.body).toBeNull()
+    expect(r.response).not.toBeNull()
+  })
+
   it('retryMiddleware already saw the real status and retried -- ordering unchanged', async () => {
     const { retryMiddleware } = await import('../src/built-in-middleware.js')
     const a = createApi({

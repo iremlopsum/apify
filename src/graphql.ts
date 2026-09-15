@@ -207,13 +207,18 @@ export function createGraphQL(config: any): any {
               })
 
               if (!response.ok) {
-                // Same provenance concern as the success path's parse catch
-                // below: `response.text()` is the network body read, not
-                // just parsing, so an abort landing while an ERROR body
-                // downloads must not be misreported as a genuine 'http'
-                // error with a null body — the classification would
-                // otherwise be decided by the server's status code rather
-                // than by what actually happened.
+                // `response.text()` is the network body read, not just
+                // parsing, so an abort landing while an ERROR body downloads
+                // must not be misreported as a genuine 'http' error with a
+                // null body — the classification would otherwise be decided
+                // by the server's status code rather than by what actually
+                // happened. This is the same provenance concern the outer
+                // `catch (err)` below already handles for the fetch() call
+                // itself — NOT the success path's `JSON.parse` try further
+                // down, which deliberately keeps its own `response.text()`
+                // outside that try (see the comment there) specifically so
+                // an abort during ITS network read falls through to that
+                // same outer catch instead of needing its own guard.
                 let body: unknown
                 try {
                   const text = await response.text()

@@ -192,10 +192,13 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
  * failure that has nothing to do with this request's own signal — a
  * rethrown IndexedDB quota abort, say — and that must stay `'middleware'`,
  * not be swallowed as `'abort'` just because the name matches. Propagation
- * is what proves a middleware is relaying *our* cancellation rather than
- * reporting its own, unrelated one. A non-`'middleware'` fallback doesn't
- * need that check: a fetch rejection while our own signal is aborted IS that
- * cancellation, whatever shape fetch happened to throw.
+ * is a heuristic for that, not proof — `propagatesReason`'s doc names the
+ * known false positive (a middleware's own error using `{ cause }` to
+ * explain *why* it failed, not to claim it *is* the cancellation) — but it's
+ * the closest approximation available, and rejecting it in favour of exact
+ * identity alone is measurably worse (see the same doc). A non-`'middleware'`
+ * fallback doesn't need that check: a fetch rejection while our own signal
+ * is aborted IS that cancellation, whatever shape fetch happened to throw.
  */
 function syntheticResult(
   reason: unknown,

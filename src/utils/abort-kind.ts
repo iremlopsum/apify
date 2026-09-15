@@ -10,11 +10,30 @@
  * `AbortSignal.timeout()` throws one named `TimeoutError`, and some edge
  * runtimes throw a plain `Error` carrying the same name.
  *
- * @returns `'timeout'`, `'abort'`, or `null` when it is neither.
+ * `err` is frequently `signal.reason` — supplied verbatim by a caller via
+ * `ac.abort(reason)` — so it is exactly as arbitrary as any other value a
+ * middleware might throw, and reading `.name` off it is not safe to do
+ * unguarded for the same reason `propagatesReason`'s `.cause` read isn't: a
+ * revoked `Proxy`, a reactive-framework wrapper (MobX, Vue), or a class with
+ * a lazy `get name()` can all throw on property access. This is called from
+ * inside the same last-resort `.catch` that converts a rejection into a
+ * `Result` — `syntheticResult`'s `abortKind(signal!.reason) ?? 'abort'` sits
+ * one line below `propagatesReason` in that exact expression — so an
+ * unguarded throw here reopens the identical hang/rejection this whole
+ * classification exists to close, just one property over. Treat a throwing
+ * `.name` getter as "neither" rather than letting it propagate.
+ *
+ * @returns `'timeout'`, `'abort'`, or `null` when it is neither (or when
+ *   reading `.name` itself throws).
  */
 export function abortKind(err: unknown): 'abort' | 'timeout' | null {
   if (typeof err !== 'object' || err === null) return null
-  const name = (err as { name?: unknown }).name
+  let name: unknown
+  try {
+    name = (err as { name?: unknown }).name
+  } catch {
+    return null
+  }
   if (name === 'TimeoutError') return 'timeout'
   if (name === 'AbortError') return 'abort'
   return null
