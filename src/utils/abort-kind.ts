@@ -21,25 +21,39 @@ export function abortKind(err: unknown): 'abort' | 'timeout' | null {
 }
 
 /**
- * Whether `reason` — something a middleware threw — is provably a
- * propagation of `signalReason`, the reason our own signal aborted with.
+ * A heuristic for whether `reason` — something a middleware threw — is
+ * *probably* a propagation of `signalReason`, the reason our own signal
+ * aborted with. It is not proof: `throw new Error('cache write failed while
+ * unwinding', { cause: ctx.request.signal.reason })` is the idiomatic way to
+ * explain *why* a middleware is failing, not a claim to *be* that failure,
+ * and this heuristic still classifies it `'abort'` — a known false positive,
+ * accepted because the alternative (identity-only, no `.cause` match at all)
+ * is measurably worse: it misses `node:timers/promises`' `setTimeout(ms,
+ * undefined, { signal })`, which rejects with a *fresh* `AbortError` whose
+ * `.cause` is the signal's reason rather than the reason itself — a shape
+ * that also turns up in queueing libraries and IndexedDB wrappers built on
+ * `AbortSignal`. One level of `.cause` unwrapping catches that real case,
+ * without going further: an error that merely *chains* to something
+ * unrelated (an `AbortError` a middleware manufactured on its own, whose
+ * `.cause` is not our reason) must still fail this check and classify as
+ * `'middleware'` — see the IndexedDB scenario in `syntheticResult`'s doc,
+ * which this must not reopen.
  *
- * Exact identity (`reason === signalReason`) is the direct case: a
- * middleware that reads `ctx.request.signal.reason` and rethrows it
- * verbatim. But a middleware awaiting an abortable helper often doesn't get
- * handed the reason itself back — `node:timers/promises`' `setTimeout(ms,
- * undefined, { signal })` rejects with a *fresh* `AbortError` whose `.cause`
- * is the signal's reason, not the reason itself, and the same pattern shows
- * up in queueing libraries and IndexedDB wrappers built on `AbortSignal`.
- * One level of `.cause` unwrapping catches that case too, without going
- * further: an error that merely *chains* to something unrelated (an
- * `AbortError` a middleware manufactured on its own, whose `.cause` is not
- * our reason) must still fail this check and classify as `'middleware'` —
- * see the IndexedDB scenario in `syntheticResult`'s doc, which this must not
- * reopen.
+ * `reason` is an arbitrary value a middleware threw, so reading `.cause`
+ * off it is not safe to do unguarded — an accessor property, a `Proxy`, or a
+ * cross-realm wrapper can throw on property access. This runs inside the
+ * last-resort `.catch` that converts a rejection into a `Result`; a throw
+ * here would escape with nothing downstream able to catch it, exactly the
+ * "never throws" contract this whole classification exists in service of.
+ * Treat a throwing `.cause` getter as "does not match" rather than letting
+ * it propagate.
  */
 export function propagatesReason(reason: unknown, signalReason: unknown): boolean {
   if (reason === signalReason) return true
   if (typeof reason !== 'object' || reason === null) return false
-  return (reason as { cause?: unknown }).cause === signalReason
+  try {
+    return (reason as { cause?: unknown }).cause === signalReason
+  } catch {
+    return false
+  }
 }

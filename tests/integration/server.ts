@@ -86,6 +86,16 @@ export function startServer(): Promise<TestServer> {
           res.write('{"partial":true,')
           setTimeout(() => { if (!res.writableEnded) res.end('"done":true}') }, 2000)
 
+        } else if (method === 'GET' && pathname === '/slow-body-error') {
+          // Same shape as /slow-body, but a genuine error status (a gateway
+          // returning a slow multi-chunk 502/503 page is the realistic
+          // case) — this is what lets a test abort while an ERROR body is
+          // still downloading, the branch parseResponse's non-2xx path
+          // shares with the success path.
+          res.writeHead(503, { 'Content-Type': 'application/json' })
+          res.write('{"partial":true,')
+          setTimeout(() => { if (!res.writableEnded) res.end('"done":true}') }, 2000)
+
         } else if (method === 'GET' && pathname === '/flaky') {
           const FLAKY_FAIL_COUNT = 2 // fail this many times, then succeed
           // `count` is read AFTER the shared increment at the top of the handler,

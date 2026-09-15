@@ -207,11 +207,35 @@ export function createGraphQL(config: any): any {
               })
 
               if (!response.ok) {
+                // Same provenance concern as the success path's parse catch
+                // below: `response.text()` is the network body read, not
+                // just parsing, so an abort landing while an ERROR body
+                // downloads must not be misreported as a genuine 'http'
+                // error with a null body — the classification would
+                // otherwise be decided by the server's status code rather
+                // than by what actually happened.
                 let body: unknown
                 try {
                   const text = await response.text()
                   body = text ? JSON.parse(text) : null
-                } catch {
+                } catch (parseErr) {
+                  const signal = ctx.request.signal
+                  // Same "aborted now, not necessarily caused by" limitation
+                  // as the outer `catch (err)` below shares — checking
+                  // `signal.aborted` at the moment of the catch, not
+                  // causation. See create-api.ts's equivalent guards for the
+                  // fuller writeup; not repeated per call site in this file.
+                  if (signal?.aborted === true) {
+                    const error = new ApiError({
+                      status: 0,
+                      kind: abortKind(signal.reason) ?? 'abort',
+                      statusText: '',
+                      body: parseErr,
+                      headers: new Headers(),
+                      request: { method: 'POST', url: ctx.request.url, params: variables },
+                    })
+                    return createNetworkErrorResult(error, execute)
+                  }
                   body = null
                 }
                 const error = new ApiError({

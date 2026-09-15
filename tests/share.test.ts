@@ -383,14 +383,20 @@ describe('share', () => {
   // Round 3 review, Finding 4: reverting create-api.ts's provenance fix
   // (syntheticResult + core()'s catch back to abortKind(reason) ?? fallback)
   // left this whole file green — nothing here pinned "a sharer's own custom
-  // abort reason classifies 'abort', not 'network'". The share-site give-up
-  // path (onAbort) already built its Result with fallback 'abort', so a
-  // custom reason already fell back to 'abort' correctly even under the old
-  // formula; what the old formula got wrong was specifically the UNSHARED
-  // core() catch, which no share.test.ts test could ever exercise. This
-  // pins the shared side explicitly so a future regression in the shared
-  // give-up's own classification — not just the unshared one already pinned
-  // in tests/on-error.test.ts — would be caught here too.
+  // abort reason classifies 'abort', not 'network'".
+  //
+  // What this actually pins, precisely (round 4 review corrected the claim
+  // above): `onAbort` calls `buildFailedResult(perCaller.reason, perCaller,
+  // 'abort')` — `reason` IS `perCaller.reason`, i.e. `signal.reason`, by
+  // construction at that one call site, so `abortKind` returns the same
+  // answer with or without the provenance check; this test cannot
+  // discriminate the provenance logic itself (see tests/on-error.test.ts for
+  // that — the unshared `core()` catch is where a custom reason could still
+  // fall through to `abortKind(err) ?? 'network'`). What it DOES single-point
+  // pin is `onAbort`'s hard-coded `'abort'` fallback literal: a future change
+  // that swapped it for something else (or removed it) would regress a
+  // sharer's give-up back to misclassifying any non-`AbortError`/`TimeoutError`
+  // -named reason, and this is the only test that would catch it.
   // ---------------------------------------------------------------------------
   it("classifies a sharer's own custom abort reason as abort, not network", async () => {
     const f = controllable(); vi.stubGlobal('fetch', f.fn)
