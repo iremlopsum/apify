@@ -75,3 +75,19 @@ describe('Result narrows like a discriminated union', () => {
     expectTypeOf(r.response).toEqualTypeOf<Response>()
   })
 })
+
+describe('Request generics are not structurally interchangeable', () => {
+  it('rejects a Request with different generics', () => {
+    interface Post { slug: string }
+    const getPost = new Request<{ slug: string }, Post>({ method: 'GET', path: '/posts/:slug' })
+    // @ts-expect-error — a Post request is not a User request
+    const wrong: Request<{ id: string }, User> = getPost
+    void wrong
+  })
+
+  it('still infers params and response through createApi', async () => {
+    const r = await api.getUser({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+})
