@@ -243,7 +243,13 @@ export interface RequestConfig {
  * `Response` is always present because the server responded.
  */
 export interface SuccessResult<TResponse> {
-  /** The parsed response data. Never `null` on this branch. */
+  /**
+   * The parsed response data. Non-null **for a response with a body**. An
+   * endpoint that can answer 204 or an empty 200 (a `DELETE`, most commonly)
+   * still yields `null` here at runtime — `TResponse` is not widened to
+   * include it, so include `null` in that endpoint's own `TResponse` if it
+   * can do this. See the `responseType` reference for the empty-body case.
+   */
   data: TResponse
 
   /** Always `null` — this is the discriminant that narrows `data`. */

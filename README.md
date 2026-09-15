@@ -235,7 +235,7 @@ interface ErrorResult<TResponse> {
 type Result<TResponse> = SuccessResult<TResponse> | ErrorResult<TResponse>
 ```
 
-Check `error` first, then use `data` with confidence: `if (error) return` (or any other narrowing check on `error`) narrows `data` to `TResponse` for the rest of the function -- no `data!` assertion needed. Branch on `error.kind` rather than `error.status` — `'network'`, `'abort'` and `'timeout'` all carry `status: 0`, but they call for different handling:
+Check `error` first, then use `data` with confidence: `if (error) return` (or any other narrowing check on `error`) narrows `data` to `TResponse` for the rest of the function -- no `data!` assertion needed. That narrowing is only as accurate as `TResponse` itself, though: an endpoint that can answer 204 or an empty 200 (a `DELETE`, most commonly) still yields `data: null` at runtime on the success branch -- see [Response parsing](#response-parsing) below -- so give that endpoint's `TResponse` a `| null` rather than trusting the narrowing to catch it. Branch on `error.kind` rather than `error.status` — `'network'`, `'abort'` and `'timeout'` all carry `status: 0`, but they call for different handling:
 
 ```ts
 const { data, error, response, retry } = await api.getUser({ id: '42' })
@@ -269,6 +269,8 @@ if (error) {
 }
 
 // error is null here, so `data` is narrowed to `User` -- no assertion needed
+// (this assumes getUser's TResponse never has to represent an empty body --
+// see the empty-body note above `error.kind` for endpoints that can)
 console.log(data.name)
 ```
 
@@ -649,7 +651,7 @@ The `responseType` option on a `Request` determines how the response body is par
 | `'arrayBuffer'` | `response.arrayBuffer()` | `ArrayBuffer` |
 | `'formData'`    | `response.formData()`  | `FormData`     |
 
-The default is `'json'`. JSON parsing reads the body as text first and then parses, so empty responses (e.g., 204 No Content) return `null` instead of throwing a parse error.
+The default is `'json'`. JSON parsing reads the body as text first and then parses, so empty responses (e.g., 204 No Content) return `null` instead of throwing a parse error. That `null` lands in `SuccessResult.data`, whose type is `TResponse`, not `TResponse | null` -- see the note above `error.kind` in [Result](#result) for what that means for an endpoint's own `TResponse`.
 
 ### Cancellation
 
