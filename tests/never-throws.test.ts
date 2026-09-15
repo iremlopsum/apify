@@ -62,6 +62,33 @@ describe('a throwing middleware never rejects the caller', () => {
     await new Promise(r => setTimeout(r, 20))
     expect(kinds).toEqual(['middleware'])
   })
+
+  // Round 4 review, Finding 1: `propagatesReason` (src/utils/abort-kind.ts)
+  // reads `.cause` off `reason` — an arbitrary value a middleware threw —
+  // and that read can itself throw (an accessor property, a `Proxy`, a
+  // cross-realm wrapper). It runs inside the last-resort `.catch` whose
+  // entire job is converting a rejection into a `Result`, so an unguarded
+  // throw there escaped as an unhandled rejection: the exact "never throws"
+  // contract this file exists to pin. `propagatesReason` is only ever
+  // reached when the governing signal is already aborted (short-circuited
+  // otherwise), so this needs an aborted `options.signal` to actually drive
+  // execution into the throwing getter.
+  it('a middleware throwing an object with a throwing .cause getter never rejects the caller', async () => {
+    const evilCause: Middleware = async () => {
+      const err = new Error('boom')
+      Object.defineProperty(err, 'cause', { get() { throw new TypeError('boom from cause getter') } })
+      throw err
+    }
+    const ac = new AbortController()
+    ac.abort()
+    const api = createApi({
+      baseUrl: '', middleware: [evilCause],
+      requests: { g: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/g' }) },
+    })
+    const r = await api.g({}, { signal: ac.signal })
+    expect(r.error).not.toBeNull()
+    expect(r.error!.kind).toBe('middleware')
+  })
 })
 
 // GraphQL never coalesces (createGraphQL has no `share` concept — see the
@@ -107,5 +134,25 @@ describe('a throwing middleware never rejects a GraphQL caller', () => {
     await api.g()
     await new Promise(r => setTimeout(r, 20))
     expect(kinds).toEqual(['middleware'])
+  })
+
+  // Twin of the REST suite's identical test above — graphql.ts has its own
+  // local `buildFailedResult` call site that also feeds `propagatesReason`.
+  it('a middleware throwing an object with a throwing .cause getter never rejects the caller', async () => {
+    const evilCause: Middleware = async () => {
+      const err = new Error('boom')
+      Object.defineProperty(err, 'cause', { get() { throw new TypeError('boom from cause getter') } })
+      throw err
+    }
+    const ac = new AbortController()
+    ac.abort()
+    const api = createGraphQL({
+      endpoint: '/graphql',
+      middleware: [evilCause],
+      operations: { g: new Operation<Record<string, never>, unknown>({ operation: 'query { g }' }) },
+    })
+    const r = await api.g(undefined, { signal: ac.signal })
+    expect(r.error).not.toBeNull()
+    expect(r.error!.kind).toBe('middleware')
   })
 })

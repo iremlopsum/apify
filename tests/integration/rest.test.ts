@@ -350,6 +350,60 @@ describe('onError', () => {
     await new Promise(resolve => setTimeout(resolve, 20))
     expect(onError).not.toHaveBeenCalled()
   })
+
+  // Round 4 review, Finding 2: the !response.ok branch reads the error
+  // body too (parseResponse again), and its catch swallowed EVERYTHING into
+  // body: null with no provenance check — so an abort landing while an
+  // error body downloads used to misreport as a genuine 'http' error
+  // (status 503, body null) instead of the user's own cancellation. Same
+  // user action as the 2xx test above; only the server's status code used
+  // to decide which story the caller got.
+  it('does not report a real abort that lands mid-error-body-download as an http error', async () => {
+    const onError = vi.fn()
+    const slowBodyError = new Request<Record<string, never>, unknown>({
+      method: 'GET',
+      path: '/slow-body-error',
+    })
+    const api = createApi({ baseUrl: server.baseUrl, requests: { slowBodyError }, onError })
+
+    const ac = new AbortController()
+    const p = api.slowBodyError(undefined, { signal: ac.signal })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    ac.abort()
+
+    const { data, error, response } = await p
+    expect(data).toBeNull()
+    expect(error!.kind).toBe('abort')
+    expect(response).toBeNull()
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  // Control: a genuine 503 with no abort involved must still classify
+  // 'http', with the real status and a non-null response, and still
+  // report — proving the new abort check above doesn't also swallow a real
+  // error status just because parseResponse happened to fail for some
+  // other reason.
+  it('still reports a genuine error status with a slow (but uncancelled) body as http', async () => {
+    const onError = vi.fn()
+    const slowBodyError = new Request<Record<string, never>, unknown>({
+      method: 'GET',
+      path: '/slow-body-error',
+    })
+    const api = createApi({ baseUrl: server.baseUrl, requests: { slowBodyError }, onError })
+
+    const { data, error, response } = await api.slowBodyError()
+
+    expect(data).toBeNull()
+    expect(error!.kind).toBe('http')
+    expect(error!.status).toBe(503)
+    expect(response).not.toBeNull()
+    expect(response!.status).toBe(503)
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).toHaveBeenCalledTimes(1)
+  }, 5000)
 })
 
 describe('retry()', () => {

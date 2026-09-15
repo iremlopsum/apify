@@ -675,6 +675,81 @@ describe('createGraphQL — malformed body on a successful response', () => {
   })
 })
 
+// Round 4 review, Finding 2: graphql.ts's !response.ok branch has the
+// identical bug REST had — response.text() is the network body read, not
+// just parsing, and its catch swallowed everything into body: null with no
+// provenance check. An abort landing while an ERROR body downloads used to
+// misreport as a genuine 'http' error instead of the caller's own
+// cancellation.
+describe('createGraphQL — abort during an error-body download', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('does not report a real abort mid error-body-download as an http error', async () => {
+    const onError = vi.fn()
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+      const s = init.signal as AbortSignal | undefined
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        headers: new Headers(),
+        text: () => new Promise<string>((_resolve, reject) => {
+          if (s?.aborted) { reject(s.reason); return }
+          s?.addEventListener('abort', () => reject(s.reason))
+        }),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { broken: new Operation<Record<string, never>, unknown>({ operation: 'query { broken }' }) },
+      onError,
+    })
+
+    const ac = new AbortController()
+    const p = client.broken(undefined, { signal: ac.signal })
+    ac.abort()
+
+    const { data, error, response } = await p
+    expect(data).toBeNull()
+    expect(error?.kind).toBe('abort')
+    expect(response).toBeNull()
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  // Control: a genuine 503 with no abort must still classify 'http' with
+  // the real status and a non-null response, and still report.
+  it('still reports a genuine error status with no abort as http', async () => {
+    const onError = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable',
+      headers: new Headers(),
+      text: () => Promise.resolve(''),
+    }))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { broken: new Operation<Record<string, never>, unknown>({ operation: 'query { broken }' }) },
+      onError,
+    })
+
+    const { data, error, response } = await client.broken()
+    expect(data).toBeNull()
+    expect(error?.kind).toBe('http')
+    expect(error?.status).toBe(503)
+    expect(response).not.toBeNull()
+    expect(response?.status).toBe(503)
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('GraphQL partial data', () => {
   afterEach(() => vi.restoreAllMocks())
 

@@ -621,10 +621,34 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 // Try to parse the error response body using the same
                 // responseType config. If parsing fails (e.g., server returned
                 // HTML for a JSON endpoint), fall back to null.
+                //
+                // Same provenance concern as the success path below —
+                // parseResponse performs the network body read here too, so
+                // an abort landing while an ERROR body downloads (a slow
+                // gateway's multi-kilobyte 502 page, say) must not be
+                // misreported as a genuine 'http' error with a null body.
+                // Without this check the classification is decided by the
+                // server's status code rather than by what actually
+                // happened — the same user action (navigating away) would
+                // read as a real 5xx to retryOn and to onError.
                 let body: unknown
                 try {
                   body = await parseResponse(response, request.config.responseType)
-                } catch {
+                } catch (parseErr) {
+                  const signal = ctx.request.signal
+                  // Same "aborted now, not necessarily caused by" limitation
+                  // as the success-path guard below — see its comment.
+                  if (signal?.aborted === true) {
+                    const error = new ApiError({
+                      status: 0,
+                      kind: abortKind(signal.reason) ?? 'abort',
+                      statusText: '',
+                      body: parseErr,
+                      headers: new Headers(),
+                      request: { method: ctx.request.method, url: ctx.request.url, params }
+                    })
+                    return createNetworkErrorResult(error, execute)
+                  }
                   body = null
                 }
 
@@ -667,6 +691,13 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 data = await parseResponse(response, request.config.responseType)
               } catch (parseErr) {
                 const signal = ctx.request.signal
+                // Known limitation: this checks "is the signal aborted NOW",
+                // not "did the abort CAUSE this catch" — a genuinely
+                // malformed payload that happens to arrive after the signal
+                // was separately aborted is misclassified as the abort too.
+                // Narrowing that requires parseResponse to distinguish its
+                // own read failure from a parse failure across all five
+                // response types, which the doc above already declines.
                 if (signal?.aborted === true) {
                   const error = new ApiError({
                     status: 0,
