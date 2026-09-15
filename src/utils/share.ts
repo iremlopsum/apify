@@ -47,7 +47,7 @@ export class ShareTracker {
   acquire(
     key: string,
     exec: (signal: AbortSignal) => Promise<Result<unknown>>
-  ): { promise: Promise<Result<unknown>>; release: (reason?: unknown) => boolean } {
+  ): { promise: Promise<Result<unknown>>; release: () => boolean } {
     let entry = this.inflight.get(key)
 
     // A dying entry: every sharer has already released (refs <= 0) or its
@@ -96,26 +96,30 @@ export class ShareTracker {
     return {
       promise: held.promise,
       // Returns whether THIS call was the one that dropped refs to zero and
-      // aborted the shared controller — the caller (create-api.ts) uses this
-      // to decide whether it must report the failure itself. A non-last
-      // release leaves the shared request running: it will never see this
-      // caller's give-up, so nothing else would ever report it, and the
-      // caller must. A last release aborts the shared request, whose own
-      // execute() will observe that abort and report it through the normal
-      // post-execution hook — reporting it again here would double it.
-      release: (reason?: unknown): boolean => {
+      // aborted the shared controller. It is part of the tracker's own
+      // contract (tests/share-tracker.test.ts asserts it), not a signal for
+      // the caller to decide reporting by: create-api.ts now reports a
+      // give-up unconditionally, because the ABANDONED reason below is what
+      // keeps the shared request's own hook quiet.
+      release: (): boolean => {
         if (released) return false
         released = true
         held.refs--
         if (held.refs <= 0 && !held.controller.signal.aborted) {
-          // A caller that already has its own abort/timeout reason keeps it
-          // (create-api.ts still relies on that reason to classify its own
-          // Result — that's Task 7's territory, not this one's). Only a
-          // reason-less release, as from a bare `release()`, gets tagged
-          // ABANDONED, so this method's contract (distinguishable reason
-          // when nobody supplied one) holds without changing what today's
-          // callers observe.
-          held.controller.abort(reason ?? ABANDONED)
+          // The shared controller's abort reason answers exactly one
+          // question: why did the OPERATION end? The answer here is always
+          // the same — nobody is waiting on it any more — so the reason is
+          // always ABANDONED, never the reason of whichever caller happened
+          // to release last.
+          //
+          // Each caller's own Result is classified separately, at the share
+          // site, from that caller's own `perCaller.reason`. Conflating the
+          // two is what made a single shared timeout report twice: the last
+          // caller's reason travelled into the shared request, whose
+          // post-execution hook then reported it again as an operation
+          // failure. Keeping them apart is what lets that hook recognise
+          // abandonment (`isAbandoned`) and stay silent.
+          held.controller.abort(ABANDONED)
           return true
         }
         return false
