@@ -974,16 +974,13 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
         // As of the never-throws fix (Task 9), `execute()` itself converts a
         // middleware rejection into a Result before it ever gets here — so
         // `promise` has no live producer of a rejection today, and this arm
-        // is dead in normal operation. It stays as defense-in-depth: the
-        // invariant "execute cannot reject" is upheld by code, not by types,
-        // and if it is ever weakened (a future refactor, a new failure path
-        // added upstream of the `.catch` guard), this is what stops a bare
-        // rejection from reaching the caller instead of a `['abort','network',
-        // 'network']`-style regression with nothing failing to say so.
-        // `tests/share-tracker.test.ts` exercises this arm directly, by
-        // injecting a rejecting `exec` into `ShareTracker.acquire` — that is
-        // the only thing keeping it covered, since no path through
-        // `createApi` can reach it any more.
+        // is dead in normal operation. Kept as defense-in-depth: "execute()
+        // never rejects" is an invariant held by code, not by types. The
+        // invariant itself — not this now-unreachable arm — is what is
+        // pinned, by `tests/never-throws.test.ts`: if a future change lets
+        // `execute()` reject again, those tests fail loudly, and this arm
+        // becomes live again to catch exactly the rejection they'd be
+        // failing on.
         if (!perCaller) return promise.then(r => r, (err: unknown) => failedResult(err, 'network'))
 
         // Race this caller's own giving-up against the shared result settling.
@@ -1016,11 +1013,12 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // before `promise` can ever reject, so this whole rejection
               // handler — the `done` bail included — has no live producer
               // today. Kept as defense-in-depth for the same reason: the
-              // no-reject invariant lives in code, not in types.
-              // `tests/share-tracker.test.ts` drives this arm (including the
-              // `done`-already-true case) with an injected rejecting `exec`,
-              // which is what keeps it exercised now that nothing upstream
-              // can reach it.
+              // no-reject invariant lives in code, not in types, and it is
+              // that invariant — pinned by `tests/never-throws.test.ts` —
+              // rather than this arm itself, that is what is actually
+              // tested. If `execute()` ever rejects again, those tests fail
+              // loudly, and this bail (and the arm around it) is what
+              // catches the fallout.
               if (done) return
               finish(failedResult(err, 'network'))
             }
