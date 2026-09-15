@@ -761,7 +761,12 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // `onError` below must be able to tell, synchronously, that it was
             // never left waiting. Every later hop is too late — see the share
             // site's `onAbort`.
-            onSettled?.()
+            // `retry` hands this very function to consumers, so the second
+            // parameter can receive anything a caller's call shape supplies —
+            // `arr.map(result.retry)` passes the index. Guard on the type
+            // rather than trusting the shape: a non-function here would throw
+            // from inside the one path that must always produce a Result.
+            if (typeof onSettled === 'function') onSettled()
 
             // Clean up dedupe tracking after the request completes.
             // This must happen before onError so that onError handlers can
@@ -796,7 +801,9 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             //  1. `release()` has exactly one call site — the share site's
             //     `onAbort` — and that path always accounts for its caller:
             //     it reports, unless this very hook already did (the
-            //     vestigial-abort case, which is still one report).
+            //     vestigial-abort case) or the operation settled successfully
+            //     and there is nothing to report at all. At most one report,
+            //     and never zero where an error existed.
             //  2. A sharer with no `perCaller` budget never releases at all.
             //     It takes the `if (!perCaller) return promise.then(...)`
             //     fast path, so it holds its reference for as long as it
