@@ -380,14 +380,22 @@ describe('onError', () => {
     expect(onError).not.toHaveBeenCalled()
   })
 
-  // Control: a genuine 503 with no abort involved must still classify
-  // 'http', with the real status and a non-null response, and still
-  // report — proving the new abort check above doesn't also swallow a real
-  // error status just because parseResponse happened to fail for some
-  // other reason.
-  it('still reports a genuine error status with a slow (but uncancelled) body as http', async () => {
+  // Control, reworded (round 5 review, Finding M3): /slow-body-error writes
+  // '{"partial":true,' then finishes with '"done":true}' -- the ASSEMBLED
+  // body ('{"partial":true,"done":true}') is valid JSON, so parseResponse
+  // succeeds here and the new abort-provenance catch above is never
+  // entered at all; `error.body` is the parsed object, not null. This does
+  // NOT exercise that catch's fallback branch (see
+  // tests/parse-errors.test.ts's "classifies as http with a null body..."
+  // for the test that actually pins kind: 'http' + body: null against a
+  // genuinely unparseable body). What this control proves is narrower but
+  // still real: the slow-but-uncancelled non-2xx path completes end to end
+  // over a real connection -- real status, a real (parsed) body, classified
+  // 'http', reported once -- unaffected by the new check that only
+  // activates on an aborted signal.
+  it('completes a slow (but uncancelled) non-2xx response normally, end to end', async () => {
     const onError = vi.fn()
-    const slowBodyError = new Request<Record<string, never>, unknown>({
+    const slowBodyError = new Request<Record<string, never>, { partial: boolean; done: boolean }>({
       method: 'GET',
       path: '/slow-body-error',
     })
@@ -398,6 +406,7 @@ describe('onError', () => {
     expect(data).toBeNull()
     expect(error!.kind).toBe('http')
     expect(error!.status).toBe(503)
+    expect(error!.body).toEqual({ partial: true, done: true })
     expect(response).not.toBeNull()
     expect(response!.status).toBe(503)
 

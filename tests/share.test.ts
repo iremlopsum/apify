@@ -386,17 +386,27 @@ describe('share', () => {
   // abort reason classifies 'abort', not 'network'".
   //
   // What this actually pins, precisely (round 4 review corrected the claim
-  // above): `onAbort` calls `buildFailedResult(perCaller.reason, perCaller,
-  // 'abort')` — `reason` IS `perCaller.reason`, i.e. `signal.reason`, by
-  // construction at that one call site, so `abortKind` returns the same
-  // answer with or without the provenance check; this test cannot
-  // discriminate the provenance logic itself (see tests/on-error.test.ts for
-  // that — the unshared `core()` catch is where a custom reason could still
-  // fall through to `abortKind(err) ?? 'network'`). What it DOES single-point
-  // pin is `onAbort`'s hard-coded `'abort'` fallback literal: a future change
-  // that swapped it for something else (or removed it) would regress a
-  // sharer's give-up back to misclassifying any non-`AbortError`/`TimeoutError`
-  // -named reason, and this is the only test that would catch it.
+  // above, and round 5 review corrected THAT correction — see below):
+  // `onAbort` calls `buildFailedResult(perCaller.reason, perCaller, 'abort')`
+  // — `reason` IS `perCaller.reason`, i.e. `signal.reason`, by construction
+  // at that one call site, so `abortKind` returns the same answer with or
+  // without the provenance check; this test cannot discriminate the
+  // provenance logic itself (see tests/on-error.test.ts for that — the
+  // unshared `core()` catch is where a custom reason could still fall
+  // through to `abortKind(err) ?? 'network'`).
+  //
+  // It does NOT single-point pin onAbort's own `'abort'` fallback ARGUMENT
+  // either (that was round 4's corrected claim, and it was measured false):
+  // `onAbort` only ever runs once `perCaller.aborted` is true, which makes
+  // `syntheticResult`'s `isOurCancellation` unconditionally true at that call
+  // site, so the `fallbackKind` parameter `buildFailedResult` is invoked with
+  // is never actually read there — changing that one argument from `'abort'`
+  // to `'network'` breaks nothing. What this test single-point pins is
+  // `syntheticResult`'s OWN inner fallback literal — the `?? 'abort'` in
+  // `abortKind(signal!.reason) ?? 'abort'` — since that IS what runs on this
+  // call site's `isOurCancellation === true` path, for any reason `abortKind`
+  // doesn't recognise by name (a custom `Error`, a plain string). Mutating
+  // that literal is what this test actually catches.
   // ---------------------------------------------------------------------------
   it("classifies a sharer's own custom abort reason as abort, not network", async () => {
     const f = controllable(); vi.stubGlobal('fetch', f.fn)
