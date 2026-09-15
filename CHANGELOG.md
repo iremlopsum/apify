@@ -99,19 +99,33 @@ worked before/after examples for every one of them.
   that exists specifically to keep the library's "never throws" contract
   intact. Previously this could leave a `share: true` caller's promise
   permanently pending, or reject an unshared call outright.
+- **A shared (`share: true`) request whose signal a middleware replaces is
+  still cancelled when every sharer gives up.** A middleware that installs
+  its own `ctx.request.signal` (a deadline, a circuit breaker) used to drop
+  the shared refcounted signal entirely — every sharer releasing no longer
+  aborted the real request, so the socket stayed open with nobody waiting on
+  it, and with `retryMiddleware` it kept retrying in the background after
+  every caller had already resolved. The shared signal is now re-merged in
+  whenever a middleware replaces it, the same way dedupe's registration
+  already had to.
 - **`result.retry()` no longer rejects when called with an unexpected call
   shape.** `retry` is handed out directly as a plain function, so
   `arr.map(result.retry)` (which passes the array index as a second
   argument) or `result.retry(undefined, 0)` threw a `TypeError` out of the
   one path that must always produce a `Result`. All call shapes now return a
   `Result`.
-- **A shared (`share: true`) call's `onError` no longer double-reports a
-  vestigial give-up.** A consumer whose `onError` aborts its own signal (e.g.
-  to cancel the rest of a batch on the first failure) could make a shared
-  call report twice — once for the real failure, once for the abort that
-  landed on a listener that was technically still armed even though the
-  caller already had its `Result`. One report per caller give-up now means
-  exactly that.
+- **A shared (`share: true`) call no longer re-reports a give-up that lands
+  after the operation has already settled.** The realistic trigger is a
+  consumer's `onError` handler reacting to a shared failure by aborting
+  another of its own still-outstanding callers with a hand-crafted
+  `TimeoutError`-shaped reason (`ac.abort(new DOMException('t',
+  'TimeoutError'))`) — to give up on the rest of a batch, say. That caller's
+  own give-up listener was technically still armed even though the operation
+  already had its `Result`, and would otherwise report a second, misleading
+  failure for an operation that already reported once. (A plain
+  `AbortError`-shaped give-up doesn't need this fix to avoid a double report —
+  `onError` never fires for `error.kind === 'abort'` at all — so the fix
+  matters specifically for a give-up whose reason survives that filter.)
 
 ## [2.2.1] — 2026-09-14
 
