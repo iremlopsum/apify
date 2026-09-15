@@ -806,7 +806,15 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // `arr.map(result.retry)` passes the index. Guard on the type
             // rather than trusting the shape: a non-function here would throw
             // from inside the one path that must always produce a Result.
-            if (typeof onSettled === 'function') onSettled()
+            // A function that itself throws is guarded too, for the same
+            // reason: this hook must never fail a request that already has a
+            // perfectly good Result, and a throw here is exactly the kind of
+            // consumer-supplied misbehaviour that would resurrect the
+            // rejection path the share site's defense-in-depth handlers exist
+            // to catch (see ShareTracker's callers in this file).
+            if (typeof onSettled === 'function') {
+              try { onSettled() } catch { /* a settlement callback must not fail a request */ }
+            }
 
             // Clean up dedupe tracking after the request completes.
             // This must happen before onError so that onError handlers can
@@ -962,6 +970,20 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
         // for this caller to race against — it can only ever learn its result
         // from `promise` settling, so this is the whole story for it, same as
         // it always reported.
+        //
+        // As of the never-throws fix (Task 9), `execute()` itself converts a
+        // middleware rejection into a Result before it ever gets here — so
+        // `promise` has no live producer of a rejection today, and this arm
+        // is dead in normal operation. It stays as defense-in-depth: the
+        // invariant "execute cannot reject" is upheld by code, not by types,
+        // and if it is ever weakened (a future refactor, a new failure path
+        // added upstream of the `.catch` guard), this is what stops a bare
+        // rejection from reaching the caller instead of a `['abort','network',
+        // 'network']`-style regression with nothing failing to say so.
+        // `tests/share-tracker.test.ts` exercises this arm directly, by
+        // injecting a rejecting `exec` into `ShareTracker.acquire` — that is
+        // the only thing keeping it covered, since no path through
+        // `createApi` can reach it any more.
         if (!perCaller) return promise.then(r => r, (err: unknown) => failedResult(err, 'network'))
 
         // Race this caller's own giving-up against the shared result settling.
@@ -988,6 +1010,17 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // underlying give-up a second time, under a DIFFERENT kind
               // ('network' here vs. whatever `onAbort` already reported).
               // Bail before constructing anything.
+              //
+              // Same status as the `!perCaller` arm above: since Task 9,
+              // `execute()` converts a middleware rejection into a Result
+              // before `promise` can ever reject, so this whole rejection
+              // handler — the `done` bail included — has no live producer
+              // today. Kept as defense-in-depth for the same reason: the
+              // no-reject invariant lives in code, not in types.
+              // `tests/share-tracker.test.ts` drives this arm (including the
+              // `done`-already-true case) with an injected rejecting `exec`,
+              // which is what keeps it exercised now that nothing upstream
+              // can reach it.
               if (done) return
               finish(failedResult(err, 'network'))
             }
