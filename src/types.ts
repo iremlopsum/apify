@@ -147,8 +147,9 @@ export interface RequestConfig {
    * and `middleware: []` still share.) A per-call `signal` or `timeout` does
    * not prevent sharing: those bound *who is still waiting*, not what is asked
    * for, and a sharer that gives up receives its own error `Result`
-   * (`kind: 'timeout'` or `'abort'`) and reports it to `onError` exactly as
-   * the same non-shared call would. A per-*request*
+   * (`kind: 'timeout'` or `'abort'`), reported to `onError` exactly as the
+   * same non-shared call would — which means a `'timeout'` give-up reports
+   * and an `'abort'` give-up does not (see {@link ApiConfig.onError}). A per-*request*
    * {@link RequestConfig.timeout}, by contrast, bounds the shared request
    * itself for everyone.
    * A call whose params are a special body type — `FormData`, `Blob`,
@@ -535,7 +536,12 @@ export interface ApiConfig<TRequests extends Record<string, unknown>> {
    * Only fires when the **final** result has an error. If a retry middleware
    * recovers a 5xx to a 200, this does NOT fire.
    *
-   * Fires for both HTTP errors (4xx, 5xx) and network errors (status 0).
+   * Fires for HTTP errors (4xx, 5xx), network errors (status 0), and timeouts
+   * (`kind: 'timeout'`). Does NOT fire for `kind: 'abort'` — a caller's own
+   * `AbortSignal` firing, or a request superseded by dedupe, is a cancellation
+   * the library caused deliberately, not a failure worth reporting to an error
+   * tracker. The caller still gets the abort back in the `Result` either way;
+   * only the report to this callback is suppressed.
    *
    * @example
    * ```ts
@@ -689,7 +695,12 @@ export interface GraphQLBaseConfig {
    * Global error callback. Fires after the full middleware chain completes.
    *
    * Fires for GraphQL errors (HTTP 200 with `{ errors }`), HTTP errors (4xx/5xx),
-   * and network errors (status 0). Does NOT fire when the result is successful.
+   * network errors (status 0), and timeouts (`kind: 'timeout'`). Does NOT fire
+   * when the result is successful, and does NOT fire for `kind: 'abort'` — a
+   * caller's own `AbortSignal` firing, or a request superseded by dedupe, is a
+   * cancellation the library caused deliberately, not a failure worth
+   * reporting to an error tracker. The caller still gets the abort back in the
+   * `Result` either way; only the report to this callback is suppressed.
    */
   onError?: (error: ApiError) => void
 }

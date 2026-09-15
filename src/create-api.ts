@@ -295,6 +295,11 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
    * `onRetry` and the custom `delay` curve in `built-in-middleware.ts`.
    */
   const fireOnError = (error: ApiError): void => {
+    // Aborts are cancellations we caused — a caller's own signal, or a newer
+    // request superseding this one under dedupe. Reporting them to an error
+    // tracker is noise. Timeouts are deliberately NOT suppressed: a deadline
+    // you missed is a genuine failure, which is why the two kinds are separate.
+    if (error.kind === 'abort') return
     if (!onError) return
     try {
       onError(error)

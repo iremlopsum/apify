@@ -78,6 +78,18 @@ interface ApiErrorOptions {
     url: string
     params: unknown
   }
+
+  /**
+   * Data the server returned alongside the errors.
+   *
+   * GraphQL allows partial success — a nullable field errors while the rest of
+   * the query resolves. That data lives here rather than in `Result.data` so
+   * the Result stays a clean discriminated union: `data` is non-null if and
+   * only if `error` is null.
+   *
+   * `undefined` for every REST error and for GraphQL responses carrying no data.
+   */
+  partialData?: unknown
 }
 
 // -----------------------------------------------------------------------------
@@ -146,6 +158,18 @@ export class ApiError {
    */
   readonly request: { method: string; url: string; params: unknown }
 
+  /**
+   * Data the server returned alongside the errors.
+   *
+   * GraphQL allows partial success — a nullable field errors while the rest of
+   * the query resolves. That data lives here rather than in `Result.data` so
+   * the Result stays a clean discriminated union: `data` is non-null if and
+   * only if `error` is null.
+   *
+   * `undefined` for every REST error and for GraphQL responses carrying no data.
+   */
+  readonly partialData?: unknown
+
   constructor(options: ApiErrorOptions) {
     this.status = options.status
     this.kind = options.kind
@@ -153,6 +177,7 @@ export class ApiError {
     this.body = options.body
     this.headers = options.headers
     this.request = options.request
+    this.partialData = options.partialData
   }
 }
 
