@@ -215,18 +215,27 @@ For GET and DELETE requests (or any request with `bodyAs: 'query'`), params that
 
 ### Result
 
-Every API call returns a `Result<TResponse>` instead of throwing. The shape is always the same:
+Every API call returns a `Result<TResponse>` instead of throwing. It's a discriminated union on `error`, not a plain interface:
 
 ```ts
-interface Result<TResponse> {
-  data: TResponse | null    // parsed response on success, null on error
-  error: ApiError | null     // structured error on failure, null on success
-  response: Response | null  // raw fetch Response (null for network errors)
+interface SuccessResult<TResponse> {
+  data: TResponse                          // parsed response
+  error: null
+  response: Response                       // always present on success
   retry: () => Promise<Result<TResponse>>
 }
+
+interface ErrorResult<TResponse> {
+  data: null
+  error: ApiError                          // structured error, see below
+  response: Response | null                // present for HTTP/parse failures, null for network/abort/timeout
+  retry: () => Promise<Result<TResponse>>
+}
+
+type Result<TResponse> = SuccessResult<TResponse> | ErrorResult<TResponse>
 ```
 
-Check `error` first, then use `data` with confidence. Branch on `error.kind` rather than `error.status` — `'network'`, `'abort'` and `'timeout'` all carry `status: 0`, but they call for different handling:
+Check `error` first, then use `data` with confidence: `if (error) return` (or any other narrowing check on `error`) narrows `data` to `TResponse` for the rest of the function -- no `data!` assertion needed. Branch on `error.kind` rather than `error.status` — `'network'`, `'abort'` and `'timeout'` all carry `status: 0`, but they call for different handling:
 
 ```ts
 const { data, error, response, retry } = await api.getUser({ id: '42' })
@@ -243,6 +252,14 @@ if (error) {
     case 'abort':
       // this call was cancelled (dedupe supersede, or your own signal) -- usually ignore it
       break
+    case 'parse':
+      // a 2xx response arrived but its body didn't parse as `responseType`
+      console.error('unparseable response', error.status, error.body)
+      break
+    case 'middleware':
+      // a middleware threw -- a bug in your own pipeline, not a transient failure
+      console.error('middleware threw', error.body)
+      break
     case 'http':
       if (error.status === 401) redirectToLogin()
       else console.error(error.status, error.body)
@@ -251,13 +268,11 @@ if (error) {
   return
 }
 
-// data is typed as User | null; the library doesn't (yet) narrow it via `error`
-// -- see the "Result isn't a discriminated union" note in the project's own
-// audit trail, tracked for a future major version -- so an explicit check
-// (or a non-null assertion, since a success result's `data` is never null)
-// is still required here even after handling `error` above.
-console.log(data!.name)
+// error is null here, so `data` is narrowed to `User` -- no assertion needed
+console.log(data.name)
 ```
+
+`response`'s body has already been consumed by the time you see it -- the library reads it to produce `data` (or `error.body`), so calling `response.json()` yourself throws "Body has already been read". Use `data`/`error.body`; `response` is for status, headers, and redirect metadata. (This applies only to results the library produces itself -- a `Response` you construct for `successResult()` in `testing.ts` still has a readable body.)
 
 #### `retry()`
 
@@ -279,16 +294,19 @@ The error object on failed calls. It is not a subclass of `Error` -- it is a str
 
 | Property     | Type      | Description                                                       |
 | ------------ | --------- | ----------------------------------------------------------------- |
-| `status`     | `number`  | HTTP status code (e.g., 404, 500). `0` for network errors/aborts. |
-| `kind`       | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse'` (optional) | What category of failure this is. See below. |
+| `status`     | `number`  | HTTP status code (e.g., 404, 500). `0` for network errors, aborts, and timeouts. |
+| `kind`       | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse' \| 'middleware'` | What category of failure this is. See below. Required -- constructing an `ApiError` yourself (e.g. in custom middleware) must supply it. |
 | `statusText` | `string`  | HTTP status text (e.g., 'Not Found'). `''` for network errors.    |
 | `body`       | `unknown` | Parsed response body, or the native Error for network failures.   |
 | `headers`    | `Headers` | Response headers. Empty `Headers` for network errors.             |
 | `request`    | `object`  | `{ method, url, params }` -- metadata about the failed request.   |
+| `partialData` | `unknown` (optional) | GraphQL data returned alongside `{ errors }` (partial success). Lives here, not on `Result.data`, so the `Result` stays a clean union: `data` is non-null iff `error` is null. `undefined` for every REST error and for GraphQL responses carrying no data. |
 
-`kind` exists because `status` alone cannot tell some outcomes apart: an HTTP error (`'http'`), a `fetch` failure with no response (`'network'`), a cancellation — your own signal, or a dedupe supersede — (`'abort'`), and a whole-operation deadline firing (`'timeout'`) all need different handling, but `'network'`, `'abort'`, and `'timeout'` all carry `status: 0`. Every error the library itself produces sets `kind`; it is `undefined` only if you construct an `ApiError` by hand without one.
+`kind` exists because `status` alone cannot tell some outcomes apart: an HTTP error (`'http'`), a `fetch` failure with no response (`'network'`), a cancellation — your own signal, a dedupe supersede, or a whole-operation deadline firing — (`'abort'`/`'timeout'`), a 2xx (or non-2xx) body that failed to parse (`'parse'`), and a middleware that threw instead of the request itself failing (`'middleware'`) all need different handling, but `'network'`, `'abort'`, and `'timeout'` all carry `status: 0`.
 
-`'parse'` is reserved for a response that arrived but whose body failed to parse according to `responseType`. It is declared on the type for forward compatibility but is **not produced by the current release** — a parse failure today still surfaces as `kind: 'network'`.
+`'parse'` is for a **2xx** response that arrived but whose body failed to parse according to `responseType` -- you get the real `status`, a non-null `response`, and `kind: 'parse'`. A **non-2xx** response with an unparseable body is unaffected and still reports `kind: 'http'` -- the status code is checked before the body is parsed, so a 500 with a broken JSON body is still a 500, and `retryMiddleware`'s default 5xx retry still applies to it.
+
+`'middleware'` means a middleware threw rather than the request itself failing -- a bug in your own pipeline you'd fix, not a transient failure you'd retry. A middleware that propagates the library's own abort/timeout signal (verbatim, or wrapped one level as `.cause`) is classified `'abort'`/`'timeout'` instead, by provenance rather than by the reason's name -- see [Cancellation](#cancellation).
 
 You can use `instanceof` to check if a value is an `ApiError`:
 
@@ -315,7 +333,7 @@ const api = createApi({
 })
 ```
 
-This fires for both HTTP errors (4xx, 5xx) and network errors (status 0). It is a global hook for side effects (logging, telemetry, redirects) -- it does not change the result returned to the caller.
+This fires for `kind: 'http'`, `'network'`, `'timeout'`, `'parse'`, and `'middleware'`. **It does not fire for `kind: 'abort'`** — a cancellation the library caused deliberately (your own `AbortSignal` firing, or a request superseded by `dedupe`) is not a failure worth reporting to an error tracker, unlike a `'timeout'`, which is a deadline you actually missed. The caller still gets the abort back in the `Result` either way; only the report to this callback is suppressed. It is a global hook for side effects (logging, telemetry, redirects) -- it does not change the result returned to the caller.
 
 ### Middleware
 
@@ -650,8 +668,10 @@ const promise = api.getItems({ page: 1 }, {
 controller.abort()
 
 const { error } = await promise
-// error.status === 0, error.body is a DOMException with name 'AbortError'
+// error.status === 0, error.kind === 'abort', error.body is a DOMException with name 'AbortError'
 ```
+
+A cancellation you caused yourself is not reported to `onError` (`kind: 'abort'` is the one kind that's suppressed there) -- see [Error handling with `onError`](#error-handling-with-onerror). It is classified by **provenance**, not by sniffing the thrown value's shape: whatever a middleware or `fetch` actually throws, if it happened because *this request's own signal* aborted, the `Result` is `kind: 'abort'` (or `'timeout'` for a deadline) regardless of the reason's name or type -- a caller-supplied custom abort reason (`controller.abort(new Error('unmounted'))`, or a plain string) still classifies as `'abort'`, not `'network'`.
 
 #### Auto-cancel via `dedupe`
 
@@ -747,7 +767,7 @@ const [a, b] = await Promise.all([
 - A per-call `headers` or `middleware` — these change *what* is requested, so handing that caller another caller's response would be a real bug, not just a missed optimization. A call carrying either always gets its own, unshared request.
 - Params that are opaque to the stable serialization — `FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`, `Date`, `Map`, or `Set` — are never coalesced. The stable serialization used to build the share key can't distinguish two different payloads of these types from each other (it falls back to `Object.keys()`, which is empty for all of them), so two different `FormData` uploads would otherwise collide on the same key and one caller could receive the response meant for the other's payload entirely. Declining to share is always safe; handing back the wrong response never is. A raw `string` is not excluded — it stringifies distinguishably, so a string-param endpoint is soundly coalesced like any other.
 
-**What does *not* disable sharing:** a per-call `signal` or `timeout`. These bound *who is still waiting*, not *what is being asked for*, so they're tracked with a per-caller refcount instead: each sharer's own signal/timeout only removes that caller from the wait list. The underlying request keeps running for everyone else, and is only aborted once every sharer — including the one that gave up — has stopped waiting. A sharer that gives up gets an error `Result` (`kind: 'timeout'` or `kind: 'abort'`) and, like any other failing call, reports it to `onError`.
+**What does *not* disable sharing:** a per-call `signal` or `timeout`. These bound *who is still waiting*, not *what is being asked for*, so they're tracked with a per-caller refcount instead: each sharer's own signal/timeout only removes that caller from the wait list. The underlying request keeps running for everyone else, and is only aborted once every sharer — including the one that gave up — has stopped waiting. A sharer that gives up gets an error `Result` (`kind: 'timeout'` or `kind: 'abort'`), reported to `onError` exactly as the identical non-shared call would be — which means a `'timeout'` give-up reports and an `'abort'` give-up does not (see [Error handling with `onError`](#error-handling-with-onerror)).
 
 **A per-*request* `timeout` is different: it belongs to the operation.** `RequestConfig.timeout` bounds the single shared request itself, measured from when that request started — not from when each caller joined it. Every sharer is therefore bounded by it, a late joiner cannot extend it, and a caller passing `timeout: 0` cannot switch it off for everyone else. Without that, a steadily arriving stream of joiners would keep one socket open indefinitely against a deadline that was supposed to cap it.
 
@@ -882,6 +902,16 @@ graphql.mutation.updateCategory({ id: '123', name: 'New Name' })
 
 GraphQL errors (HTTP 200 with `{ errors: [...] }`) surface as `result.error` with `status: 200` and `error.body` typed as `GraphQLError[]` — no special handling needed. The same `if (error) { ... }` check covers GraphQL errors, HTTP errors, and network errors uniformly.
 
+GraphQL allows **partial success** -- a nullable field errors while the rest of the query resolves. That data is not discarded: it's available as `error.partialData`, never on `result.data` (which stays `null` whenever `error` is non-null, keeping `Result` a clean discriminated union):
+
+```ts
+const { error } = await graphql.getCategory({ id: '123' })
+if (error) {
+  console.log(error.body)          // GraphQLError[]
+  console.log(error.partialData)   // whatever `data` the server sent alongside the errors, or undefined
+}
+```
+
 Operations support `dedupe: true` in the same way `Request` does — see [Auto-cancel via `dedupe`](#auto-cancel-via-dedupe).
 
 ### Middleware
@@ -991,11 +1021,13 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 | `createApi`     | function | Creates a typed API client from a config of Request definitions    |
 | `Request`       | class    | Typed endpoint definition -- one instance per endpoint             |
 | `ApiError`      | class    | Structured error with status, kind, body, headers, and request metadata |
-| `ApiErrorKind`  | type     | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse'` -- discriminates `ApiError.kind` |
+| `ApiErrorKind`  | type     | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse' \| 'middleware'` -- discriminates `ApiError.kind` |
 | `RequestConfig` | type     | Config object for the `Request` constructor                        |
 | `ApiConfig`     | type     | Config object for `createApi`                                      |
 | `CallOptions`   | type     | Per-call overrides (`middleware`, `skipMiddleware`, `headers`, `signal`, `timeout`) |
-| `Result`        | type     | Return shape of every API call: `{ data, error, response, retry }` |
+| `Result`        | type     | Discriminated union of every API call's outcome: `SuccessResult<T> \| ErrorResult<T>` |
+| `SuccessResult` | type     | The success branch of `Result`: `{ data: T, error: null, response: Response, retry }` |
+| `ErrorResult`   | type     | The error branch of `Result`: `{ data: null, error: ApiError, response: Response \| null, retry }` |
 | `Middleware`    | type     | Middleware function signature: `(ctx, next) => Promise<Result>`    |
 | `MiddlewareContext` | type | Request context passed to middleware                               |
 | `MiddlewareNext` | type    | The `next` function passed to middleware                           |
