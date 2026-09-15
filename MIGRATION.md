@@ -355,10 +355,36 @@ using it.
   was aborted. Use a different field to carry that context —
   `{ cause: new Error('disk full') }`, or a custom property — and reserve
   `.cause` for genuine propagation of the signal's own reason.
+- **`SuccessResult.data` is typed `TResponse`, not `TResponse | null` — but an
+  empty body still parses to `null` at runtime.** A `DELETE` that answers
+  `200` with no body (or a `204`) is one of the most common REST shapes, and
+  `parseResponse` returns `null` for it exactly as it always has (see the
+  `responseType` reference for the empty-body case). 3.0.0 removes the `| null`
+  from the *type*, not from the *behaviour*: `error` is still `null` on that
+  response, so `data` narrows to `TResponse` and compiles, but the value you
+  get is `null` anyway.
+
+  ```ts
+  const deleteUser = new Request<{ id: string }, { deleted: boolean }>({
+    method: 'DELETE', path: '/users/:id',
+  })
+  const { data, error } = await api.deleteUser({ id: '42' })
+  if (error) return
+  console.log(data.deleted) // throws: data is null at runtime for a 200/204 empty body
+  ```
+
+  If an endpoint can answer 204 or an empty 200, say so in its own
+  `TResponse` — `Request<{ id: string }, { deleted: boolean } | null>` — and
+  handle the `null` case explicitly. This is not a new behaviour (2.2.1 had
+  the identical runtime `null`); what changed is that the type system no
+  longer forces you to handle it.
 
 ### Nothing to do if…
 
-…you only call API methods and check `error`:
+…you only call API methods and check `error`, **and every endpoint's
+`TResponse` accounts for its own empty-body responses** (see the bullet
+above — a `DELETE`/204/empty-200 endpoint needs `| null` in its `TResponse`
+to stay accurate; everything else needs no change):
 
 ```ts
 const { data, error } = await api.getUser({ id: '42' })
