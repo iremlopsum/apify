@@ -3,8 +3,7 @@ import { composeMiddleware } from './middleware.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
 import { abortKind } from './utils/abort-kind.js'
-import { anySignal } from './utils/any-signal.js'
-import { timeoutSignalFor } from './utils/timeout.js'
+import { resolveBudget } from './utils/budget.js'
 import type { CallOptions, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -125,8 +124,12 @@ export function createGraphQL(config: any): any {
           // means none. The signal is created once here — not inside core() —
           // so a retry sequence draws from a single budget rather than getting
           // a fresh one per attempt.
-          const timeoutSignal = timeoutSignalFor(options.timeout, operation.config.timeout)
-          const callerSignal: AbortSignal | undefined = anySignal([options.signal, timeoutSignal])
+          //
+          // GraphQL never coalesces, so the operation's deadline and this
+          // caller's patience are the same signal — both budget fields are
+          // identical and either may be read.
+          const budget = resolveBudget(options.timeout, operation.config.timeout, options.signal, false)
+          const callerSignal: AbortSignal | undefined = budget.operation
           let dedupeController: AbortController | undefined
 
           const core = async (ctx: MiddlewareContext): Promise<Result<unknown>> => {
