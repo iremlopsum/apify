@@ -199,6 +199,15 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
  * identity alone is measurably worse (see the same doc). A non-`'middleware'`
  * fallback doesn't need that check: a fetch rejection while our own signal
  * is aborted IS that cancellation, whatever shape fetch happened to throw.
+ *
+ * Deferred item: `error.request.url` here is `joinUrl(baseUrl, request.config.path)`
+ * — the un-substituted path template (e.g. `/users/:id`), not the URL that was
+ * (or would have been) actually requested. That differs from the `'http'` and
+ * `'parse'` paths in `execute()`, which build `error.request.url` from
+ * `ctx.request.url` — the real, path-substituted URL `buildUrl` produced.
+ * Callers branching on `error.request.url` for a `'middleware'` result or a
+ * setup error get the template, not the resolved address. Not fixed here;
+ * recorded so a reader hitting it isn't left to rediscover it.
  */
 function syntheticResult(
   reason: unknown,
@@ -936,24 +945,36 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // its opportunity to handle/recover the error. Guarded: a throwing
             // handler must not reject a promise that already holds a Result.
             //
-            // An abandoned request is not a failure. Every caller has already
-            // received its own Result and already reported it; the tracker
-            // aborted this request because nobody is waiting any more.
-            // Reporting it here is what made a single shared timeout produce
-            // two onError calls before 2.2.1. `sharedSignal` is consulted
-            // rather than the error's body because the tracker's abort reason
-            // is authoritative: it says *why the request ended*, whereas the
-            // error body is whatever `fetch` happened to reject with.
+            // Abandonment is not itself a failure: the tracker aborted this
+            // request because nobody is waiting on it any more, not because
+            // anything went wrong. This guard exists so that outcome doesn't
+            // get reported here as an operation-level failure. `sharedSignal`
+            // is consulted rather than the error's body because the tracker's
+            // abort reason is authoritative: it says *why the request ended*,
+            // whereas the error body is whatever `fetch` (or a middleware
+            // reacting to the abort) happened to produce.
             //
-            // "Every caller has already reported" rests on two legs, and both
-            // are load-bearing:
+            // This is NOT "every caller has already received and reported its
+            // own Result" — that used to be true, but Task 10 (`onError` no
+            // longer fires for `error.kind === 'abort'`) broke it. A plain
+            // abort-flavoured give-up is dropped by `fireOnError`'s own kind
+            // check regardless of this guard, so it produces ZERO reports —
+            // the caller still gets a real `ErrorResult` back, it just never
+            // reaches `onError`. `tests/share.test.ts`'s "two sharers both
+            // abort" (row 2) pins exactly that: `kinds` ends up `[]`. Only a
+            // give-up whose kind survives `fireOnError` (a genuine timeout) is
+            // actually reported, by that caller's own `onAbort` — see "two
+            // sharers both time out" (row 2b) in the same file.
+            //
+            // What this guard does still guarantee: it is never a *second*
+            // report of a failure a sharer's own `onAbort` already reported or
+            // will report for the SAME operation-level outcome. Two legs, both
+            // load-bearing:
             //
             //  1. `release()` has exactly one call site — the share site's
-            //     `onAbort` — and that path always accounts for its caller:
-            //     it reports, unless this very hook already did (the
-            //     vestigial-abort case) or the operation settled successfully
-            //     and there is nothing to report at all. At most one report,
-            //     and never zero where an error existed.
+            //     `onAbort` — and it always calls `fireOnError` for its own
+            //     caller's give-up (which may itself decline to report, per
+            //     above, but the call is always made).
             //  2. A sharer with no `perCaller` budget never releases at all.
             //     It takes the `if (!perCaller) return promise.then(...)`
             //     fast path, so it holds its reference for as long as it
@@ -961,9 +982,9 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             //     unreachable while any such caller is still waiting.
             //
             // Leg 2 is why abandonment can never fire out from under a caller
-            // that has no give-up path of its own and would therefore never
-            // report. Adding a second `release()` call site, or giving that
-            // fast path one, breaks the invariant this suppression assumes.
+            // that has no give-up path of its own. Adding a second `release()`
+            // call site, or giving that fast path one, breaks the invariant
+            // this suppression assumes.
             const abandoned = sharedSignal?.aborted === true && isAbandoned(sharedSignal.reason)
             if (result.error && !abandoned) fireOnError(result.error as ApiError)
 
