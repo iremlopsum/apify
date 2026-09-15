@@ -762,7 +762,29 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // skipMiddleware filters out specific middleware by reference (===).
           // -----------------------------------------------------------------
           const composed = composeMiddleware(allMiddleware, core, options.skipMiddleware ?? [])
-          const resultPromise = composed(context)
+          // composeMiddleware has no guard of its own, and execute()'s try/catch
+          // only covers the synchronous setup above — so an async middleware
+          // that throws escapes as a rejection and breaks the library's one
+          // headline guarantee. Convert it here, before the post-execution
+          // hook, so the failure reaches onError like any other.
+          //
+          // A middleware that throws SYNCHRONOUSLY (a plain, non-async
+          // function) never gets as far as handing back a promise for
+          // `.catch` to attach to — composed(context) itself throws, before
+          // this statement finishes evaluating. The surrounding try/catch
+          // below already turns that into a Result, but with fallback kind
+          // 'network' — correct for a setup error (e.g. buildUrl's
+          // TypeError), wrong for a throwing middleware. Catching it here
+          // too, right alongside the async case, keeps both classified as
+          // 'middleware' and routed through the same post-execution hook.
+          let resultPromise: Promise<Result<unknown>>
+          try {
+            resultPromise = composed(context).catch(
+              (err: unknown) => buildFailedResult(err, 'middleware')
+            )
+          } catch (err) {
+            resultPromise = Promise.resolve(buildFailedResult(err, 'middleware'))
+          }
 
           // -----------------------------------------------------------------
           // Step 9: Post-execution hooks (dedupe cleanup + onError)

@@ -4,7 +4,7 @@ import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
 import { abortKind } from './utils/abort-kind.js'
 import { resolveBudget } from './utils/budget.js'
-import type { CallOptions, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
+import type { CallOptions, ErrorResult, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
 
 // ---------------------------------------------------------------------------
 // Operation — typed config container for GraphQL operations
@@ -102,6 +102,27 @@ export function createGraphQL(config: any): any {
   function buildMethod(name: string, operation: Operation<any, any>) {
     return (variables: object = {}, options: CallOptions = {}): Promise<Result<unknown>> => {
       const execute = (): Promise<Result<unknown>> => {
+        /**
+         * `create-api.ts`'s local equivalent, for the same reason: a Result
+         * for a failure that never reached (or never came back from) `core()`,
+         * construction only, no reporting — the `.then` hook below is what
+         * reports, once, so this must not report a second time.
+         */
+        function buildFailedResult(
+          reason: unknown,
+          fallbackKind: 'abort' | 'network' | 'middleware'
+        ): ErrorResult<unknown> {
+          const error = new ApiError({
+            kind: abortKind(reason) ?? fallbackKind,
+            status: 0,
+            statusText: '',
+            body: reason,
+            headers: new Headers(),
+            request: { method: 'POST', url: endpoint, params: variables },
+          })
+          return createNetworkErrorResult(error, execute)
+        }
+
         try {
           const allMiddleware: Middleware[] = [
             ...globalMiddleware,
@@ -252,7 +273,23 @@ export function createGraphQL(config: any): any {
           }
 
           const composed = composeMiddleware(allMiddleware, core, options.skipMiddleware ?? [])
-          return composed(context).then(result => {
+          // Same guard as create-api.ts's execute(), and for the same reason:
+          // composeMiddleware has no guard of its own, so an async middleware
+          // that throws would otherwise escape as a rejection. A middleware
+          // that throws SYNCHRONOUSLY never gets as far as handing back a
+          // promise for `.catch` to attach to — composed(context) itself
+          // throws — so that case is caught here too, rather than falling
+          // through to the outer catch below (which is for setup errors, not
+          // middleware failures, and fallback-kinds them 'network').
+          let resultPromise: Promise<Result<unknown>>
+          try {
+            resultPromise = composed(context).catch(
+              (err: unknown) => buildFailedResult(err, 'middleware')
+            )
+          } catch (err) {
+            resultPromise = Promise.resolve(buildFailedResult(err, 'middleware'))
+          }
+          return resultPromise.then(result => {
             // dedupeController is only assigned inside core() — if every
             // middleware short-circuited and core() never ran, it stays
             // undefined here. clear() with no controller deletes the map
