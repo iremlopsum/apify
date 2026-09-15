@@ -216,9 +216,15 @@ export function createGraphQL(config: any): any {
                 // `catch (err)` below already handles for the fetch() call
                 // itself — NOT the success path's `JSON.parse` try further
                 // down, which deliberately keeps its own `response.text()`
-                // outside that try (see the comment there) specifically so
-                // an abort during ITS network read falls through to that
-                // same outer catch instead of needing its own guard.
+                // outside that try specifically so an abort during ITS
+                // network read falls through to that same outer catch
+                // instead of needing its own guard. The rationale for that
+                // split is written up in full in create-api.ts, on the
+                // identical `data`/success-path guard there (the comment
+                // beginning "But `parseResponse` doesn't just parse"); it is
+                // not repeated per call site in this file. A test pins this
+                // exact behaviour below — see "abort during a success-body
+                // download".
                 let body: unknown
                 try {
                   const text = await response.text()

@@ -19,10 +19,16 @@ interface Entry {
 /**
  * The reason a shared request is aborted when its last caller releases.
  *
- * This is not a failure. Every caller has already received its own Result and
- * reported it; the underlying request is simply no longer wanted. Reporting it
- * again as an operation failure is what made a single shared timeout produce
- * two `onError` calls before 2.2.1.
+ * This is not a failure — the underlying request is simply no longer wanted,
+ * not the operation ended in error. Reporting it again as an operation
+ * failure is what made a single shared timeout produce two `onError` calls
+ * before 2.2.1. (It is not true that every caller has already *reported* its
+ * own give-up, only that it has already *received* its own Result: since
+ * Task 10, `onError` never fires for `error.kind === 'abort'` at all, so a
+ * plain abort-flavoured give-up reports zero times, not one. What matters
+ * here is narrower — this sentinel is what lets create-api.ts's own
+ * post-execution hook recognise "nobody is waiting" and not report the
+ * operation's own outcome as a second, misleading failure.)
  */
 export const ABANDONED: unique symbol = Symbol('apify.abandoned')
 
@@ -119,9 +125,13 @@ export class ShareTracker {
       // Returns whether THIS call was the one that dropped refs to zero and
       // aborted the shared controller. It is part of the tracker's own
       // contract (tests/share-tracker.test.ts asserts it), not a signal for
-      // the caller to decide reporting by: create-api.ts now reports a
-      // give-up unconditionally, because the ABANDONED reason below is what
-      // keeps the shared request's own hook quiet.
+      // the caller to decide reporting by: create-api.ts's call site is
+      // `if (!hasSettled()) fireOnError(...)`, not unconditional, and
+      // `fireOnError` itself drops anything with `error.kind === 'abort'`
+      // regardless. The ABANDONED reason below serves a narrower purpose —
+      // it is what keeps the shared request's OWN post-execution hook quiet
+      // about an outcome that is nobody's failure, not what decides whether
+      // any individual caller's give-up gets reported.
       release: (): boolean => {
         if (released) return false
         released = true
