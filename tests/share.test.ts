@@ -284,6 +284,11 @@ describe('share', () => {
   // undefined/undefined, `if (error)` was false, and the consumer carried on as
   // though the call had succeeded with no data. Worse than the rejection it
   // replaced, because a rejection is at least loud.
+  //
+  // Kind is 'middleware', not 'network', since Task 9 (the never-throws fix):
+  // execute()'s own guard now converts the rejection into a Result before it
+  // ever reaches the share site, so both sharers see the operation's own
+  // classification rather than the share site's generic 'network' fallback.
   // ---------------------------------------------------------------------------
   it('hands every sharer a real Result when the shared operation rejects', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
@@ -309,7 +314,7 @@ describe('share', () => {
     for (const r of [plain, watched]) {
       expect(r.data).toBeNull()
       expect(r.error).toBeInstanceOf(ApiError)
-      expect(r.error!.kind).toBe('network')
+      expect(r.error!.kind).toBe('middleware')
       expect((r.error!.body as Error).message).toBe('middleware exploded')
     }
   })
@@ -640,6 +645,11 @@ describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
 // reported once. Measured on 2.2.0 with two callers (one aborts, then the
 // shared middleware rejects): ['abort','network','network']. The aborted
 // caller must report exactly once.
+//
+// The patient caller's own kind is 'middleware', not 'network', since Task 9
+// (the never-throws fix): the operation itself now classifies the failure
+// before the share site ever sees it, rather than the chain rejecting and
+// the share site falling back to its own generic 'network' kind.
 // ---------------------------------------------------------------------------
 describe('cross-kind double report on a stale rejection handler (Fix 2, 2.2.1)', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -677,9 +687,9 @@ describe('cross-kind double report on a stale rejection handler (Fix 2, 2.2.1)',
     // Now let the shared middleware reject.
     releaseMiddleware!()
     const patientResult = await patient
-    expect(patientResult.error?.kind).toBe('network')
+    expect(patientResult.error?.kind).toBe('middleware')
 
     await flush()
-    expect(kinds).toEqual(['abort', 'network']) // the aborted caller did not report again
+    expect(kinds).toEqual(['abort', 'middleware']) // the aborted caller did not report again
   })
 })
