@@ -112,13 +112,28 @@ export function createGraphQL(config: any): any {
          * for a failure that never reached (or never came back from) `core()`,
          * construction only, no reporting — the `.then` hook below is what
          * reports, once, so this must not report a second time.
+         *
+         * Classification is by provenance, not by sniffing `reason`'s shape —
+         * see `syntheticResult`'s doc in `create-api.ts` for the full
+         * rationale. In short: if `signal` — the AbortSignal that actually
+         * governs this operation — is the one that aborted, this failure IS
+         * that cancellation, whatever shape `reason` takes. The only fallback
+         * this function is ever called with is `'middleware'`, so the
+         * identity check (`reason === signal.reason`) always applies here: a
+         * middleware throwing its own `AbortError`-named failure, unrelated to
+         * this operation's own signal, must stay `'middleware'`.
          */
         function buildFailedResult(
           reason: unknown,
+          signal: AbortSignal | undefined,
           fallbackKind: 'abort' | 'network' | 'middleware'
         ): ErrorResult<unknown> {
+          const isOurCancellation =
+            signal?.aborted === true &&
+            (fallbackKind !== 'middleware' || reason === signal.reason)
+          const kind = isOurCancellation ? (abortKind(signal!.reason) ?? 'abort') : fallbackKind
           const error = new ApiError({
-            kind: abortKind(reason) ?? fallbackKind,
+            kind,
             status: 0,
             statusText: '',
             body: reason,
@@ -246,9 +261,20 @@ export function createGraphQL(config: any): any {
 
               return createSuccessResult(gqlBody?.data ?? null, response, execute)
             } catch (err) {
+              // Provenance over name-sniffing: if the signal we actually
+              // handed to fetch is the one that's aborted, this failure IS
+              // that cancellation — whatever `fetch` threw, including a
+              // custom, non-`AbortError`-named reason a caller passed to
+              // `ac.abort(reason)`. Only fall back to sniffing `err`'s own
+              // shape when our signal is not the cause, for a genuine
+              // network failure.
+              const signal = ctx.request.signal
+              const kind = signal?.aborted === true
+                ? (abortKind(signal.reason) ?? 'abort')
+                : (abortKind(err) ?? 'network')
               const error = new ApiError({
                 status: 0,
-                kind: abortKind(err) ?? 'network',
+                kind,
                 statusText: '',
                 body: err,
                 headers: new Headers(),
@@ -290,10 +316,10 @@ export function createGraphQL(config: any): any {
           let resultPromise: Promise<Result<unknown>>
           try {
             resultPromise = composed(context).catch(
-              (err: unknown) => buildFailedResult(err, 'middleware')
+              (err: unknown) => buildFailedResult(err, context.request.signal, 'middleware')
             )
           } catch (err) {
-            resultPromise = Promise.resolve(buildFailedResult(err, 'middleware'))
+            resultPromise = Promise.resolve(buildFailedResult(err, context.request.signal, 'middleware'))
           }
           return resultPromise.then(result => {
             // dedupeController is only assigned inside core() — if every

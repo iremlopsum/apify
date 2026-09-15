@@ -367,6 +367,32 @@ describe('createGraphQL — onError callback', () => {
     expect(error).toBeNull()
     expect(onError).not.toHaveBeenCalled()
   })
+
+  // Twin of tests/on-error.test.ts's "does not fire for a caller-initiated
+  // abort", for the GraphQL path: src/graphql.ts has its own local
+  // `fireOnError` and its own `buildFailedResult`/core() catch, so this is a
+  // separate discriminating pin, not a duplicate of the REST suite. Finding 3
+  // (round 2 review): nothing exercised this before, so the guard could be
+  // deleted here with no red test.
+  it('does not fire onError for a caller-initiated abort', async () => {
+    const op = new Operation<Record<string, never>, unknown>({ operation: gql`query { health }` })
+    vi.stubGlobal('fetch', hangingGqlFetch())
+    const kinds: string[] = []
+    const ac = new AbortController()
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { health: op },
+      onError: e => { kinds.push(e.kind) },
+    })
+
+    const p = client.health(undefined, { signal: ac.signal })
+    ac.abort()
+
+    const r = await p
+    expect(r.error?.kind).toBe('abort')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(kinds).toEqual([])
+  })
 })
 
 describe('createGraphQL — middleware', () => {
@@ -667,8 +693,17 @@ describe('GraphQL partial data', () => {
     expect(r.error!.partialData).toEqual({ user: { name: 'Ada' }, posts: null })
   })
 
+  // The fixture must send `data: null` explicitly, not omit `data` entirely —
+  // what a spec-compliant GraphQL server sends when execution began and then
+  // failed outright, and the common real-world shape of "no useful data".
+  // Omitting `data` makes `gqlBody.data` already `undefined` before the `??
+  // undefined` in graphql.ts ever runs, so the assertion below would pass
+  // even with that operator deleted — it wouldn't discriminate the fix at
+  // all. With `data: null` explicit, removing `?? undefined` would leave
+  // `partialData: null`, which fails `.toBeUndefined()`.
   it('leaves partialData undefined when no data came back', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      data: null,
       errors: [{ message: 'totally broken' }],
     }), { status: 200 })))
     const client = createGraphQL({
