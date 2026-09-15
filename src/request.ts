@@ -114,6 +114,19 @@ export class Request<TParams extends object, TResponse> {
   readonly config: RequestConfig
 
   /**
+   * Phantom fields — never assigned, never read at runtime.
+   *
+   * Without them the class body never references TParams or TResponse, so
+   * TypeScript treats every instantiation as structurally identical and
+   * `Request<{ id }, User>` silently accepts a `Request<{ slug }, Post>`.
+   *
+   * `declare` emits no property, so this costs zero runtime bytes.
+   * `Operation` in graphql.ts uses the same technique.
+   */
+  declare readonly _params: TParams
+  declare readonly _response: TResponse
+
+  /**
    * Creates a new Request instance with the given endpoint configuration.
    *
    * The constructor simply stores the config — no validation or side effects.
