@@ -251,9 +251,12 @@ export interface SuccessResult<TResponse> {
   /**
    * The raw fetch `Response`. Always present on success.
    *
-   * **Its body has already been consumed** to produce `data`, so
-   * `response.json()` throws "Body has already been read". Use `data`;
-   * `response` is for status, headers and redirect metadata.
+   * For results the library produces, **its body has already been consumed**
+   * to produce `data`, so `response.json()` throws "Body has already been
+   * read". Use `data`; `response` is for status, headers and redirect
+   * metadata. (A `Response` you construct yourself and hand to
+   * `successResult()` from `testing.ts` is not affected — its body is still
+   * readable.)
    */
   response: Response
 
