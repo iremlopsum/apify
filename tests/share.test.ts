@@ -652,12 +652,15 @@ describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
     // signal and throws (rather than returning a Result) when it aborts —
     // never calling next(). Since Task 9 (the never-throws fix), this
     // rejection does NOT escape execute(): execute() itself converts it into
-    // a Result (kind 'middleware') before it can propagate anywhere. What
-    // this test actually exercises is that conversion happening on the
-    // LAST sharer's give-up, and the resulting operation-level failure still
-    // being reported exactly once. See the correction 90 lines below (the
-    // "cross-kind double report" describe block) for the fuller writeup of
-    // why this no longer escapes.
+    // a Result before it can propagate anywhere — here classified `kind:
+    // 'abort'`, not 'middleware', because the rejection is `s.reason`, the
+    // shared signal's own (ABANDONED) reason, and `syntheticResult`'s
+    // propagation check sees that and classifies away from the 'middleware'
+    // fallback. What this test actually exercises is that conversion
+    // happening on the LAST sharer's give-up, and the resulting
+    // operation-level failure still being reported exactly once. See the
+    // correction 90 lines below (the "cross-kind double report" describe
+    // block) for the fuller writeup of why this no longer escapes.
     const throwsOnAbort: Middleware = ctx => new Promise((_resolve, reject) => {
       const s = ctx.request.signal
       if (s?.aborted) { reject(s.reason); return }

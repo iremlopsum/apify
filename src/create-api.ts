@@ -972,9 +972,11 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // load-bearing:
             //
             //  1. `release()` has exactly one call site — the share site's
-            //     `onAbort` — and it always calls `fireOnError` for its own
-            //     caller's give-up (which may itself decline to report, per
-            //     above, but the call is always made).
+            //     `onAbort` — and the `fireOnError` call there is `if
+            //     (!hasSettled()) fireOnError(...)`, not unconditional. The
+            //     guard can only suppress that caller's own report; it never
+            //     adds one, so it can never turn into a SECOND report for
+            //     the same operation-level outcome.
             //  2. A sharer with no `perCaller` budget never releases at all.
             //     It takes the `if (!perCaller) return promise.then(...)`
             //     fast path, so it holds its reference for as long as it
