@@ -380,6 +380,31 @@ describe('share', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // Round 3 review, Finding 4: reverting create-api.ts's provenance fix
+  // (syntheticResult + core()'s catch back to abortKind(reason) ?? fallback)
+  // left this whole file green — nothing here pinned "a sharer's own custom
+  // abort reason classifies 'abort', not 'network'". The share-site give-up
+  // path (onAbort) already built its Result with fallback 'abort', so a
+  // custom reason already fell back to 'abort' correctly even under the old
+  // formula; what the old formula got wrong was specifically the UNSHARED
+  // core() catch, which no share.test.ts test could ever exercise. This
+  // pins the shared side explicitly so a future regression in the shared
+  // give-up's own classification — not just the unshared one already pinned
+  // in tests/on-error.test.ts — would be caught here too.
+  // ---------------------------------------------------------------------------
+  it("classifies a sharer's own custom abort reason as abort, not network", async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const api = shared()
+    const ac = new AbortController()
+    const p = api.get({ id: '1' }, { signal: ac.signal })
+    await Promise.resolve()
+    ac.abort(new Error('component unmounted'))
+    const r = await p
+    expect(r.error?.kind).toBe('abort')
+    expect(r.error?.body).toBeInstanceOf(Error)
+  })
+
+  // ---------------------------------------------------------------------------
   // I2: RequestConfig.timeout is documented as a whole-operation deadline and
   // specified as "a property of the operation itself, therefore shared by all
   // callers". It was neither: the share path suppressed it inside execute()

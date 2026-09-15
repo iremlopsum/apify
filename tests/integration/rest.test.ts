@@ -313,6 +313,43 @@ describe('onError', () => {
     expect(data?.recovered).toBe(true)
     expect(onError).not.toHaveBeenCalled()
   })
+
+  // Round 3 review, Finding 1: parseResponse doesn't just parse — it
+  // performs the network body read (response.text()/.blob()/etc.), so an
+  // abort landing AFTER headers arrive (a component unmounting mid-download)
+  // used to surface in the success-path `catch (parseErr)` block, which had
+  // no provenance check: `kind: 'parse'`, `status: 200`, and — worse for
+  // this describe block — reported to onError, mislabelling a user's own
+  // cancellation as "the server responded but the body would not parse".
+  // graphql.ts already got this right by accident of structure (its network
+  // read is outside its own JSON.parse try); this is REST's real-server
+  // reproduction of the same scenario, using a server that sends real
+  // headers, a real partial body, then genuinely pauses — so the abort lands
+  // while parseResponse's response.text() is actually in flight, not
+  // simulated.
+  it('does not report a real abort that lands mid-body-download as a parse failure', async () => {
+    const onError = vi.fn()
+    const slowBody = new Request<Record<string, never>, unknown>({
+      method: 'GET',
+      path: '/slow-body',
+    })
+    const api = createApi({ baseUrl: server.baseUrl, requests: { slowBody }, onError })
+
+    const ac = new AbortController()
+    const p = api.slowBody(undefined, { signal: ac.signal })
+    // Give the real headers (and the partial chunk) time to arrive before
+    // aborting — the server's own completion is 2000ms out, well past this.
+    await new Promise(resolve => setTimeout(resolve, 100))
+    ac.abort()
+
+    const { data, error, response } = await p
+    expect(data).toBeNull()
+    expect(error!.kind).toBe('abort')
+    expect(response).toBeNull()
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).not.toHaveBeenCalled()
+  })
 })
 
 describe('retry()', () => {

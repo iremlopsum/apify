@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { setTimeout as delay } from 'node:timers/promises'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
 import type { Middleware } from '../src/types.js'
@@ -108,6 +109,36 @@ describe('abort classification is by provenance, not by the reason\'s name', () 
     const r = await p
     expect(r.error!.kind).toBe('abort')
     expect(r.error!.body).toBeInstanceOf(Error)
+    await flush()
+    expect(k).toEqual([])
+  })
+
+  // Round 3 review, Finding 2 (new from the round 2 fix): the identity check
+  // `reason === signal.reason` was too strict. `node:timers/promises`'
+  // `setTimeout(ms, undefined, { signal })` — a realistic building block for
+  // a middleware's backoff sleep, queue, or IndexedDB wrapper — rejects with
+  // a FRESH AbortError whose `.cause` is the signal's reason, not the reason
+  // itself (confirmed directly: `err === signal.reason` is false, `err.cause
+  // === signal.reason` is true). Without accepting that one-level `.cause`
+  // match, a middleware genuinely propagating a user's cancellation through
+  // such a helper misclassified as its own failure ('middleware') instead of
+  // the user's ('abort'). This must NOT reopen the IndexedDB scenario in the
+  // test above — that one's `.cause` is undefined, not our signal's reason,
+  // so it still correctly classifies as 'middleware'.
+  it('propagates a cancellation through a middleware even when the abort helper wraps it in a fresh AbortError (.cause)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const k: string[] = []
+    const abortableSleep: Middleware = async ctx => {
+      await delay(5000, undefined, { signal: ctx.request.signal })
+      throw new Error('should never get here — the delay always aborts first')
+    }
+    const ac = new AbortController()
+    const api = createApi({ baseUrl: '', middleware: [abortableSleep], onError: e => k.push(e.kind),
+      requests: { g: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/g' }) } })
+    const p = api.g({}, { signal: ac.signal })
+    ac.abort()
+    const r = await p
+    expect(r.error!.kind).toBe('abort')
     await flush()
     expect(k).toEqual([])
   })
