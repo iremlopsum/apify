@@ -3,6 +3,8 @@ import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
 import type { MiddlewareContext, CallOptions } from '../src/types.js'
 import type { ApiErrorKind } from '../src/types.js'
+import { successResult, errorResult } from '../src/testing.js'
+import type { ApiError } from '../src/types.js'
 
 interface User { id: string; name: string }
 
@@ -91,5 +93,23 @@ describe('Request generics are not structurally interchangeable', () => {
     const r = await api.getUser({ id: '1' })
     if (r.error) return
     expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+})
+
+describe('testing builders produce valid union members', () => {
+  it('successResult is a SuccessResult', () => {
+    const r = successResult({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<{ id: string }>()
+    expectTypeOf(r.response).toEqualTypeOf<Response>()
+  })
+
+  it('errorResult is an ErrorResult', () => {
+    const r = errorResult<{ id: string }>(500)
+    // errorResult()'s declared return type stays `Result<T>` (a union), so —
+    // symmetric with the guard clause above — narrow before asserting.
+    if (!r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<null>()
+    expectTypeOf(r.error).toEqualTypeOf<ApiError>()
   })
 })
