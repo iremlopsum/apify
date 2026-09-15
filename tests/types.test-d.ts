@@ -55,3 +55,23 @@ describe('ApiErrorKind', () => {
     expectTypeOf<ApiErrorKind>().toEqualTypeOf<'http' | 'network' | 'abort' | 'timeout' | 'parse'>()
   })
 })
+
+describe('Result narrows like a discriminated union', () => {
+  it('narrows data after an early return on error', async () => {
+    const { data, error } = await api.getUser({ id: '1' })
+    if (error) return
+    expectTypeOf(data).toEqualTypeOf<User>()
+  })
+
+  it('narrows in both directions on an explicit null check', async () => {
+    const r = await api.getUser({ id: '1' })
+    if (r.error === null) expectTypeOf(r.data).toEqualTypeOf<User>()
+    else expectTypeOf(r.data).toEqualTypeOf<null>()
+  })
+
+  it('gives a non-null Response on the success branch', async () => {
+    const r = await api.getUser({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.response).toEqualTypeOf<Response>()
+  })
+})

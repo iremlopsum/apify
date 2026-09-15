@@ -238,58 +238,69 @@ export interface RequestConfig {
 // ---------------------------------------------------------------------------
 
 /**
- * The result object returned by every API call. This is the core of the
- * library's error handling strategy — instead of throwing exceptions, every
- * call returns a discriminated result that the caller can inspect.
+ * A successful API call. `data` is populated, `error` is `null`, and the raw
+ * `Response` is always present because the server responded.
+ */
+export interface SuccessResult<TResponse> {
+  /** The parsed response data. Never `null` on this branch. */
+  data: TResponse
+
+  /** Always `null` — this is the discriminant that narrows `data`. */
+  error: null
+
+  /**
+   * The raw fetch `Response`. Always present on success.
+   *
+   * **Its body has already been consumed** to produce `data`, so
+   * `response.json()` throws "Body has already been read". Use `data`;
+   * `response` is for status, headers and redirect metadata.
+   */
+  response: Response
+
+  /** Re-execute this request through the full middleware chain. */
+  retry: () => Promise<Result<TResponse>>
+}
+
+/**
+ * A failed API call. `error` is populated and `data` is `null`.
  *
- * On success: `data` is the typed response, `error` is null.
- * On failure: `data` is null, `error` is an {@link ApiError} with details.
+ * `response` is present for HTTP and parse failures (the server responded)
+ * and `null` for network failures, aborts and timeouts. Check
+ * {@link ApiError.kind} to tell them apart.
+ */
+export interface ErrorResult<TResponse> {
+  /** Always `null` on this branch. */
+  data: null
+
+  /** Structured error details. Never `null` on this branch. */
+  error: ApiError
+
+  /** The raw `Response`, or `null` when no HTTP response exists. */
+  response: Response | null
+
+  /** Re-execute this request through the full middleware chain. */
+  retry: () => Promise<Result<TResponse>>
+}
+
+/**
+ * The result of every API call — a discriminated union on `error`.
  *
- * The `response` field gives access to the raw `Response` object (headers,
- * status, etc.). It is `null` for network errors where no HTTP response exists
- * (DNS failure, CORS block, abort, etc.).
- *
- * The `retry` function re-executes the exact same request through the full
- * middleware chain (so auth tokens are re-injected, logging fires again, etc.).
- *
- * @typeParam TResponse - The shape of the successful response data.
+ * Checking `error` narrows `data`: after `if (error) return`, `data` is
+ * `TResponse`, not `TResponse | null`. That is the whole point of returning
+ * a result instead of throwing — the check *is* the narrowing.
  *
  * @example
  * ```ts
- * const { data, error, retry } = await api.getUser({ id: '42' })
- *
+ * const { data, error } = await api.getUser({ id: '42' })
  * if (error) {
- *   if (error.status === 401) redirectToLogin()
- *   else console.error(error.body)
+ *   if (error.kind === 'abort') return       // we cancelled it ourselves
+ *   console.error(error.status, error.body)
  *   return
  * }
- *
- * // data is typed as User here
- * console.log(data.name)
+ * console.log(data.name)   // data is User
  * ```
  */
-export interface Result<TResponse> {
-  /** The parsed response data on success, or `null` on error. */
-  data: TResponse | null
-
-  /** Structured error details on failure, or `null` on success. */
-  error: ApiError | null
-
-  /**
-   * The raw fetch `Response` object. Useful for reading headers, status
-   * codes, or other metadata. `null` when no HTTP response exists (network
-   * errors, aborted requests).
-   */
-  response: Response | null
-
-  /**
-   * Re-execute this exact request through the full middleware chain.
-   *
-   * Always re-enters from the outermost middleware, so auth injection,
-   * logging, etc. all fire again. Useful for retry-after-refresh patterns.
-   */
-  retry: () => Promise<Result<TResponse>>
-}
+export type Result<TResponse> = SuccessResult<TResponse> | ErrorResult<TResponse>
 
 // ---------------------------------------------------------------------------
 // Call Options

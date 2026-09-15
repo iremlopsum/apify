@@ -48,7 +48,7 @@ import { anySignal } from './utils/any-signal.js'
 import { timeoutSignalFor } from './utils/timeout.js'
 import { stableStringify } from './utils/cache.js'
 import { isSpecialBody, isOpaqueParams } from './utils/special-body.js'
-import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
+import type { ApiConfig, CallOptions, ErrorResult, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
 
 // =============================================================================
 // Type helpers — these bridge Request generics to the API method signatures
@@ -187,7 +187,7 @@ function syntheticResult(
   url: string,
   params: unknown,
   retry: () => Promise<Result<unknown>>
-): Result<unknown> {
+): ErrorResult<unknown> {
   const error = new ApiError({
     kind: abortKind(reason) ?? fallbackKind,
     status: 0,
@@ -360,7 +360,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * through the normal post-execution hook, so reporting it again here
        * would double it (docs/FIXES.md, "Duplicate onError under share").
        */
-      function buildFailedResult(reason: unknown, fallbackKind: 'abort' | 'network'): Result<unknown> {
+      function buildFailedResult(reason: unknown, fallbackKind: 'abort' | 'network'): ErrorResult<unknown> {
         return syntheticResult(
           reason,
           fallbackKind,
@@ -375,7 +375,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * `buildFailedResult` plus reporting to `onError` — the common case,
        * used everywhere a failure has no other path to the error tracker.
        */
-      function failedResult(reason: unknown, fallbackKind: 'abort' | 'network'): Result<unknown> {
+      function failedResult(reason: unknown, fallbackKind: 'abort' | 'network'): ErrorResult<unknown> {
         const result = buildFailedResult(reason, fallbackKind)
         fireOnError(result.error as ApiError)
         return result
