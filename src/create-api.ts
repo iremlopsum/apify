@@ -174,22 +174,44 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
  *   which is the refcount's job, not this function's;
  * - a synchronous error during request setup (`'network'`), most often the
  *   `TypeError` `buildUrl` throws for a nested query-string object;
- * - a rejection escaping the middleware chain (`'network'`).
+ * - a rejection escaping the middleware chain (`'middleware'`, or `'network'`
+ *   for a setup failure).
  *
- * `reason` is classified first, so an abort or timeout keeps its own kind
- * regardless of which caller built the Result; `fallbackKind` only applies
- * when it is neither.
+ * Classification is by **provenance**, not by sniffing `reason`'s shape: a
+ * failure only counts as *our* cancellation when `signal` — the AbortSignal
+ * that actually governs this operation — is the one that aborted. That is
+ * what lets a caller's custom abort reason (`ac.abort(new Error('x'))`, or a
+ * plain string) still classify as `'abort'`/`'timeout'` instead of falling
+ * through to `'network'` — `abortKind` only recognises the standard
+ * `AbortError`/`TimeoutError` names, but the signal itself always knows why
+ * it aborted regardless of what shape its `reason` takes.
+ *
+ * For a `'middleware'` fallback this additionally requires `reason` to be
+ * *identical* to `signal.reason`. A middleware can throw its own
+ * `AbortError`-named failure that has nothing to do with this request's own
+ * signal — a rethrown IndexedDB quota abort, say — and that must stay
+ * `'middleware'`, not be swallowed as `'abort'` just because the name
+ * matches. Identity with `signal.reason` is what proves a middleware is
+ * propagating *our* cancellation rather than reporting its own, unrelated
+ * one. A non-`'middleware'` fallback doesn't need that check: a fetch
+ * rejection while our own signal is aborted IS that cancellation, whatever
+ * shape fetch happened to throw.
  */
 function syntheticResult(
   reason: unknown,
+  signal: AbortSignal | undefined,
   fallbackKind: 'abort' | 'network' | 'middleware',
   method: string,
   url: string,
   params: unknown,
   retry: () => Promise<Result<unknown>>
 ): ErrorResult<unknown> {
+  const isOurCancellation =
+    signal?.aborted === true &&
+    (fallbackKind !== 'middleware' || reason === signal.reason)
+  const kind = isOurCancellation ? (abortKind(signal!.reason) ?? 'abort') : fallbackKind
   const error = new ApiError({
-    kind: abortKind(reason) ?? fallbackKind,
+    kind,
     status: 0,
     statusText: '',
     body: reason,
@@ -367,10 +389,12 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        */
       function buildFailedResult(
         reason: unknown,
+        signal: AbortSignal | undefined,
         fallbackKind: 'abort' | 'network' | 'middleware'
       ): ErrorResult<unknown> {
         return syntheticResult(
           reason,
+          signal,
           fallbackKind,
           request.config.method,
           joinUrl(baseUrl, request.config.path),
@@ -385,9 +409,10 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        */
       function failedResult(
         reason: unknown,
+        signal: AbortSignal | undefined,
         fallbackKind: 'abort' | 'network' | 'middleware'
       ): ErrorResult<unknown> {
-        const result = buildFailedResult(reason, fallbackKind)
+        const result = buildFailedResult(reason, signal, fallbackKind)
         fireOnError(result.error as ApiError)
         return result
       }
@@ -650,10 +675,22 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // Status 0 is the convention for "no HTTP response" — the error
               // body contains the native Error (TypeError for network, or
               // DOMException for abort) for debugging.
+              //
+              // Provenance over name-sniffing: if the signal we actually
+              // handed to fetch is the one that's aborted, this failure IS
+              // that cancellation — whatever `fetch` threw, including a
+              // custom, non-`AbortError`-named reason a caller passed to
+              // `ac.abort(reason)`. Only fall back to sniffing `err`'s own
+              // shape when our signal is not the cause, for a genuine
+              // network failure.
               // ---------------------------------------------------------------
+              const signal = ctx.request.signal
+              const kind = signal?.aborted === true
+                ? (abortKind(signal.reason) ?? 'abort')
+                : (abortKind(err) ?? 'network')
               const error = new ApiError({
                 status: 0,
-                kind: abortKind(err) ?? 'network',
+                kind,
                 statusText: '',
                 body: err,
                 headers: new Headers(),
@@ -785,10 +822,10 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           let resultPromise: Promise<Result<unknown>>
           try {
             resultPromise = composed(context).catch(
-              (err: unknown) => buildFailedResult(err, 'middleware')
+              (err: unknown) => buildFailedResult(err, context.request.signal, 'middleware')
             )
           } catch (err) {
-            resultPromise = Promise.resolve(buildFailedResult(err, 'middleware'))
+            resultPromise = Promise.resolve(buildFailedResult(err, context.request.signal, 'middleware'))
           }
 
           // -----------------------------------------------------------------
@@ -886,7 +923,11 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // unhandled rejection.
           // -----------------------------------------------------------------
           // Fire onError for synchronous errors too — they're still errors.
-          return Promise.resolve(failedResult(err, 'network'))
+          // No signal to check provenance against here — this catches errors
+          // thrown before (or while) the operative signal itself is being
+          // computed, so there is nothing yet that could be "our own
+          // cancellation"; it always falls back to 'network'.
+          return Promise.resolve(failedResult(err, undefined, 'network'))
         }
       }
 
@@ -986,7 +1027,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
         // `execute()` reject again, those tests fail loudly, and this arm
         // becomes live again to catch exactly the rejection they'd be
         // failing on.
-        if (!perCaller) return promise.then(r => r, (err: unknown) => failedResult(err, 'network'))
+        if (!perCaller) return promise.then(r => r, (err: unknown) => failedResult(err, undefined, 'network'))
 
         // Race this caller's own giving-up against the shared result settling.
         // Giving up calls release(), which only decrements the refcount — the
@@ -1025,7 +1066,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // loudly, and this bail (and the arm around it) is what
               // catches the fallout.
               if (done) return
-              finish(failedResult(err, 'network'))
+              finish(failedResult(err, undefined, 'network'))
             }
           )
 
@@ -1057,7 +1098,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // report is suppressed.
           const onAbort = (): void => {
             release()
-            const result = buildFailedResult(perCaller.reason, 'abort')
+            const result = buildFailedResult(perCaller.reason, perCaller, 'abort')
             if (!hasSettled()) fireOnError(result.error as ApiError)
             finish(result)
           }
@@ -1066,7 +1107,10 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           else perCaller.addEventListener('abort', onAbort, { once: true })
         })
       } catch (err) {
-        return Promise.resolve(failedResult(err, 'network'))
+        // Setup for the share path itself threw (e.g. a BigInt timeout
+        // reaching Math.min in perCallerBudget) — before acquire(), so there
+        // is no operative signal yet to check provenance against.
+        return Promise.resolve(failedResult(err, undefined, 'network'))
       }
     }
   }
