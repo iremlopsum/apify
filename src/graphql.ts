@@ -2,7 +2,7 @@ import { ApiError, createSuccessResult, createErrorResult, createNetworkErrorRes
 import { composeMiddleware } from './middleware.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
-import { abortKind } from './utils/abort-kind.js'
+import { abortKind, propagatesReason } from './utils/abort-kind.js'
 import { resolveBudget } from './utils/budget.js'
 import type { CallOptions, ErrorResult, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
 
@@ -119,9 +119,10 @@ export function createGraphQL(config: any): any {
          * governs this operation — is the one that aborted, this failure IS
          * that cancellation, whatever shape `reason` takes. The only fallback
          * this function is ever called with is `'middleware'`, so the
-         * identity check (`reason === signal.reason`) always applies here: a
-         * middleware throwing its own `AbortError`-named failure, unrelated to
-         * this operation's own signal, must stay `'middleware'`.
+         * propagation check (`propagatesReason` — identity, or one level of
+         * `.cause`) always applies here: a middleware throwing its own
+         * `AbortError`-named failure, unrelated to this operation's own
+         * signal, must stay `'middleware'`.
          */
         function buildFailedResult(
           reason: unknown,
@@ -130,7 +131,7 @@ export function createGraphQL(config: any): any {
         ): ErrorResult<unknown> {
           const isOurCancellation =
             signal?.aborted === true &&
-            (fallbackKind !== 'middleware' || reason === signal.reason)
+            (fallbackKind !== 'middleware' || propagatesReason(reason, signal.reason))
           const kind = isOurCancellation ? (abortKind(signal!.reason) ?? 'abort') : fallbackKind
           const error = new ApiError({
             kind,

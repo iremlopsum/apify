@@ -74,6 +74,18 @@ export function startServer(): Promise<TestServer> {
           res.writeHead(isNaN(code) ? 400 : code)
           res.end()
 
+        } else if (method === 'GET' && pathname === '/slow-body') {
+          // Sends real headers (a genuine 200), then a partial, unparsable
+          // chunk of body, then pauses well past any test's abort window
+          // before finishing. This is what lets a test abort mid-body-read —
+          // after the Response exists, before parseResponse's network read
+          // (response.text()) has anything more to consume — the exact
+          // window where an abort must not be misreported as a parse
+          // failure on a server that answered fine.
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.write('{"partial":true,')
+          setTimeout(() => { if (!res.writableEnded) res.end('"done":true}') }, 2000)
+
         } else if (method === 'GET' && pathname === '/flaky') {
           const FLAKY_FAIL_COUNT = 2 // fail this many times, then succeed
           // `count` is read AFTER the shared increment at the top of the handler,

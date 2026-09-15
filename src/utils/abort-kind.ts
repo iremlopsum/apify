@@ -19,3 +19,27 @@ export function abortKind(err: unknown): 'abort' | 'timeout' | null {
   if (name === 'AbortError') return 'abort'
   return null
 }
+
+/**
+ * Whether `reason` — something a middleware threw — is provably a
+ * propagation of `signalReason`, the reason our own signal aborted with.
+ *
+ * Exact identity (`reason === signalReason`) is the direct case: a
+ * middleware that reads `ctx.request.signal.reason` and rethrows it
+ * verbatim. But a middleware awaiting an abortable helper often doesn't get
+ * handed the reason itself back — `node:timers/promises`' `setTimeout(ms,
+ * undefined, { signal })` rejects with a *fresh* `AbortError` whose `.cause`
+ * is the signal's reason, not the reason itself, and the same pattern shows
+ * up in queueing libraries and IndexedDB wrappers built on `AbortSignal`.
+ * One level of `.cause` unwrapping catches that case too, without going
+ * further: an error that merely *chains* to something unrelated (an
+ * `AbortError` a middleware manufactured on its own, whose `.cause` is not
+ * our reason) must still fail this check and classify as `'middleware'` —
+ * see the IndexedDB scenario in `syntheticResult`'s doc, which this must not
+ * reopen.
+ */
+export function propagatesReason(reason: unknown, signalReason: unknown): boolean {
+  if (reason === signalReason) return true
+  if (typeof reason !== 'object' || reason === null) return false
+  return (reason as { cause?: unknown }).cause === signalReason
+}

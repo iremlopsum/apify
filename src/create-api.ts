@@ -43,7 +43,7 @@ import { serializeBody } from './utils/serialize.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { ShareTracker, isAbandoned } from './utils/share.js'
 import { mergeHeaders } from './utils/headers.js'
-import { abortKind } from './utils/abort-kind.js'
+import { abortKind, propagatesReason } from './utils/abort-kind.js'
 import { anySignal } from './utils/any-signal.js'
 import { operationBudget, perCallerBudget } from './utils/budget.js'
 import { stableStringify } from './utils/cache.js'
@@ -186,16 +186,16 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
  * `AbortError`/`TimeoutError` names, but the signal itself always knows why
  * it aborted regardless of what shape its `reason` takes.
  *
- * For a `'middleware'` fallback this additionally requires `reason` to be
- * *identical* to `signal.reason`. A middleware can throw its own
- * `AbortError`-named failure that has nothing to do with this request's own
- * signal — a rethrown IndexedDB quota abort, say — and that must stay
- * `'middleware'`, not be swallowed as `'abort'` just because the name
- * matches. Identity with `signal.reason` is what proves a middleware is
- * propagating *our* cancellation rather than reporting its own, unrelated
- * one. A non-`'middleware'` fallback doesn't need that check: a fetch
- * rejection while our own signal is aborted IS that cancellation, whatever
- * shape fetch happened to throw.
+ * For a `'middleware'` fallback this additionally requires `reason` to
+ * *propagate* `signal.reason` (see `propagatesReason` — exact identity, or
+ * one level of `.cause`). A middleware can throw its own `AbortError`-named
+ * failure that has nothing to do with this request's own signal — a
+ * rethrown IndexedDB quota abort, say — and that must stay `'middleware'`,
+ * not be swallowed as `'abort'` just because the name matches. Propagation
+ * is what proves a middleware is relaying *our* cancellation rather than
+ * reporting its own, unrelated one. A non-`'middleware'` fallback doesn't
+ * need that check: a fetch rejection while our own signal is aborted IS that
+ * cancellation, whatever shape fetch happened to throw.
  */
 function syntheticResult(
   reason: unknown,
@@ -208,7 +208,7 @@ function syntheticResult(
 ): ErrorResult<unknown> {
   const isOurCancellation =
     signal?.aborted === true &&
-    (fallbackKind !== 'middleware' || reason === signal.reason)
+    (fallbackKind !== 'middleware' || propagatesReason(reason, signal.reason))
   const kind = isOurCancellation ? (abortKind(signal!.reason) ?? 'abort') : fallbackKind
   const error = new ApiError({
     kind,
@@ -648,10 +648,36 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // is: the server responded, we could not read it. Falling through
               // to the network catch would report status 0 and discard the
               // Response, telling the caller they are offline when they are not.
+              //
+              // But `parseResponse` doesn't just parse — it performs the
+              // network body read (`response.text()`/`.blob()`/etc.), so an
+              // abort that lands after headers arrive (a component unmounting
+              // mid-download) surfaces HERE, not in the outer catch below.
+              // Provenance still applies: if our own signal is what aborted,
+              // this is our cancellation, not "the server responded but the
+              // body was unreadable" — same check as the outer catch, and the
+              // same response:null/status:0 shape (createNetworkErrorResult)
+              // so this matches what graphql.ts already does for the
+              // identical scenario, which keeps its network read (`await
+              // response.text()`) outside its own JSON.parse try for exactly
+              // this reason — outside the parse-only try to fall through to
+              // the outer catch's provenance handling.
               let data: unknown
               try {
                 data = await parseResponse(response, request.config.responseType)
               } catch (parseErr) {
+                const signal = ctx.request.signal
+                if (signal?.aborted === true) {
+                  const error = new ApiError({
+                    status: 0,
+                    kind: abortKind(signal.reason) ?? 'abort',
+                    statusText: '',
+                    body: parseErr,
+                    headers: new Headers(),
+                    request: { method: ctx.request.method, url: ctx.request.url, params }
+                  })
+                  return createNetworkErrorResult(error, execute)
+                }
                 const error = new ApiError({
                   kind: 'parse',
                   status: response.status,
@@ -923,10 +949,16 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // unhandled rejection.
           // -----------------------------------------------------------------
           // Fire onError for synchronous errors too — they're still errors.
-          // No signal to check provenance against here — this catches errors
-          // thrown before (or while) the operative signal itself is being
-          // computed, so there is nothing yet that could be "our own
-          // cancellation"; it always falls back to 'network'.
+          // `undefined`, not `callerSignal`, is passed here for two reasons:
+          // (a) `callerSignal` is a `const` scoped inside the `try` above and
+          // is simply unreachable from this `catch` block; and (b), the
+          // reason that matters — this is a deliberate policy, not a
+          // limitation to route around by hoisting it into scope. A bug in
+          // request *setup* (buildUrl's TypeError, a BigInt timeout reaching
+          // Math.min) must always report as the setup bug it is, even when
+          // the caller has ALSO aborted around the same time — silently
+          // reclassifying a real setup failure as 'abort' just because a
+          // signal happens to be aborted would hide it from onError.
           return Promise.resolve(failedResult(err, undefined, 'network'))
         }
       }
