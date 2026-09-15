@@ -69,6 +69,42 @@ describe('share', () => {
     await all
   })
 
+  // ---------------------------------------------------------------------------
+  // A call that declines to coalesce (per-call headers, here) still runs
+  // through the ordinary unshared path in execute() — it is just a normal
+  // call that happens to belong to a `share: true` request. That path must
+  // still honour THIS caller's own signal and per-call timeout.
+  //
+  // A prior variant keyed the operation deadline's "is this shared" flag on
+  // `request.config.share` instead of on whether a shared signal was
+  // actually handed to this particular call. Every declining call for a
+  // share: true endpoint then got the SHARED-shaped budget — which discards
+  // options.signal and options.timeout entirely, because they live only in
+  // budget.perCaller, a value the declining path never builds (perCaller is
+  // only computed inside the acquire()/release() branch, which a declining
+  // call never reaches). The request became uncancellable: neither aborting
+  // nor a timeout could end it, and it would just hang on the never-resolving
+  // mock below. Bounded so that regression fails the test instead of the
+  // whole suite.
+  // ---------------------------------------------------------------------------
+  it('still honours options.signal when per-call headers make it decline to coalesce', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const api = shared()
+    const ac = new AbortController()
+    const p = api.get({ id: '1' }, { headers: { 'X-Tenant': 'b' }, signal: ac.signal })
+    await Promise.resolve()
+    ac.abort()
+    const r = await p
+    expect(r.error?.kind).toBe('abort')
+  }, 2000)
+
+  it('still honours options.timeout when per-call headers make it decline to coalesce', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const api = shared()
+    const r = await api.get({ id: '1' }, { headers: { 'X-Tenant': 'b' }, timeout: 20 })
+    expect(r.error?.kind).toBe('timeout')
+  }, 2000)
+
   it('lets one sharer abort without harming the others', async () => {
     const f = controllable(); vi.stubGlobal('fetch', f.fn)
     const api = shared()

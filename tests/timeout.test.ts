@@ -176,16 +176,47 @@ describe('timeout', () => {
     expect(r.error).toBeNull()
   })
 
+  // ---------------------------------------------------------------------------
+  // This test used to prove nothing: a 1000ms timeout racing an
+  // instantly-resolving fetch means both attempts finish in microseconds, so
+  // the budget never gets a chance to matter — the test passed identically
+  // whether retry() drew a fresh deadline or inherited the first attempt's.
+  // It only proved that retry() re-fetches.
+  //
+  // To make the name true, the first attempt has to actually exhaust its
+  // budget, and the retry has to actually need a live one. A short timeout
+  // plus a first fetch that never resolves on its own forces the first
+  // attempt to end in `kind: 'timeout'`. The retry's fetch mock then mimics
+  // real fetch's synchronous-reject behavior for an already-aborted signal:
+  // if retry() reused the exhausted deadline (the bug), the signal handed to
+  // this second fetch call is already aborted and it rejects immediately,
+  // same as the first attempt. Only a genuinely fresh signal lets it resolve.
+  // ---------------------------------------------------------------------------
   it('gives retry() a fresh budget', async () => {
-    let n = 0
-    vi.stubGlobal('fetch', vi.fn(async () => { n++; return new Response('{"n":' + n + '}', { status: 200 }) }))
+    let call = 0
+    vi.stubGlobal('fetch', vi.fn((_u: string, init: RequestInit) => {
+      call++
+      const s = init.signal as AbortSignal | undefined
+      if (call === 1) {
+        // Never settles on its own — only the 20ms budget can end it.
+        return new Promise<Response>((_res, rej) => {
+          s?.addEventListener('abort', () => rej(s.reason))
+        })
+      }
+      // A fresh budget hasn't fired yet, so this must succeed. A signal
+      // inherited from the first attempt is already aborted here, and real
+      // fetch rejects synchronously for an already-aborted signal.
+      if (s?.aborted) return Promise.reject(s.reason)
+      return Promise.resolve(new Response('{"ok":1}', { status: 200 }))
+    }))
     const api = createApi({
       baseUrl: '',
-      requests: { g: new Request<Record<string, never>, { n: number }>({ method: 'GET', path: '/g', timeout: 1000 }) },
+      requests: { g: new Request<Record<string, never>, { ok: number }>({ method: 'GET', path: '/g', timeout: 20 }) },
     })
     const first = await api.g()
+    expect(first.error!.kind).toBe('timeout')
     const again = await first.retry()
     expect(again.error).toBeNull()
-    expect(n).toBe(2)
+    expect(call).toBe(2)
   })
 })
