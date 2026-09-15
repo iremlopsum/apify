@@ -650,7 +650,14 @@ describe('duplicate onError under share (Fix 1, 2.2.1)', () => {
     const kinds: (string | undefined)[] = []
     // Simulates a token-fetching auth middleware that awaits the shared
     // signal and throws (rather than returning a Result) when it aborts —
-    // never calling next(), so the rejection escapes execute() entirely.
+    // never calling next(). Since Task 9 (the never-throws fix), this
+    // rejection does NOT escape execute(): execute() itself converts it into
+    // a Result (kind 'middleware') before it can propagate anywhere. What
+    // this test actually exercises is that conversion happening on the
+    // LAST sharer's give-up, and the resulting operation-level failure still
+    // being reported exactly once. See the correction 90 lines below (the
+    // "cross-kind double report" describe block) for the fuller writeup of
+    // why this no longer escapes.
     const throwsOnAbort: Middleware = ctx => new Promise((_resolve, reject) => {
       const s = ctx.request.signal
       if (s?.aborted) { reject(s.reason); return }
@@ -797,5 +804,114 @@ describe('cross-kind double report on a stale rejection handler (Fix 2, 2.2.1)',
 
     await flush()
     expect(kinds).toEqual(['middleware']) // only the operation's own failure reports
+  })
+})
+
+// ---------------------------------------------------------------------------
+// I1 (whole-branch review, final fix wave): the `abandoned` guard at the
+// shared operation's own post-execution hook (create-api.ts, `if (result.error
+// && !abandoned) fireOnError(...)`) had no dedicated test. Deleting
+// `&& !abandoned` left the full suite green.
+//
+// Scenario: two sharers both give up via a plain abort (kind 'abort', which
+// `fireOnError` always drops on its own — see the top-level guard — so
+// neither caller's own give-up report can appear in `kinds` regardless of
+// this guard). The second release is the LAST one, so ShareTracker aborts
+// the shared controller with its ABANDONED sentinel. A middleware watching
+// that shared signal converts the abort into its own thrown error, which
+// execute()'s never-throws conversion turns into a Result with kind
+// 'middleware' — a real `result.error` on the shared operation itself. With
+// the guard present, `abandoned` is true (the shared signal aborted with
+// ABANDONED) and the report is suppressed: `kinds` stays `[]`. Delete
+// `&& !abandoned` and the shared operation reports its own 'middleware'
+// failure unconditionally: `kinds` becomes `['middleware']`.
+// ---------------------------------------------------------------------------
+describe('abandoned guard on the shared operation itself (I1)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('suppresses the shared operation\'s own failure when both sharers abandon it', async () => {
+    const kinds: (string | undefined)[] = []
+    // Never calls next() — just watches the shared signal and converts its
+    // abandonment into a middleware failure, the same shape a token-fetching
+    // auth middleware reacting to cancellation would produce.
+    const convertsAbandonment: Middleware = ctx => new Promise((_resolve, reject) => {
+      const s = ctx.request.signal
+      if (s?.aborted) { reject(new Error('shared request abandoned')); return }
+      s?.addEventListener('abort', () => reject(new Error('shared request abandoned')), { once: true })
+    })
+    // Never actually reached — the middleware above never calls next() — but
+    // stubbed for parity with the equivalent row 5 test above.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const api = createApi({
+      baseUrl: '',
+      onError: e => { kinds.push(e.kind) },
+      requests: {
+        get: new Request<{ id: string }, { ok: number }>({
+          method: 'GET', path: '/x/:id', share: true, middleware: [convertsAbandonment],
+        }),
+      },
+    })
+
+    const a1 = new AbortController()
+    const a2 = new AbortController()
+    const a = api.get({ id: '1' }, { signal: a1.signal })
+    const b = api.get({ id: '1' }, { signal: a2.signal })
+    await Promise.resolve()
+
+    a1.abort()
+    expect((await a).error?.kind).toBe('abort')
+
+    a2.abort() // last release: ShareTracker aborts the shared controller with ABANDONED
+    expect((await b).error?.kind).toBe('abort')
+
+    await flush()
+    expect(kinds).toEqual([]) // the shared operation's own 'middleware' failure is suppressed
+  })
+})
+
+// ---------------------------------------------------------------------------
+// I2 (whole-branch review, final fix wave): `ShareTracker`'s `hasSettled()`
+// (consulted at create-api.ts's `if (!hasSettled()) fireOnError(...)` inside
+// `onAbort`) had no dedicated test either. Deleting `if (!hasSettled())`
+// (i.e. calling `fireOnError` unconditionally) also left the full suite
+// green — the scenario it was originally built for is now covered by
+// `fireOnError`'s own abort-dropping rule. The one surviving producer: a
+// consumer that reacts to the shared operation's own reported failure by
+// hand-crafting a `TimeoutError` abort on their own AbortController from
+// *inside* their `onError` handler. That is a kind the top-level
+// `fireOnError` guard does NOT drop (only 'abort' is dropped, not
+// 'timeout'), so `hasSettled()` is the only thing left standing between one
+// operation-level report and three.
+// ---------------------------------------------------------------------------
+describe('hasSettled guard on a post-settlement self-abort from inside onError (I2)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('does not let a caller aborting itself from inside onError re-report after the shared operation already settled', async () => {
+    const kinds: (string | undefined)[] = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 500 })))
+    const ac1 = new AbortController()
+    const ac2 = new AbortController()
+    const api = createApi({
+      baseUrl: '',
+      onError: e => {
+        kinds.push(e.kind)
+        // Simulates a consumer that reacts to the shared failure by giving up
+        // on both of its own outstanding calls, synchronously, from inside
+        // the handler — e.g. cancelling the rest of a batch on first failure.
+        if (e.kind === 'http') {
+          ac1.abort(new DOMException('t', 'TimeoutError'))
+          ac2.abort(new DOMException('t', 'TimeoutError'))
+        }
+      },
+      requests: { get: new Request<{ id: string }, { ok: number }>({ method: 'GET', path: '/x/:id', share: true }) },
+    })
+
+    const a = api.get({ id: '1' }, { signal: ac1.signal })
+    const b = api.get({ id: '1' }, { signal: ac2.signal })
+
+    await Promise.all([a, b])
+    await flush()
+
+    expect(kinds).toEqual(['http']) // the post-settlement self-aborts are not re-reported
   })
 })

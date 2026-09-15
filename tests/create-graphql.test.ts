@@ -750,6 +750,57 @@ describe('createGraphQL — abort during an error-body download', () => {
   })
 })
 
+// M1 (whole-branch review, final fix wave): the 2xx success path deliberately
+// keeps its own `response.text()` (the network body read) OUTSIDE the
+// JSON.parse try, for the identical provenance reason the error-body path
+// above does — see create-api.ts:678-691 for the fuller writeup, which this
+// file's local comment now points to directly. Without a test pinning this,
+// a contributor "tidying" `await response.text()` into the try would
+// silently flip an abort mid-download from `kind: 'abort'` (status 0, no
+// Response, unreported) to `kind: 'parse'` (status 200, live Response,
+// reported) with a fully green suite.
+describe('createGraphQL — abort during a success-body download', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('does not report a real abort mid success-body-download as a parse failure', async () => {
+    const onError = vi.fn()
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+      const s = init.signal as AbortSignal | undefined
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers(),
+        text: () => new Promise<string>((_resolve, reject) => {
+          if (s?.aborted) { reject(s.reason); return }
+          s?.addEventListener('abort', () => reject(s.reason))
+        }),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const op = new Operation<Record<string, never>, unknown>({ operation: gql`query { health }` })
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { health: op },
+      onError,
+    })
+
+    const ac = new AbortController()
+    const p = client.health(undefined, { signal: ac.signal })
+    ac.abort()
+
+    const { data, error, response } = await p
+    expect(data).toBeNull()
+    expect(error?.kind).toBe('abort')
+    expect(error?.status).toBe(0)
+    expect(response).toBeNull()
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).not.toHaveBeenCalled()
+  })
+})
+
 describe('GraphQL partial data', () => {
   afterEach(() => vi.restoreAllMocks())
 
