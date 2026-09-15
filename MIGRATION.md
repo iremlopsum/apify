@@ -330,9 +330,10 @@ if (error) {
 ```
 
 This lives on `error.partialData`, not `result.data` — putting it on `data`
-would break the `Result` union's narrowing from #1 (`data` must be non-null
-if and only if `error` is null). Nothing to change unless you want to start
-using it.
+would break the `Result` union's narrowing from #1: a non-null `error` means
+`data` is null, and a null `error` means the call succeeded (see the
+empty-body caveat below). Nothing to change unless you want to start using
+it.
 
 ### Worth knowing, no action needed
 

@@ -19,8 +19,10 @@ worked before/after examples for every one of them.
 - **`ApiError.partialData`** — GraphQL partial-success data (a nullable field
   errored while the rest of the query resolved) is preserved instead of
   discarded. It lives on `error.partialData`, not `Result.data`, so the
-  `Result` union's narrowing (see Changed) stays intact: `data` is non-null
-  if and only if `error` is null.
+  `Result` union's narrowing (see Changed) stays intact: a non-null `error`
+  means `data` is null, and a null `error` means the call succeeded (see
+  MIGRATION.md's empty-body caveat for the one case where `data` is null
+  too).
 - **`SuccessResult<T>` and `ErrorResult<T>`** exported as types — the two
   branches of the `Result<T>` union.
 
