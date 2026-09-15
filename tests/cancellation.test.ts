@@ -22,6 +22,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
+import type { Result } from '../src/types.js'
 
 // ---------------------------------------------------------------------------
 // Global mock for fetch
@@ -63,6 +64,54 @@ describe('cancellation', () => {
     expect(error!.status).toBe(0)
     // The error body should be the original DOMException for debugging
     expect(error!.body).toBeInstanceOf(DOMException)
+  })
+})
+
+// =============================================================================
+// retry() and the untyped JS call shape
+// =============================================================================
+//
+// `result.retry` IS `execute` — the same closure that this file's abort and
+// dedupe tests drive through `sharedSignal`/`onSettled`, execute()'s real
+// (internal-only) parameters for the share/cancellation machinery. Its public
+// type is `() => Promise<Result<unknown>>`, but it is handed to consumers as
+// a plain function value, and nothing stops a consumer's own call shape from
+// supplying arguments: `arr.map(result.retry)` is the classic trap, since
+// Array.prototype.map calls its callback as `(value, index, array)`.
+//
+// `onSettled` is invoked unconditionally, the instant a Result exists, by
+// create-api.ts's post-execution hook — before dedupe cleanup, before
+// onError. A non-function value landing there must not turn the library's
+// "no public entry point ever rejects" contract into a lie for the one
+// function most likely to be passed around as a bare reference.
+// =============================================================================
+
+describe('retry survives being called with extra arguments', () => {
+  it('never rejects when called with the untyped JS shapes consumers actually produce', async () => {
+    // Fresh Response per call — mockResolvedValue would hand out the same
+    // instance, whose body can only be read once.
+    mockFetch.mockImplementation(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }))
+    const getItem = new Request<Record<string, never>, { ok: boolean }>({ method: 'GET', path: '/item' })
+    const api = createApi({ baseUrl: '/api', requests: { getItem } })
+
+    const r = await api.getItem()
+    expect(r.error).toBeNull()
+
+    // retry's declared type takes no arguments. This cast is what lets this
+    // test call it the way real consumer code does — deliberately exercising
+    // the untyped JS shape, not a reason to widen the public type.
+    const callWithExtraArgs = r.retry as (...args: unknown[]) => Promise<Result<unknown>>
+
+    const direct1 = await callWithExtraArgs(undefined, 0)
+    const direct2 = await callWithExtraArgs({}, 0)
+    // No cast needed here: a zero-parameter function is assignable wherever a
+    // 3-parameter callback is expected, which is exactly why this call shape
+    // is so easy for a consumer to reach for without noticing anything odd.
+    const mapped = await [r].map(r.retry)[0]
+
+    expect(direct1.error).toBeNull()
+    expect(direct2.error).toBeNull()
+    expect(mapped.error).toBeNull()
   })
 })
 
