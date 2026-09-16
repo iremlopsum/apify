@@ -939,3 +939,93 @@ describe('createGraphQL — a success must carry data', () => {
     expect(error?.body).toEqual([{ message: 'Oops' }])
   })
 })
+
+// -----------------------------------------------------------------------------
+// 4.0.1: the errors branch hardcoded `status: 200`, so a GraphQL error arriving
+// on any other 2xx reported a status the server never sent. Every other
+// ApiError in both clients carries the response's own status.
+//
+// `statusText: 'GraphQL Error'` is deliberately NOT the response's own: it is
+// the only signal separating a GraphQL error from an HTTP error, because
+// `kind` is 'http' for both. Pinned below so it is not "tidied" away.
+// -----------------------------------------------------------------------------
+describe('createGraphQL — a GraphQL error reports the real status', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  const clientFor = (text: string, status: number, statusText = 'OK') => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: status >= 200 && status < 300,
+      status,
+      statusText,
+      headers: new Headers(),
+      text: () => Promise.resolve(text),
+    }))
+    return createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: {
+        health: new Operation<Record<string, never>, { ok: boolean }>({
+          operation: gql`query { health }`,
+        }),
+      },
+    })
+  }
+
+  const ERRORS = '{"data":null,"errors":[{"message":"Oops"}]}'
+
+  it('reports 203 when the response was a 203', async () => {
+    const { error } = await clientFor(ERRORS, 203, 'Non-Authoritative Information').health()
+    expect(error?.status).toBe(203)
+  })
+
+  it('still reports 200 when the response really was a 200', async () => {
+    const { error } = await clientFor(ERRORS, 200).health()
+    expect(error?.status).toBe(200)
+  })
+
+  it("keeps statusText 'GraphQL Error' as the discriminator", async () => {
+    // Not the response's statusText. This is the only thing telling a
+    // consumer the failure came from `{ errors }` rather than from HTTP.
+    const { error } = await clientFor(ERRORS, 203, 'Non-Authoritative Information').health()
+    expect(error?.statusText).toBe('GraphQL Error')
+  })
+
+  it("still classifies as kind 'http' with the errors as the body", async () => {
+    const { error } = await clientFor(ERRORS, 203).health()
+    expect(error?.kind).toBe('http')
+    expect(error?.body).toEqual([{ message: 'Oops' }])
+  })
+
+  it('still carries partialData when the server sent some', async () => {
+    const { error } = await clientFor('{"data":{"ok":true},"errors":[{"message":"partial"}]}', 200).health()
+    expect(error?.partialData).toEqual({ ok: true })
+  })
+})
+
+// -----------------------------------------------------------------------------
+// 4.0.1: coverage for a shape 4.0.0 handles correctly but never pinned. An
+// empty `errors` array is falsy on `.length`, so it falls past the errors
+// branch into the no-data guard and reports 'parse'. That is right -- the
+// server sent neither data nor any actual error -- but nothing asserted it.
+// -----------------------------------------------------------------------------
+describe('createGraphQL — an empty errors array', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it("reports 'parse', not 'http', because there is no error to report", async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+      text: () => Promise.resolve('{"errors":[]}'),
+    }))
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: {
+        health: new Operation<Record<string, never>, { ok: boolean }>({
+          operation: gql`query { health }`,
+        }),
+      },
+    })
+    const { data, error } = await client.health()
+    expect(error?.kind).toBe('parse')
+    expect(error?.body).toBe('{"errors":[]}')
+    expect(data).toBeNull()
+  })
+})
