@@ -29,8 +29,9 @@ release is a no-op for you.
   `kind: 'parse'` error.** Covers an empty body, `{}`, a literal
   `{"data": null}`, and a non-object JSON root. `error.body` is the raw
   response text. GraphQL *errors* are unchanged: `{"data": null, "errors":
-  [...]}` still reports `kind: 'http'` with `partialData`, since that branch
-  runs first and is the spec-compliant shape for a field error.
+  [...]}` still reports `kind: 'http'`, with any partial result in
+  `partialData`, since that branch runs first and is the spec-compliant shape
+  for a field error.
 
 ### Removed
 
@@ -538,6 +539,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
 [4.0.0]: https://github.com/iremlopsum/apify/compare/v3.1.0...v4.0.0
 [3.1.0]: https://github.com/iremlopsum/apify/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/iremlopsum/apify/compare/v2.2.1...v3.0.0
+[2.2.1]: https://github.com/iremlopsum/apify/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/iremlopsum/apify/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/iremlopsum/apify/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/iremlopsum/apify/compare/v1.0.0...v2.0.0

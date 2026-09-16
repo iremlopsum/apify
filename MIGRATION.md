@@ -164,7 +164,7 @@ request is one of the empty-body endpoints described above, and declaring
 `responseType: 'none'` on it both makes `TResponse` accurate and silences the
 warning.
 
-### 3. Coming in 4.0.0
+### 3. 4.0.0: the empty-body rule (shipped)
 
 This shipped. See [Upgrading to 4.0.0](#upgrading-to-400) — an empty body under
 `responseType: 'json'` is now a `kind: 'parse'` error, and declaring

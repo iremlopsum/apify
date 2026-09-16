@@ -684,9 +684,10 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                     request.config.responseType === 'none' ? 'json' : request.config.responseType
                   body = await parseResponse(response, errorResponseType)
                   // Normalize the empty-JSON sentinel here too. This is NOT
-                  // part of the 4.0.0 seam (THE SEAM, below, is the success
-                  // path only) — an error response with no body is ordinary
-                  // and stays `null` forever, in 3.1.0 and in 4.0.0 alike.
+                  // part of the 4.0.0 seam (the success-path empty-body branch
+                  // below is the only place that seam applies) — an error
+                  // response with no body is ordinary and stays `null`
+                  // forever, in 3.1.0 and in 4.0.0 alike.
                   // Do not "unify" this with the success-path seam: that
                   // path's whole point is a body the caller expected and
                   // didn't get; this one is a body nobody promised. Letting

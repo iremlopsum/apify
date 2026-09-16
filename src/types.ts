@@ -266,11 +266,11 @@ export interface RequestConfig {
  */
 export interface SuccessResult<TResponse> {
   /**
-   * The parsed response data. Non-null **for a response with a body**. An
-   * endpoint that can answer 204 or an empty 200 (a `DELETE`, most commonly)
-   * still yields `null` here at runtime — `TResponse` is not widened to
-   * include it, so include `null` in that endpoint's own `TResponse` if it
-   * can do this. See the `responseType` reference for the empty-body case.
+   * The parsed response data, narrowed by `error === null`. Since 4.0.0 a 2xx
+   * that carries no body under `responseType: 'json'` is a `'parse'` error
+   * rather than a success, so this is not `null` for that case — declare
+   * `responseType: 'none'` on an endpoint that answers with no body. See the
+   * `responseType` reference.
    */
   data: TResponse
 
