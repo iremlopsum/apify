@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] — 2026-09-16
+
+Additive: a `responseType` for endpoints that answer with no body, and a
+diagnostic warning for the empty-body gap it closes. No existing behaviour
+changes; see [MIGRATION.md](./MIGRATION.md#upgrading-to-310).
+
+### Added
+
+- **`responseType: 'none'`** — declares that an endpoint returns no body on
+  success. `data` is `undefined`, no body is read, and any body a successful
+  (2xx) response sends anyway is discarded (its stream is cancelled, so a
+  keep-alive connection is released). This is the accurate declaration for a
+  `204` endpoint, most commonly a `DELETE`. `TResponse` is enforced as
+  `undefined` at the type level — `new Request<P, User>({ responseType:
+  'none' })` fails to compile. A non-2xx response is unaffected: its body is
+  still read and parsed as JSON for `error.body`, since `'none'` describes
+  the success shape only and an error body remains diagnostic. See
+  [MIGRATION.md](./MIGRATION.md#upgrading-to-310).
+- **A one-time warning when a `'json'` request receives an empty body.** The
+  call still resolves as a success with `data: null`, unchanged from every
+  prior release — only a `console.warn` is new, fired once per request name
+  per `createApi` instance, naming the request and pointing at
+  `responseType: 'none'` as the fix. This is transitional: 4.0.0 turns the
+  same case into a `kind: 'parse'` error, and declaring `'none'` now makes
+  that upgrade a no-op.
+
+### Fixed
+
+- **Test coverage added for the shared-signal re-merge under `share: true`
+  combined with signal-replacing middleware.** The behaviour — a middleware
+  that installs its own `ctx.request.signal` still has that signal re-merged
+  with the share refcount controller — shipped in 3.0.0; this release adds
+  the test that pins it, not a behaviour change.
+
 ## [3.0.0] — 2026-09-16
 
 Tightens contracts the types always implied but never enforced — a
