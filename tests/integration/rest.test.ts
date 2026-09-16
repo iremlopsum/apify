@@ -111,6 +111,11 @@ describe('REST — core', () => {
     expect(data).toBeNull()
     expect(error).not.toBeNull()
     expect(error?.status).toBe(404)
+    // /status/404 sends no body at all — real server, real empty response.
+    // This is the Critical 1 regression: the module-private empty-JSON
+    // sentinel must never escape into error.body.
+    expect(error?.body).toBeNull()
+    expect(typeof error?.body).not.toBe('symbol')
   })
 })
 
@@ -457,5 +462,37 @@ describe('baseUrl joining', () => {
     expect(data).toEqual({ message: 'hello' })
     expect(server.callCounts.get('GET /hello')).toBe(1)
     expect(server.callCounts.get('GET //hello')).toBeUndefined()
+  })
+})
+
+describe("responseType 'none'", () => {
+  it("responseType 'none' handles a real 204 end to end", async () => {
+    const api = createApi({
+      baseUrl: server.baseUrl,
+      requests: {
+        del: new Request<Record<string, never>, undefined>({
+          method: 'DELETE', path: '/no-content', responseType: 'none',
+        }),
+      },
+    })
+    const r = await api.del()
+    expect(r.error).toBeNull()
+    expect(r.data).toBeUndefined()
+    expect(r.response?.status).toBe(204)
+  })
+
+  it('a real 204 on a json request still warns and yields null', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const api = createApi({
+      baseUrl: server.baseUrl,
+      requests: {
+        del: new Request<Record<string, never>, unknown>({ method: 'DELETE', path: '/no-content' }),
+      },
+    })
+    const r = await api.del()
+    expect(r.error).toBeNull()
+    expect(r.data).toBeNull()
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
   })
 })

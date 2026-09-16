@@ -53,11 +53,33 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
  * - `'blob'` — calls `response.blob()`, returns a Blob (useful for file downloads)
  * - `'arrayBuffer'` — calls `response.arrayBuffer()`, returns raw binary data
  * - `'formData'` — calls `response.formData()`, returns FormData (rare)
+ * - `'none'` — the endpoint returns no body on **success**; `data` is
+ *   `undefined`. Any body a *successful* (2xx) response sends anyway is
+ *   discarded (and its stream cancelled). This is the accurate declaration
+ *   for a 204 endpoint — declare `TResponse` as `undefined` when using it.
+ *   This only describes the success shape: a **non-2xx** response is still
+ *   read and parsed as JSON for `error.body`, since an error body is
+ *   diagnostic (a message, a code) and worth reading even when the caller
+ *   wants nothing back on success.
+ *
+ *   **This is a convention, not a compile-time guarantee.** `new Request<P,
+ *   User>({ responseType: 'none' })` is not a type error — a type-level
+ *   guard for this was attempted (an overload pair pairing `TResponse` with
+ *   a literal `responseType: 'none'`) and dropped: TypeScript's overload
+ *   resolution falls through to the general `RequestConfig` overload for
+ *   any call the specific one rejects, since that overload has to stay
+ *   general to keep accepting a `RequestConfig`-typed variable, a spread of
+ *   one, or a factory return (all of which previously — and must still —
+ *   compile). A "reject the mismatch" overload with a permissive fallback
+ *   sitting right behind it never actually rejects anything: TS just moves
+ *   on to the fallback and reports no error, so the guard was pure
+ *   ceremony with no effect. Mismatch it and you get a wrong `TResponse`
+ *   silently, same as always — declare it as `undefined`.
  *
  * Set this on the {@link RequestConfig} for a specific endpoint. If omitted,
  * the library defaults to `'json'`.
  */
-export type ResponseType = 'json' | 'text' | 'blob' | 'arrayBuffer' | 'formData'
+export type ResponseType = 'json' | 'text' | 'blob' | 'arrayBuffer' | 'formData' | 'none'
 
 // ---------------------------------------------------------------------------
 // Request Config

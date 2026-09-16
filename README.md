@@ -235,7 +235,7 @@ interface ErrorResult<TResponse> {
 type Result<TResponse> = SuccessResult<TResponse> | ErrorResult<TResponse>
 ```
 
-Check `error` first, then use `data` with confidence: `if (error) return` (or any other narrowing check on `error`) narrows `data` to `TResponse` for the rest of the function -- no `data!` assertion needed. That narrowing is only as accurate as `TResponse` itself, though: an endpoint that can answer 204 or an empty 200 (a `DELETE`, most commonly) still yields `data: null` at runtime on the success branch -- see [Response parsing](#response-parsing) below -- so give that endpoint's `TResponse` a `| null` rather than trusting the narrowing to catch it. Branch on `error.kind` rather than `error.status` — `'network'`, `'abort'` and `'timeout'` all carry `status: 0`, but they call for different handling:
+Check `error` first, then use `data` with confidence: `if (error) return` (or any other narrowing check on `error`) narrows `data` to `TResponse` for the rest of the function -- no `data!` assertion needed. That narrowing is only as accurate as `TResponse` itself, though: an endpoint that answers `204` or an empty `200` (a `DELETE`, most commonly) doesn't return a body at all -- declare it with `responseType: 'none'` and `TResponse` of `undefined`, rather than widening `TResponse` to `| null` -- see [Response parsing](#response-parsing) below. Branch on `error.kind` rather than `error.status` — `'network'`, `'abort'` and `'timeout'` all carry `status: 0`, but they call for different handling:
 
 ```ts
 const { data, error, response, retry } = await api.getUser({ id: '42' })
@@ -269,8 +269,9 @@ if (error) {
 }
 
 // error is null here, so `data` is narrowed to `User` -- no assertion needed
-// (this assumes getUser's TResponse never has to represent an empty body --
-// see the empty-body note above `error.kind` for endpoints that can)
+// (this assumes getUser always answers with a body; an endpoint that
+// doesn't -- a DELETE returning 204, most commonly -- should use
+// responseType: 'none' instead, see the empty-body note above)
 console.log(data.name)
 ```
 
@@ -650,8 +651,40 @@ The `responseType` option on a `Request` determines how the response body is par
 | `'blob'`        | `response.blob()`      | `Blob`         |
 | `'arrayBuffer'` | `response.arrayBuffer()` | `ArrayBuffer` |
 | `'formData'`    | `response.formData()`  | `FormData`     |
+| `'none'`        | *(not read -- stream cancelled)* | `undefined` |
 
-The default is `'json'`. JSON parsing reads the body as text first and then parses, so empty responses (e.g., 204 No Content) return `null` instead of throwing a parse error. That `null` lands in `SuccessResult.data`, whose type is `TResponse`, not `TResponse | null` -- see the note above `error.kind` in [Result](#result) for what that means for an endpoint's own `TResponse`.
+The default is `'json'`. JSON parsing reads the body as text first and then parses, so empty responses (e.g., 204 No Content) return `data: null` at runtime -- even though `SuccessResult.data` is typed `TResponse`, not `TResponse | null`. Hitting this logs a one-time console warning, once per request name per `createApi` instance, naming the request and the fix:
+
+```
+[apify] deleteUser: server returned an empty body for responseType 'json'. This yields data: null today and will be an error in 4.0.0. Declare responseType: 'none' if the endpoint returns no content.
+```
+
+The behavior is unchanged by the warning -- `data: null`, same as always -- but 4.0.0 turns an empty body under `'json'` into a `kind: 'parse'` error, so it's worth fixing now.
+
+**`responseType: 'none'`** is that fix, and the accurate declaration for an endpoint that returns no body on success -- a `204`, or a `200` with an empty body, most commonly a `DELETE`:
+
+```ts
+const deleteUser = new Request<{ id: string }, undefined>({
+  method: 'DELETE',
+  path: '/users/:id',
+  responseType: 'none',
+})
+```
+
+No body is read on a successful (2xx) response: `data` is `undefined`, and any body the server sends anyway is discarded -- its stream is cancelled, so a keep-alive connection is released rather than held open by an unread body. Declare `TResponse` as `undefined` when using `responseType: 'none'` -- but this is a convention, not a compile-time guarantee: `new Request<{ id: string }, User>({ responseType: 'none' })` compiles clean, and if the two disagree, `data` is `undefined` at runtime behind whatever type you declared.
+
+`'none'` only describes the **success** shape. A non-2xx response is still read and parsed as JSON for `error.body` -- an error body is diagnostic (a message, a code) and worth reading even when the caller wants nothing back on success:
+
+```ts
+const { error } = await api.deleteUser({ id: '42' })
+if (error) {
+  // A 409 { "error": "already deleted" } still lands in error.body here,
+  // even though deleteUser declares responseType: 'none'.
+  console.error(error.status, error.body)
+}
+```
+
+(3.0.0's advice for this case was to widen the endpoint's `TResponse` to `| null` instead. That advice is superseded as of 3.1.0 -- `responseType: 'none'` is both more accurate, since it declares "no body" rather than "body or null", and it silences the warning above. See [MIGRATION.md](./MIGRATION.md#upgrading-to-310).)
 
 ### Cancellation
 

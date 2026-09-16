@@ -504,6 +504,58 @@ describe('share', () => {
     expect(b.error?.kind).toBe('timeout')
     expect(Date.now() - started).toBeLessThan(1000)
   })
+
+  // -------------------------------------------------------------------------
+  // The shared controller reaches fetch only through ctx.request.signal. A
+  // middleware that REPLACES that field — the per-attempt-timeout pattern the
+  // library documents — drops it, detaching the real request from the
+  // refcount: every sharer giving up no longer aborts it, and with
+  // retryMiddleware it keeps retrying in the background after all callers have
+  // resolved. create-api.ts re-merges the shared signal in core() for exactly
+  // this reason, and nothing pinned that until now.
+  //
+  // Asserted as state, not as a fetch count: counting retries over time needs
+  // a sleep and flakes. Whether the abort actually reached fetch is decidable
+  // immediately.
+  // -------------------------------------------------------------------------
+  it('keeps the shared controller attached when a middleware replaces the signal', async () => {
+    let fetchAborted = false
+    vi.stubGlobal('fetch', vi.fn((_u: string, init: RequestInit) => new Promise<Response>((_res, rej) => {
+      const s = init.signal as AbortSignal | undefined
+      if (s?.aborted) { fetchAborted = true; rej(s.reason); return }
+      s?.addEventListener('abort', () => { fetchAborted = true; rej(s.reason) }, { once: true })
+    })))
+
+    // Installs its own signal, exactly as a per-attempt timeout would.
+    const replacesSignal: Middleware = (ctx, next) => {
+      ctx.request.signal = new AbortController().signal
+      return next()
+    }
+
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        get: new Request<{ id: string }, { ok: number }>({
+          method: 'GET', path: '/x/:id', share: true, middleware: [replacesSignal],
+        }),
+      },
+    })
+
+    const a = new AbortController()
+    const b = new AbortController()
+    const first = api.get({ id: '1' }, { signal: a.signal })
+    const second = api.get({ id: '1' }, { signal: b.signal })
+    await Promise.resolve()
+
+    a.abort()
+    b.abort()
+    await first.catch(() => {})
+    await second.catch(() => {})
+    await flush()
+
+    // Every sharer gave up, so the shared request must have been aborted.
+    expect(fetchAborted).toBe(true)
+  })
 })
 
 // ---------------------------------------------------------------------------

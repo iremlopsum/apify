@@ -148,6 +148,11 @@ export class Request<TParams extends object, TResponse> {
     // Store the config as-is. No defensive copy is made because RequestConfig
     // contains only simple values and optional arrays — and the contract is
     // that callers define these once and don't mutate them afterward.
+    //
+    // No type-level guard ties `responseType: 'none'` to `TResponse` being
+    // `undefined` — see the JSDoc on `ResponseType` in types.ts for why an
+    // attempted guard was tried and dropped, and for the convention this
+    // relies on instead.
     this.config = config
   }
 
