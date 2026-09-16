@@ -116,3 +116,30 @@ describe('testing builders produce valid union members', () => {
     expectTypeOf(r.error).toEqualTypeOf<ApiError>()
   })
 })
+
+describe("responseType: 'none'", () => {
+  it('gives data type undefined on the success branch', async () => {
+    const noneApi = createApi({
+      baseUrl: '/api',
+      requests: {
+        del: new Request<{ id: string }, undefined>({
+          method: 'DELETE', path: '/u/:id', responseType: 'none',
+        }),
+      },
+    })
+    const r = await noneApi.del({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<undefined>()
+  })
+
+  it('still narrows normally for an ordinary request', async () => {
+    const r = await api.getUser({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+
+  it("refuses responseType 'none' on a request that declares a response body", () => {
+    // @ts-expect-error — 'none' means no body; TResponse must be undefined
+    new Request<{ id: string }, User>({ method: 'DELETE', path: '/u/:id', responseType: 'none' })
+  })
+})
