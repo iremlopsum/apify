@@ -415,6 +415,28 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
     // =========================================================================
     api[name] = (params: object = {}, options: CallOptions = {}): Promise<Result<unknown>> => {
       /**
+       * The path-substituted URL for the attempt in flight, set by Step 4 once
+       * `buildUrl` has succeeded. `buildFailedResult` prefers it over the raw
+       * route template so that a `'middleware'` or abort failure names the
+       * address that was actually requested — which is what every other error
+       * path ('http', 'parse', and fetch's own network errors) already does.
+       *
+       * Stays `undefined` when `buildUrl` itself threw (a nested object in a
+       * query string): there genuinely is no resolved URL in that case, and
+       * the template is the only honest answer.
+       *
+       * Known limitation: a middleware that rewrites `ctx.request.url` is not
+       * reflected here — this is the URL we built, not the one a middleware
+       * substituted afterwards. Still strictly better than the template, and
+       * narrowing it further would mean re-reading the context on every
+       * failure path.
+       *
+       * `retry()` re-enters `execute()`, which re-runs Step 4 and overwrites
+       * this. That is correct: a retry's failure belongs to the retry.
+       */
+      let resolvedUrl: string | undefined
+
+      /**
        * A `Result` for a failure with no `Response` behind it — construction
        * only, no reporting. A function declaration rather than a const so it
        * can name `execute` (as the Result's `retry`) before that binding
@@ -437,7 +459,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           signal,
           fallbackKind,
           request.config.method,
-          joinUrl(baseUrl, request.config.path),
+          resolvedUrl ?? joinUrl(baseUrl, request.config.path),
           params,
           execute
         )
@@ -878,6 +900,8 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             paramsIsSpecialBody ? {} : (params as Record<string, unknown>),
             asQuery
           )
+          // Every failure path from here on can name the real address.
+          resolvedUrl = url
 
           // -----------------------------------------------------------------
           // Step 5: Merge headers from all three layers
