@@ -42,11 +42,16 @@ if (after.error) return
 console.log(after.data) // undefined -- no null-check needed, and none is possible
 ```
 
-`TResponse` is enforced as `undefined` when `responseType: 'none'` is set —
-`new Request<P, User>({ responseType: 'none' })` fails to compile. A non-2xx
-response is unaffected: its body is still read and parsed as JSON for
-`error.body`, since an error body (a message, a code) is worth reading even
-when the caller wants nothing back on success.
+Declare `TResponse` as `undefined` when using `responseType: 'none'` — this
+is a convention, not a compile-time guarantee, and `new Request<P,
+User>({ responseType: 'none' })` compiles without error. A non-2xx response
+is unaffected: its body is still read and parsed as JSON for `error.body`,
+since an error body (a message, a code) is worth reading even when the
+caller wants nothing back on success.
+
+**Known limitation:** the compiler does not check the `responseType: 'none'`
+/ `TResponse` pairing. Mismatch them and `data` is `undefined` at runtime
+behind whatever type you declared, with no compile error to catch it.
 
 ### 2. You may see a one-time console warning
 

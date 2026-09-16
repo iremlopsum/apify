@@ -671,7 +671,7 @@ const deleteUser = new Request<{ id: string }, undefined>({
 })
 ```
 
-No body is read on a successful (2xx) response: `data` is `undefined`, and any body the server sends anyway is discarded -- its stream is cancelled, so a keep-alive connection is released rather than held open by an unread body. This is enforced at the type level: `TResponse` must be `undefined` when `responseType` is `'none'`, so `new Request<{ id: string }, User>({ responseType: 'none' })` fails to compile.
+No body is read on a successful (2xx) response: `data` is `undefined`, and any body the server sends anyway is discarded -- its stream is cancelled, so a keep-alive connection is released rather than held open by an unread body. Declare `TResponse` as `undefined` when using `responseType: 'none'` -- but this is a convention, not a compile-time guarantee: `new Request<{ id: string }, User>({ responseType: 'none' })` compiles clean, and if the two disagree, `data` is `undefined` at runtime behind whatever type you declared.
 
 `'none'` only describes the **success** shape. A non-2xx response is still read and parsed as JSON for `error.body` -- an error body is diagnostic (a message, a code) and worth reading even when the caller wants nothing back on success:
 

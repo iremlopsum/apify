@@ -17,9 +17,13 @@ changes; see [MIGRATION.md](./MIGRATION.md#upgrading-to-310).
   success. `data` is `undefined`, no body is read, and any body a successful
   (2xx) response sends anyway is discarded (its stream is cancelled, so a
   keep-alive connection is released). This is the accurate declaration for a
-  `204` endpoint, most commonly a `DELETE`. `TResponse` is enforced as
-  `undefined` at the type level — `new Request<P, User>({ responseType:
-  'none' })` fails to compile. A non-2xx response is unaffected: its body is
+  `204` endpoint, most commonly a `DELETE`. Declare `TResponse` as
+  `undefined` alongside it — but this is a convention, not a compile-time
+  guarantee: `new Request<P, User>({ responseType: 'none' })` compiles
+  clean, since TypeScript cannot infer a literal `responseType` on the
+  current non-generic constructor to enforce the pairing. Compile-time
+  enforcement is not shipped in 3.1.0; it's being considered for 4.0.0 via a
+  generic factory function. A non-2xx response is unaffected: its body is
   still read and parsed as JSON for `error.body`, since `'none'` describes
   the success shape only and an error body remains diagnostic. See
   [MIGRATION.md](./MIGRATION.md#upgrading-to-310).
