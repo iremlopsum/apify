@@ -963,6 +963,18 @@ if (error) {
 }
 ```
 
+GraphQL's own empty-success rule mirrors the REST client's: a 2xx response carrying neither `data` nor `errors` is `kind: 'parse'`, not a success with `data: null`. This covers an empty body, `{}`, a literal `{"data": null}`, and a non-object JSON root -- anything that reaches a 2xx without a `data` or `errors` key. `error.body` holds the raw response text, not a parsed value:
+
+```ts
+const { error } = await graphql.getCategory({ id: '123' })
+if (error) {
+  console.log(error.kind) // 'parse'
+  console.log(error.body) // raw response text, e.g. '' or '{}'
+}
+```
+
+A `{"data": null, "errors": [...]}` response is unchanged -- it's still `kind: 'http'`, with any partial result in `error.partialData`, since the GraphQL-errors branch runs first. See [MIGRATION.md](./MIGRATION.md#upgrading-to-400).
+
 Operations support `dedupe: true` in the same way `Request` does — see [Auto-cancel via `dedupe`](#auto-cancel-via-dedupe).
 
 ### Middleware
