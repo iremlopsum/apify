@@ -284,7 +284,10 @@ export function createGraphQL(config: any): any {
 
               if (gqlBody?.errors?.length) {
                 const error = new ApiError({
-                  status: 200,
+                  // The response's own status, not a hardcoded 200: a GraphQL
+                  // error can arrive on any 2xx, and every other ApiError in
+                  // both clients reports what the server actually sent.
+                  status: response.status,
                   kind: 'http',
                   statusText: 'GraphQL Error',
                   body: gqlBody.errors,
