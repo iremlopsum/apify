@@ -111,6 +111,11 @@ describe('REST — core', () => {
     expect(data).toBeNull()
     expect(error).not.toBeNull()
     expect(error?.status).toBe(404)
+    // /status/404 sends no body at all — real server, real empty response.
+    // This is the Critical 1 regression: the module-private empty-JSON
+    // sentinel must never escape into error.body.
+    expect(error?.body).toBeNull()
+    expect(typeof error?.body).not.toBe('symbol')
   })
 })
 
