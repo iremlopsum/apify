@@ -235,7 +235,8 @@ interface ErrorResult<TResponse> {
 type Result<TResponse> = SuccessResult<TResponse> | ErrorResult<TResponse>
 ```
 
-Check `error` first, then use `data` with confidence: `if (error) return` (or any other narrowing check on `error`) narrows `data` to `TResponse` for the rest of the function -- no `data!` assertion needed. That narrowing is only as accurate as `TResponse` itself, though: an endpoint that answers `204` or an empty `200` (a `DELETE`, most commonly) doesn't return a body at all -- declare it with `responseType: 'none'` and `TResponse` of `undefined`, rather than widening `TResponse` to `| null` -- see [Response parsing](#response-parsing) below. Branch on `error.kind` rather than `error.status` — `'network'`, `'abort'` and `'timeout'` all carry `status: 0`, but they call for different handling:
+Check `error` first, then use `data` with confidence: `if (error) return` (or any other narrowing check on `error`) narrows `data` to `TResponse` for the rest of the function -- no `data!` assertion needed. That narrowing is only as accurate as `TResponse` itself, though: an endpoint that answers `204` or an empty `200` (a `DELETE`, most commonly) doesn't return a body at all -- declare it with `responseType: 'none'` and `TResponse` of `undefined`, rather than widening `TResponse` to `| null`, which since 4.0.0 does not work
+at all -- an empty body under `'json'` is a `'parse'` error -- see [Response parsing](#response-parsing) below. Branch on `error.kind` rather than `error.status` — `'network'`, `'abort'` and `'timeout'` all carry `status: 0`, but they call for different handling:
 
 ```ts
 const { data, error, response, retry } = await api.getUser({ id: '42' })
@@ -300,14 +301,16 @@ The error object on failed calls. It is not a subclass of `Error` -- it is a str
 | `status`     | `number`  | HTTP status code (e.g., 404, 500). `0` for network errors, aborts, and timeouts. |
 | `kind`       | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse' \| 'middleware'` | What category of failure this is. See below. Required -- constructing an `ApiError` yourself (e.g. in custom middleware) must supply it. |
 | `statusText` | `string`  | HTTP status text (e.g., 'Not Found'). `''` for network errors.    |
-| `body`       | `unknown` | Parsed response body, or the native Error for network failures.   |
+| `body`       | `unknown` | Parsed response body -- but for `'parse'`, either the thrown exception (a malformed body) or the raw response text (an empty body, or a GraphQL response carrying no data). The native Error for network failures. |
 | `headers`    | `Headers` | Response headers. Empty `Headers` for network errors.             |
 | `request`    | `object`  | `{ method, url, params }` -- metadata about the failed request.   |
 | `partialData` | `unknown` (optional) | GraphQL data returned alongside `{ errors }` (partial success). Lives here, not on `Result.data`, so the `Result` stays a clean union: `data` is non-null iff `error` is null. `undefined` for every REST error and for GraphQL responses carrying no data. |
 
 `kind` exists because `status` alone cannot tell some outcomes apart: an HTTP error (`'http'`), a `fetch` failure with no response (`'network'`), a cancellation — your own signal, a dedupe supersede, or a whole-operation deadline firing — (`'abort'`/`'timeout'`), a 2xx (or non-2xx) body that failed to parse (`'parse'`), and a middleware that threw instead of the request itself failing (`'middleware'`) all need different handling, but `'network'`, `'abort'`, and `'timeout'` all carry `status: 0`.
 
-`'parse'` is for a **2xx** response that arrived but whose body failed to parse according to `responseType` -- you get the real `status`, a non-null `response`, and `kind: 'parse'`. A **non-2xx** response with an unparseable body is unaffected and still reports `kind: 'http'` -- the status code is checked before the body is parsed, so a 500 with a broken JSON body is still a 500, and `retryMiddleware`'s default 5xx retry still applies to it.
+`'parse'` is for a **2xx** response that arrived but whose body failed to parse according to `responseType` -- you get the real `status`, a non-null `response`, and `kind: 'parse'`. A **non-2xx** response with an unparseable body is unaffected and still reports `kind: 'http'` -- the status code is checked before the body is parsed, so a 500 with a broken JSON body is still a 500, and `retryMiddleware`'s default 5xx retry still applies to it. An **empty** body under `'json'` is also `'parse'` -- see [Response
+parsing](#response-parsing). GraphQL applies the same rule to a 2xx response
+carrying neither `data` nor `errors`.
 
 `'middleware'` means a middleware threw rather than the request itself failing -- a bug in your own pipeline you'd fix, not a transient failure you'd retry. A middleware that propagates the library's own abort/timeout signal (verbatim, or wrapped one level as `.cause`) is classified `'abort'`/`'timeout'` instead, by provenance rather than by the reason's name -- see [Cancellation](#cancellation).
 
@@ -653,15 +656,24 @@ The `responseType` option on a `Request` determines how the response body is par
 | `'formData'`    | `response.formData()`  | `FormData`     |
 | `'none'`        | *(not read -- stream cancelled)* | `undefined` |
 
-The default is `'json'`. JSON parsing reads the body as text first and then parses, so empty responses (e.g., 204 No Content) return `data: null` at runtime -- even though `SuccessResult.data` is typed `TResponse`, not `TResponse | null`. Hitting this logs a one-time console warning, once per request name per `createApi` instance, naming the request and the fix:
+The default is `'json'`. An **empty body under `'json'` is an error**, not a
+`null`: you declared JSON and the server sent none, so there is no value that
+could honestly satisfy `TResponse`. You get `kind: 'parse'` with the
+response's own status (a `204` reports `204`), a non-null `response`, and the
+raw body text -- always `''` for this case -- in `error.body`:
 
+```ts
+const { data, error } = await api.deleteUser({ id: '42' })
+// 204 No Content, responseType left at the 'json' default:
+// error.kind === 'parse', error.status === 204, data === null
 ```
-[apify] deleteUser: server returned an empty body for responseType 'json'. This yields data: null today and will be an error in 4.0.0. Declare responseType: 'none' if the endpoint returns no content.
-```
 
-The behavior is unchanged by the warning -- `data: null`, same as always -- but 4.0.0 turns an empty body under `'json'` into a `kind: 'parse'` error, so it's worth fixing now.
+A literal `null` body is **not** empty -- `JSON.parse("null")` is valid JSON,
+and that response still succeeds with `data: null`.
 
-**`responseType: 'none'`** is that fix, and the accurate declaration for an endpoint that returns no body on success -- a `204`, or a `200` with an empty body, most commonly a `DELETE`:
+**`responseType: 'none'`** is the declaration for an endpoint that returns no
+body on success -- a `204`, or a `200` with an empty body, most commonly a
+`DELETE`:
 
 ```ts
 const deleteUser = new Request<{ id: string }, undefined>({
@@ -684,7 +696,11 @@ if (error) {
 }
 ```
 
-(3.0.0's advice for this case was to widen the endpoint's `TResponse` to `| null` instead. That advice is superseded as of 3.1.0 -- `responseType: 'none'` is both more accurate, since it declares "no body" rather than "body or null", and it silences the warning above. See [MIGRATION.md](./MIGRATION.md#upgrading-to-310).)
+(3.0.0's advice for this case was to widen the endpoint's `TResponse` to
+`| null`. That advice is superseded: `responseType: 'none'` declares "no body"
+rather than "body or null", and since 4.0.0 the `| null` workaround no longer
+works at all -- the empty body is an error before `TResponse` is ever
+consulted. See [MIGRATION.md](./MIGRATION.md#upgrading-to-400).)
 
 ### Cancellation
 
@@ -946,6 +962,18 @@ if (error) {
   console.log(error.partialData)   // whatever `data` the server sent alongside the errors, or undefined
 }
 ```
+
+GraphQL's own empty-success rule mirrors the REST client's: a 2xx response carrying neither `data` nor `errors` is `kind: 'parse'`, not a success with `data: null`. This covers an empty body, `{}`, a literal `{"data": null}`, and a non-object JSON root -- anything that reaches a 2xx without a `data` or `errors` key. `error.body` holds the raw response text, not a parsed value:
+
+```ts
+const { error } = await graphql.getCategory({ id: '123' })
+if (error) {
+  console.log(error.kind) // 'parse'
+  console.log(error.body) // raw response text, e.g. '' or '{}'
+}
+```
+
+A `{"data": null, "errors": [...]}` response is unchanged -- it's still `kind: 'http'`, with any partial result in `error.partialData`, since the GraphQL-errors branch runs first. See [MIGRATION.md](./MIGRATION.md#upgrading-to-400).
 
 Operations support `dedupe: true` in the same way `Request` does — see [Auto-cancel via `dedupe`](#auto-cancel-via-dedupe).
 

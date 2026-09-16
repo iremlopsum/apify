@@ -7,6 +7,101 @@ For the full record of what changed in each release, see [CHANGELOG.md](./CHANGE
 
 ---
 
+## Upgrading to 4.0.0
+
+One rule changes: **a success must carry data.** If you declared
+`responseType: 'none'` on the endpoints 3.1.0's warning named, this release is
+a no-op for you.
+
+### 1. An empty body under `responseType: 'json'` is now an error
+
+```ts
+// A DELETE that answers 204 No Content, responseType left at the default:
+
+// 3.x
+const { data, error } = await api.deleteUser({ id: '42' })
+// error === null, data === null  -- and `data.deleted` compiles, then throws
+
+// 4.0.0
+const { data, error } = await api.deleteUser({ id: '42' })
+// error.kind === 'parse', error.status === 204, data === null
+```
+
+This is what makes `SuccessResult.data: TResponse` true. 3.0.0 made `Result<T>`
+a discriminated union so `if (error) return` narrows `data` — but an empty body
+produced `null` behind a non-null `TResponse`, so the narrowing was a lie for
+exactly the endpoints least likely to be checked.
+
+**The fix, on every endpoint that answers with no body:**
+
+```ts
+const deleteUser = new Request<{ id: string }, undefined>({
+  method: 'DELETE',
+  path: '/users/:id',
+  responseType: 'none',   // available since 3.1.0
+})
+```
+
+`'none'` reads no body on success, so it never reaches the rule. Non-2xx
+responses are unaffected — their body is still read and parsed for
+`error.body`, on `'none'` as on `'json'`.
+
+**There is no 204 special case.** One rule — declared JSON, got no JSON —
+applies at every status. A `200` with an empty body behaves identically to a
+`204`.
+
+**A literal `null` body still succeeds.** `JSON.parse("null")` is valid JSON, so
+a server that sends the body `null` is sending data. Only a zero-length body is
+an error.
+
+**Which endpoints are affected?** 3.1.0 told you, by name, once per request:
+any endpoint that logged `[apify] <name>: server returned an empty body`. If you
+are coming from 3.1.0 and never saw that warning in development or staging, no
+endpoint of yours hits this path.
+
+### 2. A GraphQL response with no `data` is now an error
+
+The same rule, at the GraphQL client's own seam. A 2xx response carrying
+neither `data` nor `errors` used to resolve as a success with `data: null`:
+
+```ts
+// Server returns 200 with body {}  (or "", or {"data": null})
+
+// 3.x
+const { data, error } = await client.getUser({ id: '1' })
+// error === null, data === null
+
+// 4.0.0
+const { data, error } = await client.getUser({ id: '1' })
+// error.kind === 'parse', error.status === 200, error.body === '{}'
+```
+
+`error.body` carries the raw response text, which is the only useful answer to
+"then what did the server send?".
+
+**GraphQL errors are unchanged.** A `{"data": null, "errors": [...]}` response —
+the legitimate shape for a field error — still reports `kind: 'http'` with the
+errors in `error.body` and any partial result in `error.partialData`, exactly as
+before. Only a response reporting *no* errors and *no* data is affected, which
+the GraphQL over HTTP spec does not permit.
+
+### 3. The one-time empty-body warning is gone
+
+3.1.0's `console.warn` has served its purpose and is removed. Nothing replaces
+it — the condition it warned about is now reported as an error through the
+normal `Result`.
+
+### Nothing to do if…
+
+- every endpoint that returns no body already declares `responseType: 'none'`, or
+- you never saw 3.1.0's empty-body warning, or
+- your GraphQL server always answers with `data` or `errors` (i.e. it is
+  spec-compliant).
+
+In those cases 4.0.0 is a drop-in upgrade.
+
+---
+
 ## Upgrading to 3.1.0
 
 3.1.0 is additive — no existing behaviour changed, and no action is required
@@ -69,12 +164,11 @@ request is one of the empty-body endpoints described above, and declaring
 `responseType: 'none'` on it both makes `TResponse` accurate and silences the
 warning.
 
-### 3. Coming in 4.0.0
+### 3. 4.0.0: the empty-body rule (shipped)
 
-An empty body under `responseType: 'json'` becomes a `kind: 'parse'` error
-instead of `data: null`. Declaring `responseType: 'none'` now, on every
-endpoint the warning names, makes that upgrade a no-op for you — the endpoint
-no longer goes through the `'json'` empty-body path at all.
+This shipped. See [Upgrading to 4.0.0](#upgrading-to-400) — an empty body under
+`responseType: 'json'` is now a `kind: 'parse'` error, and declaring
+`responseType: 'none'` makes that upgrade a no-op.
 
 ## Upgrading to 3.0.0
 

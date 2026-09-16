@@ -1,7 +1,7 @@
 # Empty response bodies, and the last untested guard — Design
 
 **Date:** 2026-09-16
-**Status:** approved, ready for planning
+**Status:** 3.1.0 shipped 2026-09-16; 4.0.0 scope settled in Section 4, ready for planning
 **Ships as:** 3.1.0 (additive) then 4.0.0 (the break)
 
 ---
@@ -191,3 +191,117 @@ The change turns a success into a failure: a `json` request against a 204 endpoi
 The deciding factor is the caret range, not the label. Anyone on `^3.0.0` picks up a `3.2.0` **automatically** — an install on a Tuesday, CI still green because their tests mock `fetch`, and their DELETE endpoints fail in production without anyone having chosen it or read anything. A major keeps them on 3.x until they deliberately upgrade, which is when they read the migration guide.
 
 That gate is also what makes 3.1.0's warning worth building: it exists to reach people who do not read changelogs, and it only pays off if there is a step between *you were warned* and *you are broken*.
+
+---
+
+## Section 4 — 4.0.0's scope, settled
+
+Added 2026-09-16, after 3.1.0 shipped. Section 1's table and the seam in
+Section 2 stand unchanged; this section resolves the two questions those
+sections deliberately left to the 4.0.0 work, and fixes the file list.
+
+### The REST seam
+
+Exactly as Section 2 specifies. `src/create-api.ts`'s success path:
+
+```ts
+// 3.1.0                                  // 4.0.0
+if (data === EMPTY_JSON_BODY) {           if (data === EMPTY_JSON_BODY) {
+  warnEmptyBodyOnce(name)                   const error = new ApiError({ kind: 'parse', ... })
+  data = null                               return createErrorResult(error, response, execute)
+}                                         }
+```
+
+`status` is the real response status (a 204 reports 204, not 0) and
+`response` is non-null, matching what 3.0.0 established for every other
+`'parse'` error. The warn-once block — `emptyBodyWarned` and
+`warnEmptyBodyOnce` — is deleted in the same change; its success condition
+no longer exists.
+
+The **non-2xx** path is untouched. It already normalizes the sentinel to
+`null` for `error.body`, and `'json'`/`'none'` both keep reading an error
+body: `'none'` describes the success shape only, and an error body stays
+diagnostic. 4.0.0 changes what a *success* means, nothing else.
+
+### The GraphQL rule: no `data` is a `'parse'` error
+
+`src/graphql.ts` gets the rule, not an exemption. Deciding this exposed
+something Section 2 missed: the GraphQL success path ends at
+
+```ts
+return createSuccessResult(gqlBody?.data ?? null, response, execute)
+```
+
+which produces `data: null` from **two** inputs, not one — an empty body
+(`text ? JSON.parse(text) : null`, the case Section 2 names), and a
+well-formed `{}` or `{"data": null}` carrying no `errors`. Fixing only the
+first would leave the identical lie live on the other branch of the same
+expression, in the same function. That is the REST/GraphQL inconsistency
+the 3.0.0 review kept surfacing, so the rule covers both:
+
+```ts
+// 4.0.0 — src/graphql.ts, replacing the `?? null` return
+if (gqlBody?.data == null) {
+  const error = new ApiError({
+    kind: 'parse', status: response.status, statusText: response.statusText,
+    body: <the raw text>, headers: response.headers,
+    request: { method: 'POST', url: ctx.request.url, params: variables },
+  })
+  return createErrorResult(error, response, execute)
+}
+return createSuccessResult(gqlBody.data, response, execute)
+```
+
+This is not scope creep past "one seam flip" — it is the same claim
+(`data: TData` is true) enforced at the one place the GraphQL client can
+break it. Three notes on the shape:
+
+- `gqlBody?.data == null` is the whole condition. An `in` check adds
+  nothing: a missing key reads as `undefined`, which `== null` already
+  catches. A non-object body (`42`, `null`, `[1,2]` — all valid JSON) also
+  lands here via optional chaining, which is correct; the GraphQL over HTTP
+  spec requires a map at the root.
+- **A `"data": null` reaching this line is a protocol violation, not a
+  field error.** `"data": null` is legitimate *with* `errors`, and the
+  `gqlBody?.errors?.length` branch directly above already routes that to
+  an error Result carrying `partialData`. Control only reaches here when
+  no errors were reported.
+- `error.body` carries the raw response text, not the parse exception —
+  there is no exception. It is the diagnostic that answers "then what did
+  the server send?", which for `{}` or an empty string is the only useful
+  thing to report.
+
+GraphQL's **non-2xx** path is untouched for the same reason as REST's: its
+`text ? JSON.parse(text) : null` fills `error.body` on a failure that is
+already an error, so no success is being misreported.
+
+There is no `responseType` on a GraphQL operation and none is added. A
+GraphQL response that genuinely carries no data has no valid shape to
+declare — unlike REST's 204, which does.
+
+### The type-level guard is not in 4.0.0
+
+The `responseType: 'none'` / `TResponse` pairing stays a documented
+convention. A generic factory (`defineRequest()` or similar) is **purely
+additive** — it introduces a second way to construct a `Request` without
+changing the existing one — so it needs no major-version gate and gains
+nothing from riding along. It ships in a later minor if it ships at all.
+
+CHANGELOG 3.1.0 says compile-time enforcement is "being considered for
+4.0.0". That line is now wrong and is corrected as part of this release.
+
+### Files 4.0.0 touches
+
+| file | change |
+|---|---|
+| `src/create-api.ts` | flip the seam; delete `emptyBodyWarned` + `warnEmptyBodyOnce`; update the `EMPTY_JSON_BODY` and seam comments, which describe 4.0.0 in the future tense |
+| `src/graphql.ts` | replace the `?? null` success return with the no-`data` rule |
+| `tests/empty-body.test.ts` | the five warning tests lose their subject; the success-path tests invert to assert a `'parse'` error. The four non-2xx tests stay as-is — that path does not change |
+| `tests/create-graphql.test.ts` | new coverage for all three no-`data` shapes |
+| `tests/integration/` | a real 204 under `'json'` (the server's `DELETE /no-content` already exists) and a real GraphQL no-`data` response, which needs a new branch in `tests/integration/server.ts` |
+| `tests/types.test-d.ts` | unchanged — no public type moves |
+| `README.md`, `MIGRATION.md`, `CHANGELOG.md` | the rule, the 4.0.0 migration entry, and the correction above |
+| `package.json` | 4.0.0 |
+
+`src/types.ts` does not change: `ResponseType` already has `'none'`, and
+`'parse'` is already in `ApiErrorKind`. 4.0.0 adds no new public type.
