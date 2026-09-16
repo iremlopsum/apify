@@ -169,3 +169,21 @@ This closes the last of the three unpinned guards the 3.0.0 whole-branch review 
 5. **4.0.0, separately:** flip the seam, delete the warning, migration entry.
 
 Steps 1-4 are one plan. Step 5 is its own, after 3.1.0 has been out long enough to be worth having shipped.
+
+### What persists, and what is transitional
+
+Only one of the three things 3.1.0 introduces is removed in 4.0.0. Stated explicitly because "delete the warning" has already been misread once as tearing out the whole mechanism:
+
+| introduced in 3.1.0 | fate in 4.0.0 | why |
+|---|---|---|
+| `responseType: 'none'` | **permanent** | It is the actual fix, and the thing 4.0.0's migration guide points consumers at. Removing it would leave them nowhere to go |
+| `EMPTY_JSON_BODY` detection | **permanent** | 4.0.0's error is built on it; the seam flip changes what is done with it, not whether it is detected |
+| the one-time `console.warn` | **deleted** | Its success condition is being removed. Surviving into 4.0.0 would mean warning about something that already throws |
+
+### Why 4.0.0 and not a minor
+
+The change turns a success into a failure: a `json` request against a 204 endpoint goes from `{ data: null, error: null }` to `{ data: null, error: ApiError }`, so consumer code that currently falls through `if (error) return` starts returning early.
+
+The deciding factor is the caret range, not the label. Anyone on `^3.0.0` picks up a `3.2.0` **automatically** — an install on a Tuesday, CI still green because their tests mock `fetch`, and their DELETE endpoints fail in production without anyone having chosen it or read anything. A major keeps them on 3.x until they deliberately upgrade, which is when they read the migration guide.
+
+That gate is also what makes 3.1.0's warning worth building: it exists to reach people who do not read changelogs, and it only pays off if there is a step between *you were warned* and *you are broken*.
