@@ -415,28 +415,6 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
     // =========================================================================
     api[name] = (params: object = {}, options: CallOptions = {}): Promise<Result<unknown>> => {
       /**
-       * The path-substituted URL for the attempt in flight, set by Step 4 once
-       * `buildUrl` has succeeded. `buildFailedResult` prefers it over the raw
-       * route template so that a `'middleware'` or abort failure names the
-       * address that was actually requested — which is what every other error
-       * path ('http', 'parse', and fetch's own network errors) already does.
-       *
-       * Stays `undefined` when `buildUrl` itself threw (a nested object in a
-       * query string): there genuinely is no resolved URL in that case, and
-       * the template is the only honest answer.
-       *
-       * Known limitation: a middleware that rewrites `ctx.request.url` is not
-       * reflected here — this is the URL we built, not the one a middleware
-       * substituted afterwards. Still strictly better than the template, and
-       * narrowing it further would mean re-reading the context on every
-       * failure path.
-       *
-       * `retry()` re-enters `execute()`, which re-runs Step 4 and overwrites
-       * this. That is correct: a retry's failure belongs to the retry.
-       */
-      let resolvedUrl: string | undefined
-
-      /**
        * A `Result` for a failure with no `Response` behind it — construction
        * only, no reporting. A function declaration rather than a const so it
        * can name `execute` (as the Result's `retry`) before that binding
@@ -448,18 +426,31 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * tracker marks abandonment explicitly, `onAbort` reports every time —
        * but keeping construction free of the side effect is what let the
        * reporting decision move out of this function in the first place.
+       *
+       * `url`, when supplied, is the resolved (path-substituted) URL to
+       * report instead of the raw route template. Only the two 'middleware'
+       * call sites in `execute()` pass it, from `context.request.url` — that
+       * reflects a middleware which rewrote the URL, which a value captured
+       * earlier could not. The 'abort' and setup-error call sites don't pass
+       * it and fall back to the template: a `share: true` joiner giving up
+       * never runs its own `buildUrl` (only the shareKey's initiating caller
+       * does — see `ShareTracker`'s `exec`), so there is no resolved URL to
+       * give it that's consistent with what the initiator would report for
+       * the same operation; and a setup error means `buildUrl` itself is
+       * what threw, so there is no resolved URL at all.
        */
       function buildFailedResult(
         reason: unknown,
         signal: AbortSignal | undefined,
-        fallbackKind: 'abort' | 'network' | 'middleware'
+        fallbackKind: 'abort' | 'network' | 'middleware',
+        url?: string
       ): ErrorResult<unknown> {
         return syntheticResult(
           reason,
           signal,
           fallbackKind,
           request.config.method,
-          resolvedUrl ?? joinUrl(baseUrl, request.config.path),
+          url ?? joinUrl(baseUrl, request.config.path),
           params,
           execute
         )
@@ -900,8 +891,6 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             paramsIsSpecialBody ? {} : (params as Record<string, unknown>),
             asQuery
           )
-          // Every failure path from here on can name the real address.
-          resolvedUrl = url
 
           // -----------------------------------------------------------------
           // Step 5: Merge headers from all three layers
@@ -994,10 +983,12 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           let resultPromise: Promise<Result<unknown>>
           try {
             resultPromise = composed(context).catch(
-              (err: unknown) => buildFailedResult(err, context.request.signal, 'middleware')
+              (err: unknown) => buildFailedResult(err, context.request.signal, 'middleware', context.request.url)
             )
           } catch (err) {
-            resultPromise = Promise.resolve(buildFailedResult(err, context.request.signal, 'middleware'))
+            resultPromise = Promise.resolve(
+              buildFailedResult(err, context.request.signal, 'middleware', context.request.url)
+            )
           }
 
           // -----------------------------------------------------------------

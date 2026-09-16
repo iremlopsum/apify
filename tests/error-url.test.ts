@@ -60,3 +60,36 @@ describe('error.request.url when the URL could never be built', () => {
     expect(r.error?.request.url).toBe('https://api.test/search')
   })
 })
+
+describe('share: true callers agree with each other', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('a joiner and the initiator report the same URL when both give up', async () => {
+    // Pinned as agreement, not as a literal value: this must hold whether both
+    // report the template (today) or both report the resolved URL (if the
+    // abort path is ever fixed properly, which needs a ShareTracker change).
+    // It fails if only one of the two learns the real URL.
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(r =>
+      setTimeout(() => r(new Response('{}', { status: 200 })), 300)
+    )))
+    const shared = createApi({
+      baseUrl: 'https://api.test',
+      requests: {
+        getUser: new Request<{ id: string }, unknown>({ method: 'GET', path: '/users/:id', share: true }),
+      },
+    })
+    const a = new AbortController()
+    const b = new AbortController()
+    const initiator = shared.getUser({ id: '42' }, { signal: a.signal })
+    await new Promise(r => setTimeout(r, 20))
+    const joiner = shared.getUser({ id: '42' }, { signal: b.signal })
+    await new Promise(r => setTimeout(r, 20))
+    b.abort()
+    const jr = await joiner
+    a.abort()
+    const ir = await initiator
+    expect(jr.error?.kind).toBe('abort')
+    expect(ir.error?.kind).toBe('abort')
+    expect(jr.error?.request.url).toBe(ir.error?.request.url)
+  })
+})
