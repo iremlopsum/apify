@@ -31,7 +31,7 @@ changes; see [MIGRATION.md](./MIGRATION.md#upgrading-to-310).
   same case into a `kind: 'parse'` error, and declaring `'none'` now makes
   that upgrade a no-op.
 
-### Fixed
+### Internal
 
 - **Test coverage added for the shared-signal re-merge under `share: true`
   combined with signal-replacing middleware.** The behaviour — a middleware

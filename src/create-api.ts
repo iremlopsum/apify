@@ -135,7 +135,9 @@ type Api<TRequests extends Record<string, Request<any, any>>> = {
  * one sending nothing at all. Module-private — it never reaches the barrel.
  *
  * 3.1.0 warns and substitutes `null`. 4.0.0 turns it into a `'parse'` error;
- * that is a two-line change at the success-path seam and nothing else.
+ * that is a three-line change at the success-path seam (see THE SEAM, below),
+ * plus deleting the warn-once block. Nothing else about empty-body handling
+ * moves.
  */
 const EMPTY_JSON_BODY: unique symbol = Symbol('apify.emptyJsonBody')
 
@@ -397,6 +399,11 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
   // Transitional: 4.0.0 makes an empty JSON body an error and this goes with
   // it. It exists because the consumers most at risk are the ones who upgrade
   // without reading a changelog, and it names the exact Request to change.
+  //
+  // Bounded, like dedupeTracker/shareTracker: only ever added to, but keys
+  // come from `name` in the static `Object.entries(requests)` record, so it
+  // is capped at this instance's configured endpoint count — never one entry
+  // per call.
   // ---------------------------------------------------------------------------
   const emptyBodyWarned = new Set<string>()
 
