@@ -5,6 +5,130 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] — 2026-09-16
+
+Tightens contracts the types always implied but never enforced — a
+discriminated `Result`, non-interchangeable `Request` generics, a required
+`ApiError.kind` — plus corrected error classification for parse failures and
+aborts, and preserved GraphQL partial data. Nine breaking changes; see
+[MIGRATION.md](./MIGRATION.md#upgrading-to-300) for upgrade instructions and
+worked before/after examples for every one of them.
+
+### Added
+
+- **`ApiError.partialData`** — GraphQL partial-success data (a nullable field
+  errored while the rest of the query resolved) is preserved instead of
+  discarded. It lives on `error.partialData`, not `Result.data`, so the
+  `Result` union's narrowing (see Changed) stays intact: a non-null `error`
+  means `data` is null, and a null `error` means the call succeeded (see
+  MIGRATION.md's empty-body caveat for the one case where `data` is null
+  too).
+- **`SuccessResult<T>` and `ErrorResult<T>`** exported as types — the two
+  branches of the `Result<T>` union.
+
+### Changed
+
+- **BREAKING: `Result<T>` is now a discriminated union**,
+  `SuccessResult<TResponse> | ErrorResult<TResponse>`, not an interface with
+  independently-nullable fields. `if (error) return` now narrows `data` to
+  `TResponse` — `data` was never actually narrowed before, so the README's own
+  headline example (`console.log(data.name)` with no assertion, right after
+  checking `error`) has **not** compiled since 2.0.0 without a `data!`
+  assertion or a redundant null check at every call site. Middleware that
+  synthesises a success `Result` must supply a non-null `Response`. See
+  [MIGRATION.md](./MIGRATION.md#upgrading-to-300).
+- **BREAKING: `Request<TParams, TResponse>` generics are no longer
+  interchangeable.** Phantom fields make the class's own generics
+  load-bearing, so `Request<{ id }, User>` no longer silently accepts a
+  `Request<{ slug }, Post>` wherever one is expected. Code relying on the old
+  (always-incorrect) assignability now fails to compile. See
+  [MIGRATION.md](./MIGRATION.md#upgrading-to-300).
+- **BREAKING: `ApiError.kind` is required, and `ApiErrorKind` gained
+  `'middleware'`.** Every construction site inside the library already set
+  it; this tightens the type to match. Custom middleware constructing an
+  `ApiError` must now supply `kind`, and an exhaustive `switch (error.kind)`
+  needs a new arm. See [MIGRATION.md](./MIGRATION.md#upgrading-to-300).
+- **BREAKING: A 2xx response with an unparseable body now reports the real
+  `status`, a non-null `response`, and `kind: 'parse'`** — previously
+  `status: 0`, `response: null`, `kind: 'network'`, indistinguishable from
+  being offline. Non-2xx responses are unaffected: `!response.ok` is checked
+  before the body is parsed, so a 5xx with an unparseable body still reports
+  `kind: 'http'`, and `retryMiddleware`'s default 5xx retry behaviour has not
+  changed. See [MIGRATION.md](./MIGRATION.md#upgrading-to-300).
+- **BREAKING: A throwing middleware now returns a `Result` with
+  `kind: 'middleware'` instead of rejecting.** `composeMiddleware` has no
+  guard against a middleware throwing, so this broke the library's
+  "never throws" contract on the one path most likely to have a bug — your
+  own middleware. A `try`/`catch` placed around an API call to catch this can
+  be deleted. See [MIGRATION.md](./MIGRATION.md#upgrading-to-300).
+- **BREAKING: `onError` no longer fires for `error.kind === 'abort'`.** A
+  cancellation the library caused deliberately — your own `AbortSignal`
+  firing, or a `dedupe` supersede — is no longer reported as an error;
+  `'timeout'` still fires, since a missed deadline is a genuine failure.
+  Hand-rolled `AbortError` filtering in an `onError` handler can be deleted.
+  See [MIGRATION.md](./MIGRATION.md#upgrading-to-300).
+- **BREAKING: Aborts are classified by signal provenance, not by the thrown
+  reason's name.** A caller's custom abort reason
+  (`controller.abort(new Error(...))`, or a string) is now `kind: 'abort'`
+  instead of `'network'`, and so is silent instead of reported. A middleware
+  propagating the library's own abort reason — verbatim, or wrapped one level
+  as `.cause` (the shape `node:timers/promises` and most abortable helpers
+  produce) — is now `'abort'`/`'timeout'` and silent, instead of
+  `'middleware'` and reported. A middleware throwing its own, unrelated
+  `AbortError`-named failure now correctly reports as `'middleware'`, instead
+  of being silently swallowed as `'abort'`. See
+  [MIGRATION.md](./MIGRATION.md#upgrading-to-300).
+- **BREAKING: Cancelling during the response body download — for both 2xx
+  and non-2xx responses — is now classified as the cancellation**
+  (`kind: 'abort'`/`'timeout'`, `status: 0`, `response: null`), not by
+  whichever HTTP stage it happened to interrupt (previously `kind: 'parse'`/
+  `status: 200` for a 2xx, or `kind: 'http'`/the real status/`body: null` for
+  a non-2xx — both reported). `retryMiddleware`'s default `retryOn` (and any
+  custom `status >= 500` predicate) no longer retries a cancellation caught
+  in this window, since `status` is now `0` — strictly correct, but
+  observably fewer requests. See
+  [MIGRATION.md](./MIGRATION.md#upgrading-to-300).
+
+### Fixed
+
+- **Abort/timeout classification no longer hangs or crashes on a hostile
+  abort reason.** A caller-supplied `signal.reason` (or a value a middleware
+  throws) is arbitrary — a revoked `Proxy`, a reactive-framework wrapper, or
+  a class with a lazy `get name()`/`get cause()` can throw on property
+  access. Reading `.name` (to detect `AbortError`/`TimeoutError`) or `.cause`
+  (to detect a wrapped propagated reason) is now guarded; a throwing getter
+  is treated as "doesn't match" instead of escaping the last-resort handler
+  that exists specifically to keep the library's "never throws" contract
+  intact. Previously this could leave a `share: true` caller's promise
+  permanently pending, or reject an unshared call outright.
+- **A shared (`share: true`) request whose signal a middleware replaces is
+  still cancelled when every sharer gives up.** A middleware that installs
+  its own `ctx.request.signal` (a deadline, a circuit breaker) used to drop
+  the shared refcounted signal entirely — every sharer releasing no longer
+  aborted the real request, so the socket stayed open with nobody waiting on
+  it, and with `retryMiddleware` it kept retrying in the background after
+  every caller had already resolved. The shared signal is now re-merged in
+  whenever a middleware replaces it, the same way dedupe's registration
+  already had to.
+- **`result.retry()` no longer rejects when called with an unexpected call
+  shape.** `retry` is handed out directly as a plain function, so
+  `arr.map(result.retry)` (which passes the array index as a second
+  argument) or `result.retry(undefined, 0)` threw a `TypeError` out of the
+  one path that must always produce a `Result`. All call shapes now return a
+  `Result`.
+- **A shared (`share: true`) call no longer re-reports a give-up that lands
+  after the operation has already settled.** The realistic trigger is a
+  consumer's `onError` handler reacting to a shared failure by aborting
+  another of its own still-outstanding callers with a hand-crafted
+  `TimeoutError`-shaped reason (`ac.abort(new DOMException('t',
+  'TimeoutError'))`) — to give up on the rest of a batch, say. That caller's
+  own give-up listener was technically still armed even though the operation
+  already had its `Result`, and would otherwise report a second, misleading
+  failure for an operation that already reported once. (A plain
+  `AbortError`-shaped give-up doesn't need this fix to avoid a double report —
+  `onError` never fires for `error.kind === 'abort'` at all — so the fix
+  matters specifically for a give-up whose reason survives that filter.)
+
 ## [2.2.1] — 2026-09-14
 
 Five fixes closing findings that were identified and deliberately parked
@@ -331,6 +455,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[3.0.0]: https://github.com/iremlopsum/apify/compare/v2.2.1...v3.0.0
 [2.2.0]: https://github.com/iremlopsum/apify/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/iremlopsum/apify/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/iremlopsum/apify/compare/v1.0.0...v2.0.0

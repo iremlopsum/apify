@@ -3,6 +3,8 @@ import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
 import type { MiddlewareContext, CallOptions } from '../src/types.js'
 import type { ApiErrorKind } from '../src/types.js'
+import { successResult, errorResult } from '../src/testing.js'
+import type { ApiError } from '../src/types.js'
 
 interface User { id: string; name: string }
 
@@ -52,6 +54,65 @@ describe('public type surface', () => {
 
 describe('ApiErrorKind', () => {
   it('covers every category the library can produce', () => {
-    expectTypeOf<ApiErrorKind>().toEqualTypeOf<'http' | 'network' | 'abort' | 'timeout' | 'parse'>()
+    expectTypeOf<ApiErrorKind>().toEqualTypeOf<
+      'http' | 'network' | 'abort' | 'timeout' | 'parse' | 'middleware'
+    >()
+  })
+})
+
+describe('Result narrows like a discriminated union', () => {
+  it('narrows data after an early return on error', async () => {
+    const { data, error } = await api.getUser({ id: '1' })
+    if (error) return
+    expectTypeOf(data).toEqualTypeOf<User>()
+  })
+
+  it('narrows in both directions on an explicit null check', async () => {
+    const r = await api.getUser({ id: '1' })
+    if (r.error === null) expectTypeOf(r.data).toEqualTypeOf<User>()
+    else expectTypeOf(r.data).toEqualTypeOf<null>()
+  })
+
+  it('gives a non-null Response on the success branch', async () => {
+    const r = await api.getUser({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.response).toEqualTypeOf<Response>()
+  })
+})
+
+describe('Request generics are not structurally interchangeable', () => {
+  it('rejects a Request with different generics', () => {
+    interface Post { slug: string }
+    const getPost = new Request<{ slug: string }, Post>({ method: 'GET', path: '/posts/:slug' })
+    // @ts-expect-error — a Post request is not a User request
+    const wrong: Request<{ id: string }, User> = getPost
+    void wrong
+  })
+
+  it('still infers params and response through createApi', async () => {
+    const r = await api.getUser({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+})
+
+// These assert the builders' PUBLIC contract — that `Result<T>` narrowing
+// still works for consumers. The internal migration to `SuccessResult<T>` /
+// `ErrorResult<T>` locals is enforced by `npm run typecheck`, not by these.
+describe('testing builders produce valid union members', () => {
+  it('successResult is a SuccessResult', () => {
+    const r = successResult({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<{ id: string }>()
+    expectTypeOf(r.response).toEqualTypeOf<Response>()
+  })
+
+  it('errorResult is an ErrorResult', () => {
+    const r = errorResult<{ id: string }>(500)
+    // errorResult()'s declared return type stays `Result<T>` (a union), so —
+    // symmetric with the guard clause above — narrow before asserting.
+    if (!r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<null>()
+    expectTypeOf(r.error).toEqualTypeOf<ApiError>()
   })
 })

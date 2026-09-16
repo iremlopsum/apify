@@ -19,6 +19,7 @@ describe('ApiError', () => {
     // Simulates a typical 404 response — verifies all fields are stored correctly
     const error = new ApiError({
       status: 404,
+      kind: 'http',
       statusText: 'Not Found',
       body: { message: 'Resource not found' },
       headers: new Headers({ 'x-req-id': '123' }),
@@ -40,6 +41,7 @@ describe('ApiError', () => {
     // so status is 0 and statusText is '' by convention
     const error = new ApiError({
       status: 0,
+      kind: 'network',
       statusText: '',
       body: new Error('Failed to fetch'),
       headers: new Headers(),
@@ -73,6 +75,7 @@ describe('createErrorResult', () => {
     const mockResponse = new Response('Not Found', { status: 404 })
     const error = new ApiError({
       status: 404,
+      kind: 'http',
       statusText: 'Not Found',
       body: 'Not Found',
       headers: new Headers(),
@@ -93,6 +96,7 @@ describe('createNetworkErrorResult', () => {
     // This happens when fetch itself throws (DNS failure, offline, abort, etc.)
     const error = new ApiError({
       status: 0,
+      kind: 'network',
       statusText: '',
       body: new Error('Failed to fetch'),
       headers: new Headers(),

@@ -11,12 +11,14 @@ Consumer-facing docs live in `README.md` (extensive — usage, options, philosop
 ## Commands
 
 ```bash
-npm run test              # vitest watch mode (unit tests only)
+npm run test              # vitest watch mode
 npm run test:run          # single run (used by prepublishOnly)
-npm run test:integration  # integration tests against a local node:http server
+npm run test:integration  # integration tests only, against a local node:http server
 npm run typecheck         # tsc --noEmit
 npm run build             # tsc → dist/
 ```
+
+`vitest.config.ts` has no `exclude`, so `npm run test` / `test:run` are **not** unit-tests-only — they pick up every `tests/**/*.test.ts`, which includes `tests/integration/`. `npm run test:integration` is the one with a narrower scope: its own config (`vitest.integration.ts`) sets `include: ['tests/integration/**/*.test.ts']`. To run only the unit tests, target the non-integration files explicitly (e.g. `npx vitest run tests/create-api.test.ts`) or exclude `tests/integration` on the command line.
 
 Run a single test file or a single test by name:
 
