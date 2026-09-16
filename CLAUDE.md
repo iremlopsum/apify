@@ -130,7 +130,7 @@ Nested objects in query strings **throw `TypeError`** — the library deliberate
 
 **This is the single most expensive thing to forget in this repo.** A behavioural change made in `create-api.ts` alone silently leaves the two clients disagreeing about the same server response, and that class of divergence has cost multiple review rounds across 3.0.0 and 4.0.0. When you change error classification, parsing, or the Result shape, check whether `graphql.ts` needs the same change — and if it deliberately does *not*, write down why.
 
-`Operation<TVariables, TData>` mirrors `Request<TParams, TResponse>`: a typed config container with phantom fields, executing nothing. GraphQL-specific behaviour worth knowing: an `{ errors }` response on a 2xx is an **error** Result (`kind: 'http'`, `status: 200` hardcoded) with any partial result in `error.partialData` rather than on `Result.data`, which keeps the union clean.
+`Operation<TVariables, TData>` mirrors `Request<TParams, TResponse>`: a typed config container with phantom fields, executing nothing. GraphQL-specific behaviour worth knowing: an `{ errors }` response on a 2xx is an **error** Result (`kind: 'http'`, `status` the response's own — not hardcoded — with `statusText: 'GraphQL Error'` as the deliberate marker distinguishing a GraphQL error from an HTTP one, since `kind` is `'http'` for both) with any partial result in `error.partialData` rather than on `Result.data`, which keeps the union clean.
 
 ### The empty-body contract (4.0.0): two seams, one rule
 

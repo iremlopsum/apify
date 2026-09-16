@@ -951,7 +951,7 @@ graphql.mutation.updateCategory({ id: '123', name: 'New Name' })
 
 ### GraphQL errors
 
-GraphQL errors (HTTP 200 with `{ errors: [...] }`) surface as `result.error` with `status: 200` and `error.body` typed as `GraphQLError[]` — no special handling needed. The same `if (error) { ... }` check covers GraphQL errors, HTTP errors, and network errors uniformly.
+GraphQL errors (any 2xx with `{ errors: [...] }`) surface as `result.error` with the response's own `status` and `error.body` typed as `GraphQLError[]` — no special handling needed. The same `if (error) { ... }` check covers GraphQL errors, HTTP errors, and network errors uniformly.
 
 GraphQL allows **partial success** -- a nullable field errors while the rest of the query resolves. That data is not discarded: it's available as `error.partialData`, never on `result.data` (which stays `null` whenever `error` is non-null, keeping `Result` a clean discriminated union):
 

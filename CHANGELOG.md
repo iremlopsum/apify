@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.1] — 2026-09-16
+
+Three consistency fixes. No behavioural change to any successful call, and no
+public API change — each item replaces a wrong value with the right one.
+
+### Fixed
+
+- **`error.request.url` now reports the path-substituted URL on `'middleware'`
+  failures.** It previously carried the raw route template (`/users/:id`) on
+  that path while every other error path — `'http'`, `'parse'`, and network
+  errors — reported the real address, so grouping telemetry by that field
+  produced two shapes for the same endpoint. It remains the template on
+  `'abort'` failures and when `buildUrl` itself threw (a nested object in a
+  query string): a `share: true` joiner giving up never runs its own
+  `buildUrl`, and a setup error means `buildUrl` is what threw, so neither
+  path has a resolved URL to report.
+- **A GraphQL `{ errors }` response now reports the response's own status.**
+  It previously hardcoded `200`, so a GraphQL error arriving on any other 2xx
+  reported a status the server never sent. `statusText` deliberately remains
+  `'GraphQL Error'` — with `kind` reporting `'http'` for both GraphQL and HTTP
+  failures, it is the only thing distinguishing them.
+
+### Internal
+
+- Coverage for a GraphQL response carrying an empty `errors` array, which
+  falls past the errors branch into 4.0.0's no-data rule and reports `'parse'`.
+  Correct since 4.0.0; previously unpinned.
+- Two stale comments corrected to match behaviour already fixed: `syntheticResult`'s
+  doc in `create-api.ts` (wrongly claimed `'middleware'` results still get the
+  route template) and `GraphQLBaseConfig.onError`'s doc in `types.ts` (wrongly
+  claimed GraphQL errors arrive only on HTTP 200). No behaviour changed.
+
 ## [4.0.0] — 2026-09-16
 
 One rule: a success must carry data. Both clients now report a 2xx response
@@ -536,6 +568,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.0.1]: https://github.com/iremlopsum/apify/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/iremlopsum/apify/compare/v3.1.0...v4.0.0
 [3.1.0]: https://github.com/iremlopsum/apify/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/iremlopsum/apify/compare/v2.2.1...v3.0.0
