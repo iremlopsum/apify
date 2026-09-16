@@ -36,7 +36,7 @@
 // ```
 // =============================================================================
 
-import type { RequestConfig, ResponseType } from './types.js'
+import type { RequestConfig } from './types.js'
 
 // ---------------------------------------------------------------------------
 // HTTP methods that default to query string serialization.
@@ -144,14 +144,15 @@ export class Request<TParams extends object, TResponse> {
    * })
    * ```
    */
-  constructor(
-    config: [TResponse] extends [undefined]
-      ? RequestConfig
-      : RequestConfig & { responseType?: Exclude<ResponseType, 'none'> }
-  ) {
+  constructor(config: RequestConfig) {
     // Store the config as-is. No defensive copy is made because RequestConfig
     // contains only simple values and optional arrays — and the contract is
     // that callers define these once and don't mutate them afterward.
+    //
+    // No type-level guard ties `responseType: 'none'` to `TResponse` being
+    // `undefined` — see the JSDoc on `ResponseType` in types.ts for why an
+    // attempted guard was tried and dropped, and for the convention this
+    // relies on instead.
     this.config = config
   }
 

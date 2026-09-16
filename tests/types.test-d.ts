@@ -1,7 +1,7 @@
 import { describe, it, expectTypeOf } from 'vitest'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
-import type { MiddlewareContext, CallOptions } from '../src/types.js'
+import type { MiddlewareContext, CallOptions, RequestConfig } from '../src/types.js'
 import type { ApiErrorKind } from '../src/types.js'
 import { successResult, errorResult } from '../src/testing.js'
 import type { ApiError } from '../src/types.js'
@@ -138,8 +138,30 @@ describe("responseType: 'none'", () => {
     expectTypeOf(r.data).toEqualTypeOf<User>()
   })
 
-  it("refuses responseType 'none' on a request that declares a response body", () => {
-    // @ts-expect-error — 'none' means no body; TResponse must be undefined
+  it("does NOT refuse responseType 'none' paired with a declared response body — convention, not a compiler guarantee", () => {
+    // A type-level guard here was tried (an overload pair) and dropped: see
+    // the JSDoc on `ResponseType` in src/types.ts. TS's overload resolution
+    // falls through to the general `RequestConfig` overload for any call a
+    // narrower one rejects, so the guard never actually fired. This
+    // compiles today; it is a documented convention violation, not a caught
+    // one. Do NOT re-add a `// @ts-expect-error` above this — there is
+    // nothing here for the compiler to flag.
     new Request<{ id: string }, User>({ method: 'DELETE', path: '/u/:id', responseType: 'none' })
+  })
+
+  // Regression coverage for the guard's original break: a `RequestConfig`-
+  // typed variable, and a spread of one, must both still construct a
+  // `Request` whose `TResponse` is a concrete (non-undefined) type. Both of
+  // these failed to compile under the dropped overload-guard attempt.
+  it('accepts a RequestConfig-typed variable even when TResponse is concrete', () => {
+    const cfg: RequestConfig = { method: 'GET', path: '/u/:id' }
+    const req = new Request<{ id: string }, User>(cfg)
+    expectTypeOf(req).toEqualTypeOf<Request<{ id: string }, User>>()
+  })
+
+  it('accepts a spread of a RequestConfig-typed variable even when TResponse is concrete', () => {
+    const base: RequestConfig = { method: 'GET', path: '/u/:id' }
+    const req = new Request<{ id: string }, User>({ ...base, path: '/x' })
+    expectTypeOf(req).toEqualTypeOf<Request<{ id: string }, User>>()
   })
 })

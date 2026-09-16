@@ -62,6 +62,20 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
  *   diagnostic (a message, a code) and worth reading even when the caller
  *   wants nothing back on success.
  *
+ *   **This is a convention, not a compile-time guarantee.** `new Request<P,
+ *   User>({ responseType: 'none' })` is not a type error — a type-level
+ *   guard for this was attempted (an overload pair pairing `TResponse` with
+ *   a literal `responseType: 'none'`) and dropped: TypeScript's overload
+ *   resolution falls through to the general `RequestConfig` overload for
+ *   any call the specific one rejects, since that overload has to stay
+ *   general to keep accepting a `RequestConfig`-typed variable, a spread of
+ *   one, or a factory return (all of which previously — and must still —
+ *   compile). A "reject the mismatch" overload with a permissive fallback
+ *   sitting right behind it never actually rejects anything: TS just moves
+ *   on to the fallback and reports no error, so the guard was pure
+ *   ceremony with no effect. Mismatch it and you get a wrong `TResponse`
+ *   silently, same as always — declare it as `undefined`.
+ *
  * Set this on the {@link RequestConfig} for a specific endpoint. If omitted,
  * the library defaults to `'json'`.
  */
