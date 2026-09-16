@@ -128,6 +128,18 @@ type Api<TRequests extends Record<string, Request<any, any>>> = {
 // =============================================================================
 
 /**
+ * Returned by `parseResponse` when a `json` request received an empty body.
+ *
+ * Distinct from `null` because `JSON.parse("null")` is also `null`: a server
+ * sending the body `null` is sending valid JSON and must not be confused with
+ * one sending nothing at all. Module-private — it never reaches the barrel.
+ *
+ * 3.1.0 warns and substitutes `null`. 4.0.0 turns it into a `'parse'` error;
+ * that is a two-line change at the success-path seam and nothing else.
+ */
+const EMPTY_JSON_BODY: unique symbol = Symbol('apify.emptyJsonBody')
+
+/**
  * Parses the response body according to the configured response type.
  *
  * Each Request can specify how its response should be parsed (json, text, blob,
@@ -172,7 +184,7 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
       // response.json() throws on empty bodies, but sometimes servers return
       // 200 OK with no body (especially for DELETE or fire-and-forget endpoints).
       const text = await response.text()
-      return text ? JSON.parse(text) : null
+      return text ? JSON.parse(text) : EMPTY_JSON_BODY
     }
   }
 }
@@ -376,6 +388,33 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
   // Result, because it's a configuration mistake, not a request failure.
   // ---------------------------------------------------------------------------
   const shareTracker = new ShareTracker()
+
+  // ---------------------------------------------------------------------------
+  // Empty-body warning — one per request name, per API instance, same
+  // per-createApi lifetime as the trackers above so two instances warn
+  // independently and nothing leaks across them.
+  //
+  // Transitional: 4.0.0 makes an empty JSON body an error and this goes with
+  // it. It exists because the consumers most at risk are the ones who upgrade
+  // without reading a changelog, and it names the exact Request to change.
+  // ---------------------------------------------------------------------------
+  const emptyBodyWarned = new Set<string>()
+
+  const warnEmptyBodyOnce = (name: string): void => {
+    if (emptyBodyWarned.has(name)) return
+    emptyBodyWarned.add(name)
+    try {
+      if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+        console.warn(
+          `[apify] ${name}: server returned an empty body for responseType 'json'. ` +
+          `This yields data: null today and will be an error in 4.0.0. ` +
+          `Declare responseType: 'none' if the endpoint returns no content.`
+        )
+      }
+    } catch {
+      /* a diagnostic must never fail a request — same stance as fireOnError */
+    }
+  }
 
   for (const [name, request] of Object.entries(requests)) {
     if (request.config.share && request.config.dedupe) {
@@ -753,6 +792,14 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                   request: { method: ctx.request.method, url: ctx.request.url, params }
                 })
                 return createErrorResult(error, response, execute)
+              }
+
+              // THE SEAM. 3.1.0 warns and degrades to null; 4.0.0 replaces
+              // these three lines with a 'parse' error and deletes the warning.
+              // Everything else about empty-body handling is already in place.
+              if (data === EMPTY_JSON_BODY) {
+                warnEmptyBodyOnce(name)
+                data = null
               }
 
               return createSuccessResult(data, response, execute)
