@@ -129,6 +129,11 @@ export function startServer(): Promise<TestServer> {
             sendJson(res, 200, { errors: [{ message: 'Something went wrong' }] })
           } else if (query.includes('gqlMutation')) {
             sendJson(res, 200, { data: { createUser: { id: '99', name: variables.name ?? 'New' } } })
+          } else if (query.includes('gqlNoData')) {
+            // A 200 carrying neither data nor errors — a protocol violation
+            // the GraphQL client must report rather than pass off as a
+            // success with data: null.
+            sendJson(res, 200, {})
           } else {
             res.writeHead(400)
             res.end()

@@ -295,7 +295,37 @@ export function createGraphQL(config: any): any {
                 return createErrorResult(error, response, execute)
               }
 
-              return createSuccessResult(gqlBody?.data ?? null, response, execute)
+              // A GraphQL success must carry data. `?? null` used to paper
+              // over two different protocol violations here — an empty body
+              // (gqlBody is null), and a well-formed {} or {"data": null}
+              // with no errors — both surfacing as a success with data: null
+              // behind a non-null TData. Since 4.0.0 both are reported.
+              //
+              // `"data": null` IS legitimate for a field error, but only
+              // alongside `errors`, and the branch directly above already
+              // routes that to an error Result carrying partialData. Control
+              // only reaches here when the server reported no errors at all.
+              //
+              // Optional chaining also catches a non-object root (`42`,
+              // `null`, `[1,2]` — all valid JSON): the GraphQL over HTTP spec
+              // requires a map, so those are violations too.
+              //
+              // error.body is the raw response text, not a thrown exception —
+              // nothing threw. It is the only useful answer to "then what did
+              // the server send?".
+              if (gqlBody?.data == null) {
+                const error = new ApiError({
+                  kind: 'parse',
+                  status: response.status,
+                  statusText: response.statusText,
+                  body: text,
+                  headers: response.headers,
+                  request: { method: 'POST', url: ctx.request.url, params: variables },
+                })
+                return createErrorResult(error, response, execute)
+              }
+
+              return createSuccessResult(gqlBody.data, response, execute)
             } catch (err) {
               // Provenance over name-sniffing: if the signal we actually
               // handed to fetch is the one that's aborted, this failure IS
