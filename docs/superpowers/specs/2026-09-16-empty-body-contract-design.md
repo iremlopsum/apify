@@ -110,7 +110,11 @@ if (data === EMPTY_JSON_BODY) { warnOnce(name); data = null }
 if (data === EMPTY_JSON_BODY) return parseError(response, 'empty response body')
 ```
 
-One seam, a two-line diff between releases, rather than the rule smeared across the parse path.
+One seam, a three-line block, rather than the rule smeared across the parse path.
+
+**4.0.0 touches two places, not one.** The seam is the behavioural change; the warn-once block (the `Set` and `warnEmptyBodyOnce`, declared with the other per-`createApi` state) becomes dead at the same moment and goes with it. An earlier draft of this spec said "and nothing else", which is wrong — recorded here so 4.0.0's plan budgets for both.
+
+**`src/graphql.ts` needs the same treatment in 4.0.0.** It has its own independent `text ? JSON.parse(text) : null` and would otherwise keep conflating an empty body with a literal `null` one. If the rule is *an empty JSON body is an error* and only `create-api.ts` enforces it, the two clients diverge on the same user action — which is exactly the REST/GraphQL inconsistency that cost 3.0.0 several review rounds to find. 3.1.0 deliberately leaves `graphql.ts` alone (a GraphQL success response is rarely genuinely empty, so the warning would be noise), but 4.0.0 must either extend the rule there or state in writing why GraphQL is exempt.
 
 ### The warning
 
