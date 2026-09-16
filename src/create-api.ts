@@ -229,15 +229,17 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
  * is aborted IS that cancellation, whatever shape fetch happened to throw.
  *
  * `error.request.url` here is exactly the `url` argument passed in below —
- * see `buildFailedResult`'s doc (immediately below) for which call sites
+ * see `buildFailedResult`'s doc, inside `createApi`, for which call sites
  * supply the real, path-substituted URL and which fall back to
  * `joinUrl(baseUrl, request.config.path)`, the un-substituted path template.
  * In short: both `'middleware'` call sites in `execute()` now pass
  * `context.request.url`, so a `'middleware'` result carries the resolved
- * address, not the template. The `'abort'` call site (the share site's
- * `onAbort`) and a setup error still get the template — neither has a
- * resolved URL to give: a `share: true` joiner giving up never ran its own
- * `buildUrl`, and a setup error means `buildUrl` itself is what threw.
+ * address. The `'abort'` call site (the share site's `onAbort`) and the
+ * setup-error path still get the template, for a structural reason: the
+ * resolved URL is built at Step 4 inside `execute()`, and both of those
+ * sites live in the outer closure where it is not in scope. Note this is
+ * the share give-up path only — an ordinary caller abort mid-flight is
+ * classified inside `core` and already reports the resolved URL.
  */
 function syntheticResult(
   reason: unknown,
@@ -434,12 +436,16 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * call sites in `execute()` pass it, from `context.request.url` — that
        * reflects a middleware which rewrote the URL, which a value captured
        * earlier could not. The 'abort' and setup-error call sites don't pass
-       * it and fall back to the template: a `share: true` joiner giving up
-       * never runs its own `buildUrl` (only the shareKey's initiating caller
-       * does — see `ShareTracker`'s `exec`), so there is no resolved URL to
-       * give it that's consistent with what the initiator would report for
-       * the same operation; and a setup error means `buildUrl` itself is
-       * what threw, so there is no resolved URL at all.
+       * it and fall back to the template, for a structural reason, not a
+       * semantic one: the resolved URL is built at Step 4 inside `execute()`,
+       * and both of these sites live in this outer closure, where it is not
+       * in scope. It isn't that a joiner's URL would be inconsistent with the
+       * initiator's — `shareKey` is `name` plus stringified params, so every
+       * sharer would compute an identical URL — and a setup error can happen
+       * after `buildUrl` already succeeded. Reaching it would mean either
+       * threading the URL through `ShareTracker.acquire`, or recomputing
+       * `buildUrl` here and risking drift from Step 4's special-body/`asQuery`
+       * handling.
        */
       function buildFailedResult(
         reason: unknown,
