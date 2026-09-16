@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`@iremlopsum/apify` — runtime-agnostic, type-safe API client built on standard `fetch`. Zero runtime dependencies. Pure ESM, strict TypeScript (ES2020 target, DOM lib). Ships two entry points: the core (`.`) and opt-in built-in middleware (`./middleware`).
+`@iremlopsum/apify` — runtime-agnostic, type-safe API client built on standard `fetch`. Zero runtime dependencies. Pure ESM, strict TypeScript (ES2020 target, DOM lib). Ships three entry points: the core (`.`), opt-in built-in middleware (`./middleware`), and test helpers (`./testing`, added 2.2.0).
+
+The core entry is **not** REST-only: `src/index.ts` also exports `createGraphQL`, `Operation` and `gql`. There are two clients in this package, and they are **parallel implementations, not layers** — see "The GraphQL client is a second pipeline" below before changing either.
 
 Consumer-facing docs live in `README.md` (extensive — usage, options, philosophy). This file is for codebase navigation, not API reference.
 
@@ -18,7 +20,9 @@ npm run typecheck         # tsc --noEmit
 npm run build             # tsc → dist/
 ```
 
-`vitest.config.ts` has no `exclude`, so `npm run test` / `test:run` are **not** unit-tests-only — they pick up every `tests/**/*.test.ts`, which includes `tests/integration/`. `npm run test:integration` is the one with a narrower scope: its own config (`vitest.integration.ts`) sets `include: ['tests/integration/**/*.test.ts']`. To run only the unit tests, target the non-integration files explicitly (e.g. `npx vitest run tests/create-api.test.ts`) or exclude `tests/integration` on the command line.
+`npm run test` / `test:run` are **not** unit-tests-only — they pick up every `tests/**/*.test.ts`, which includes `tests/integration/`. `npm run test:integration` is the one with a narrower scope: its own config (`vitest.integration.ts`) sets `include: ['tests/integration/**/*.test.ts']`. To run only the unit tests, target the non-integration files explicitly (e.g. `npx vitest run tests/create-api.test.ts`) or exclude `tests/integration` on the command line.
+
+`vitest.config.ts`'s only `exclude` entry beyond vitest's defaults is `**/.worktrees/**`. A git worktree there is a full second checkout, so without it every count doubles (354 tests reported as 708) with nothing failing to give it away. If you add to `exclude`, spread `configDefaults.exclude` — assigning the array outright drops vitest's defaults and starts pulling in `node_modules` and `dist/`.
 
 Run a single test file or a single test by name:
 
@@ -120,24 +124,60 @@ Nested objects in query strings **throw `TypeError`** — the library deliberate
 
 `Request.shouldSerializeAsQuery` getter encapsulates the rule: `bodyAs` wins; otherwise GET/DELETE → query, everything else → body.
 
+### The GraphQL client is a second pipeline, not a layer
+
+`src/graphql.ts` does **not** call `createApi`. It has its own `execute()`, its own `core`, its own `buildFailedResult`, its own dedupe registration and its own parse path — a near-parallel reimplementation of `create-api.ts` specialised to `POST` + `{ query, variables }`. `createGraphQL`/`Operation`/`gql` ship from the core barrel.
+
+**This is the single most expensive thing to forget in this repo.** A behavioural change made in `create-api.ts` alone silently leaves the two clients disagreeing about the same server response, and that class of divergence has cost multiple review rounds across 3.0.0 and 4.0.0. When you change error classification, parsing, or the Result shape, check whether `graphql.ts` needs the same change — and if it deliberately does *not*, write down why.
+
+`Operation<TVariables, TData>` mirrors `Request<TParams, TResponse>`: a typed config container with phantom fields, executing nothing. GraphQL-specific behaviour worth knowing: an `{ errors }` response on a 2xx is an **error** Result (`kind: 'http'`, `status: 200` hardcoded) with any partial result in `error.partialData` rather than on `Result.data`, which keeps the union clean.
+
+### The empty-body contract (4.0.0): two seams, one rule
+
+A success must carry data. Both clients enforce it at exactly one place each:
+
+- `create-api.ts` — `parseResponse` returns the module-private `EMPTY_JSON_BODY` symbol for an empty `json` body (**not** `null`: `JSON.parse("null")` is also `null`, and a server sending the body `null` sent valid JSON). The success path turns that into `kind: 'parse'`; the non-2xx path normalizes it to `null` for `error.body`.
+- `graphql.ts` — `gqlBody?.data == null` on the success path, which covers an empty body, `{}`, a literal `{"data": null}` and a non-object JSON root.
+
+Two invariants that are quiet when broken. First, in `graphql.ts` the `errors` branch **must** run before the no-`data` guard, or every GraphQL field error reclassifies from `'http'` to `'parse'`. Second, `error.body` is the raw response text on these paths, not a thrown exception — `''` for REST (its trigger is reachable only when the text is provably empty), the live text for GraphQL (its guard fires on four distinct textual states). Both are pinned by tests; if you "unify" them you will break one.
+
+`responseType: 'none'` is the declared escape for an endpoint that returns no body. Its pairing with `TResponse = undefined` is a **convention, not a compile-time guarantee** — TS1092 forbids type parameters on constructors, so the current `Request` constructor cannot express it. A generic factory could; it is deferred as purely additive.
+
 ## File layout (source)
 
 ```
 src/
-  index.ts                  # public barrel — core exports only
-  create-api.ts             # the pipeline (see above)
+  index.ts                  # public barrel — createApi, Request, ApiError,
+                            #   createGraphQL, Operation, gql
+  create-api.ts             # the REST pipeline (see above)
+  graphql.ts                # the GraphQL pipeline — parallel, not layered
   request.ts                # Request class, shouldSerializeAsQuery
   result.ts                 # ApiError + three Result factories
   middleware.ts             # composeMiddleware onion engine
   types.ts                  # single source of truth for all shared types
-  built-in-middleware.ts    # retryMiddleware, logMiddleware (separate entry)
+  built-in-middleware.ts    # retryMiddleware, logMiddleware, cacheMiddleware
+                            #   (./middleware entry)
+  testing.ts                # mockFetch, jsonResponse, successResult,
+                            #   errorResult (./testing entry)
   utils/
-    path-params.ts          # buildUrl — path substitution + query string
+    path-params.ts          # joinUrl, buildUrl — path substitution + query
     serialize.ts            # serializeBody — body auto-detection
-    dedupe.ts               # DedupeTracker
+    headers.ts              # mergeHeaders — the three-layer precedence merge
+    special-body.ts         # isSpecialBody, isOpaqueParams
+    dedupe.ts               # DedupeTracker — cancel-the-previous
+    share.ts                # ShareTracker, ABANDONED — join-the-existing
+    any-signal.ts           # anySignal — AbortSignal.any is banned (see below)
+    abort-kind.ts           # abortKind, propagatesReason — abort classification
+    budget.ts               # resolveBudget — per-call vs per-operation deadline
+    timeout.ts              # timeoutSignalFor
+    cache.ts                # CacheStore, stableStringify (cacheMiddleware)
 ```
 
 `src/index.ts` intentionally does **not** export `composeMiddleware`, utils, or Result factories — those are implementation details. If asked to expose something, push back unless there's a concrete consumer need.
+
+**`dedupe` and `share` are opposites**, and a `Request` setting both throws at `createApi` construction — the one sanctioned throw outside a Result, because it is a configuration mistake rather than a request failure. `dedupe` aborts the in-flight call and starts fresh; `share` joins it and hands every caller the same result.
+
+**`AbortSignal.any` is banned** — it is above the supported floor (Node 20.3 / Safari 17.4). `src/utils/any-signal.ts` is the replacement, with a single-signal fast path. Regex lookbehind is banned for the same reason.
 
 ## Conventions that will trip you up
 
