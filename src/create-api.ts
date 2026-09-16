@@ -228,14 +228,16 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
  * fallback doesn't need that check: a fetch rejection while our own signal
  * is aborted IS that cancellation, whatever shape fetch happened to throw.
  *
- * Deferred item: `error.request.url` here is `joinUrl(baseUrl, request.config.path)`
- * — the un-substituted path template (e.g. `/users/:id`), not the URL that was
- * (or would have been) actually requested. That differs from the `'http'` and
- * `'parse'` paths in `execute()`, which build `error.request.url` from
- * `ctx.request.url` — the real, path-substituted URL `buildUrl` produced.
- * Callers branching on `error.request.url` for a `'middleware'` result or a
- * setup error get the template, not the resolved address. Not fixed here;
- * recorded so a reader hitting it isn't left to rediscover it.
+ * `error.request.url` here is exactly the `url` argument passed in below —
+ * see `buildFailedResult`'s doc (immediately below) for which call sites
+ * supply the real, path-substituted URL and which fall back to
+ * `joinUrl(baseUrl, request.config.path)`, the un-substituted path template.
+ * In short: both `'middleware'` call sites in `execute()` now pass
+ * `context.request.url`, so a `'middleware'` result carries the resolved
+ * address, not the template. The `'abort'` call site (the share site's
+ * `onAbort`) and a setup error still get the template — neither has a
+ * resolved URL to give: a `share: true` joiner giving up never ran its own
+ * `buildUrl`, and a setup error means `buildUrl` itself is what threw.
  */
 function syntheticResult(
   reason: unknown,

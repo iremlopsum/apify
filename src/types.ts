@@ -722,7 +722,7 @@ export interface GraphQLBaseConfig {
   /**
    * Global error callback. Fires after the full middleware chain completes.
    *
-   * Fires for GraphQL errors (HTTP 200 with `{ errors }`), HTTP errors (4xx/5xx),
+   * Fires for GraphQL errors (any 2xx with `{ errors }`), HTTP errors (4xx/5xx),
    * network errors (status 0), and timeouts (`kind: 'timeout'`). Does NOT fire
    * when the result is successful, and does NOT fire for `kind: 'abort'` — a
    * caller's own `AbortSignal` firing, or a request superseded by dedupe, is a
