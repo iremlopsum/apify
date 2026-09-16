@@ -43,6 +43,33 @@ describe("responseType: 'none'", () => {
     expect(r.error?.status).toBe(500)
   })
 
+  it('still reads a JSON error body on a non-2xx, even though success has none', async () => {
+    // 'none' describes the success shape only. An error body is diagnostic
+    // (a message, a code) and is worth reading even when the caller wants
+    // nothing back on success — this is the pin for that.
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ error: 'already deleted' }), { status: 409 })
+    ))
+    const r = await api().del()
+    expect(r.error?.kind).toBe('http')
+    expect(r.error?.status).toBe(409)
+    expect(r.error?.body).toEqual({ error: 'already deleted' })
+  })
+
+  it('degrades a non-JSON error body to null instead of throwing', async () => {
+    // An HTML error page (e.g. from a gateway) is not valid JSON. The
+    // pre-existing parse-failure fallback (body = null) must still apply
+    // for a 'none' request's error path, exactly as it does for any other
+    // responseType.
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response('<html><body>Server Error</body></html>', { status: 500 })
+    ))
+    const r = await api().del()
+    expect(r.error?.kind).toBe('http')
+    expect(r.error?.status).toBe(500)
+    expect(r.error?.body).toBeNull()
+  })
+
   it('does not throw when the body stream cannot be cancelled', async () => {
     // A Response whose body getter throws — the shape a hostile or exotic
     // polyfill can produce. Cancelling is cleanup; it must never fail a request.

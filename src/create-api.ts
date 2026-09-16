@@ -659,7 +659,16 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 // read as a real 5xx to retryOn and to onError.
                 let body: unknown
                 try {
-                  body = await parseResponse(response, request.config.responseType)
+                  // 'none' describes the success shape only — it means "this
+                  // endpoint returns no body when it succeeds", not "never
+                  // read a body". An error response is a different shape and
+                  // its body is diagnostic (validation messages, error
+                  // codes), so a 'none' request still gets its error body
+                  // parsed as JSON here, on this non-2xx path only. The
+                  // success path below is untouched.
+                  const errorResponseType =
+                    request.config.responseType === 'none' ? 'json' : request.config.responseType
+                  body = await parseResponse(response, errorResponseType)
                 } catch (parseErr) {
                   const signal = ctx.request.signal
                   // Same "aborted now, not necessarily caused by" limitation

@@ -53,10 +53,14 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
  * - `'blob'` — calls `response.blob()`, returns a Blob (useful for file downloads)
  * - `'arrayBuffer'` — calls `response.arrayBuffer()`, returns raw binary data
  * - `'formData'` — calls `response.formData()`, returns FormData (rare)
- * - `'none'` — the endpoint returns no body; `data` is `undefined`. Any body
- *   the server sends anyway is discarded (and its stream cancelled). This is
- *   the accurate declaration for a 204 endpoint — declare `TResponse` as
- *   `undefined` when using it.
+ * - `'none'` — the endpoint returns no body on **success**; `data` is
+ *   `undefined`. Any body a *successful* (2xx) response sends anyway is
+ *   discarded (and its stream cancelled). This is the accurate declaration
+ *   for a 204 endpoint — declare `TResponse` as `undefined` when using it.
+ *   This only describes the success shape: a **non-2xx** response is still
+ *   read and parsed as JSON for `error.body`, since an error body is
+ *   diagnostic (a message, a code) and worth reading even when the caller
+ *   wants nothing back on success.
  *
  * Set this on the {@link RequestConfig} for a specific endpoint. If omitted,
  * the library defaults to `'json'`.
