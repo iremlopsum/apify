@@ -564,12 +564,13 @@ export interface ApiConfig<TRequests extends Record<string, unknown>> {
    * Only fires when the **final** result has an error. If a retry middleware
    * recovers a 5xx to a 200, this does NOT fire.
    *
-   * Fires for HTTP errors (4xx, 5xx), network errors (status 0), and timeouts
-   * (`kind: 'timeout'`). Does NOT fire for `kind: 'abort'` — a caller's own
-   * `AbortSignal` firing, or a request superseded by dedupe, is a cancellation
-   * the library caused deliberately, not a failure worth reporting to an error
-   * tracker. The caller still gets the abort back in the `Result` either way;
-   * only the report to this callback is suppressed.
+   * Fires for HTTP errors (4xx, 5xx), network errors (status 0), timeouts
+   * (`kind: 'timeout'`), parse failures (`kind: 'parse'`), and middleware
+   * failures (`kind: 'middleware'`). Does NOT fire for `kind: 'abort'` — a
+   * caller's own `AbortSignal` firing, or a request superseded by dedupe, is
+   * a cancellation the library caused deliberately, not a failure worth
+   * reporting to an error tracker. The caller still gets the abort back in
+   * the `Result` either way; only the report to this callback is suppressed.
    *
    * @example
    * ```ts
@@ -722,13 +723,15 @@ export interface GraphQLBaseConfig {
   /**
    * Global error callback. Fires after the full middleware chain completes.
    *
-   * Fires for GraphQL errors (HTTP 200 with `{ errors }`), HTTP errors (4xx/5xx),
-   * network errors (status 0), and timeouts (`kind: 'timeout'`). Does NOT fire
-   * when the result is successful, and does NOT fire for `kind: 'abort'` — a
-   * caller's own `AbortSignal` firing, or a request superseded by dedupe, is a
-   * cancellation the library caused deliberately, not a failure worth
-   * reporting to an error tracker. The caller still gets the abort back in the
-   * `Result` either way; only the report to this callback is suppressed.
+   * Fires for GraphQL errors (any 2xx with `{ errors }`), HTTP errors (4xx/5xx),
+   * network errors (status 0), timeouts (`kind: 'timeout'`), parse failures
+   * (`kind: 'parse'`), and middleware failures (`kind: 'middleware'`). Does
+   * NOT fire when the result is successful, and does NOT fire for
+   * `kind: 'abort'` — a caller's own `AbortSignal` firing, or a request
+   * superseded by dedupe, is a cancellation the library caused deliberately,
+   * not a failure worth reporting to an error tracker. The caller still gets
+   * the abort back in the `Result` either way; only the report to this
+   * callback is suppressed.
    */
   onError?: (error: ApiError) => void
 }
