@@ -69,6 +69,10 @@ export function startServer(): Promise<TestServer> {
         } else if (method === 'GET' && pathname === '/headers') {
           sendJson(res, 200, { headers: req.headers })
 
+        } else if (method === 'DELETE' && pathname === '/no-content') {
+          res.writeHead(204)
+          res.end()
+
         } else if (pathname.startsWith('/status/')) {
           const code = parseInt(pathname.split('/')[2], 10)
           res.writeHead(isNaN(code) ? 400 : code)
