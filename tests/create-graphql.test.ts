@@ -839,3 +839,103 @@ describe('GraphQL partial data', () => {
     expect((await client.getUser()).error!.partialData).toBeUndefined()
   })
 })
+
+// -----------------------------------------------------------------------------
+// 4.0.0: a GraphQL success must carry data.
+//
+// The success path used to end at `createSuccessResult(gqlBody?.data ?? null)`,
+// which produced data: null from two different inputs — an empty body, and a
+// well-formed {} or {"data": null} with no errors. Both are protocol
+// violations: GraphQL over HTTP requires a map at the root, and a "data": null
+// that is legitimate (a field error) carries `errors`, which the branch above
+// this one already routes to an error Result with partialData. Reaching the
+// success return with no data means the server sent something invalid.
+// -----------------------------------------------------------------------------
+describe('createGraphQL — a success must carry data', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  const clientFor = (text: string, onError?: (e: unknown) => void) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers(),
+      text: () => Promise.resolve(text),
+    }))
+    return createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: {
+        health: new Operation<Record<string, never>, { ok: boolean }>({
+          operation: gql`query { health }`,
+        }),
+      },
+      ...(onError ? { onError } : {}),
+    })
+  }
+
+  it("reports an empty body as a 'parse' error", async () => {
+    const { data, error, response } = await clientFor('').health()
+    expect(error?.kind).toBe('parse')
+    expect(data).toBeNull()
+    expect(response).not.toBeNull()
+  })
+
+  it("reports {} — no data, no errors — as a 'parse' error", async () => {
+    const { error } = await clientFor('{}').health()
+    expect(error?.kind).toBe('parse')
+  })
+
+  it("reports a literal \"data\": null with no errors as a 'parse' error", async () => {
+    const { error } = await clientFor('{"data":null}').health()
+    expect(error?.kind).toBe('parse')
+  })
+
+  it('reports a non-object JSON root as a parse error', async () => {
+    // Valid JSON, invalid GraphQL — the spec requires a map at the root.
+    const { error } = await clientFor('42').health()
+    expect(error?.kind).toBe('parse')
+  })
+
+  it('keeps the real status and the Response', async () => {
+    const { error, response } = await clientFor('{}').health()
+    expect(error?.status).toBe(200)
+    expect(error?.statusText).toBe('OK')
+    expect(response?.status).toBe(200)
+  })
+
+  it('carries the raw response text as error.body', async () => {
+    const { error } = await clientFor('{}').health()
+    expect(error?.body).toBe('{}')
+  })
+
+  it('reports through onError like any other final error', async () => {
+    const onError = vi.fn()
+    await clientFor('{}', onError).health()
+    expect(onError).toHaveBeenCalledOnce()
+    expect(onError.mock.calls[0][0].kind).toBe('parse')
+  })
+
+  it('still succeeds when data is present', async () => {
+    const { data, error } = await clientFor('{"data":{"ok":true}}').health()
+    expect(error).toBeNull()
+    expect(data).toEqual({ ok: true })
+  })
+
+  it('treats an empty data object as present — it is a valid result', async () => {
+    // The guard is `== null`, not truthiness. A selection set that resolves
+    // to {} is a legitimate GraphQL success and must not be rejected.
+    const { data, error } = await clientFor('{"data":{}}').health()
+    expect(error).toBeNull()
+    expect(data).toEqual({})
+  })
+
+  it('still routes "data": null WITH errors to the GraphQL-error branch', async () => {
+    // Regression pin: the errors branch runs BEFORE the no-data guard, so a
+    // genuine field error keeps its 'http' classification and its
+    // partialData. Reordering the two would silently reclassify every
+    // GraphQL error in the library.
+    const { error } = await clientFor('{"data":null,"errors":[{"message":"Oops"}]}').health()
+    expect(error?.kind).toBe('http')
+    expect(error?.body).toEqual([{ message: 'Oops' }])
+  })
+})
