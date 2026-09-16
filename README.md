@@ -301,7 +301,7 @@ The error object on failed calls. It is not a subclass of `Error` -- it is a str
 | `status`     | `number`  | HTTP status code (e.g., 404, 500). `0` for network errors, aborts, and timeouts. |
 | `kind`       | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse' \| 'middleware'` | What category of failure this is. See below. Required -- constructing an `ApiError` yourself (e.g. in custom middleware) must supply it. |
 | `statusText` | `string`  | HTTP status text (e.g., 'Not Found'). `''` for network errors.    |
-| `body`       | `unknown` | Parsed response body, or the native Error for network failures.   |
+| `body`       | `unknown` | Parsed response body -- but for `'parse'`, either the thrown exception (a malformed body) or the raw response text (an empty body, or a GraphQL response carrying no data). The native Error for network failures. |
 | `headers`    | `Headers` | Response headers. Empty `Headers` for network errors.             |
 | `request`    | `object`  | `{ method, url, params }` -- metadata about the failed request.   |
 | `partialData` | `unknown` (optional) | GraphQL data returned alongside `{ errors }` (partial success). Lives here, not on `Result.data`, so the `Result` stays a clean union: `data` is non-null iff `error` is null. `undefined` for every REST error and for GraphQL responses carrying no data. |
