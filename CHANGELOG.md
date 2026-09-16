@@ -535,6 +535,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.0.0]: https://github.com/iremlopsum/apify/compare/v3.1.0...v4.0.0
 [3.1.0]: https://github.com/iremlopsum/apify/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/iremlopsum/apify/compare/v2.2.1...v3.0.0
 [2.2.0]: https://github.com/iremlopsum/apify/compare/v2.1.0...v2.2.0
