@@ -152,6 +152,20 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
       return response.arrayBuffer()
     case 'formData':
       return response.formData()
+    case 'none':
+      // The caller has declared this endpoint returns no body, so there is
+      // nothing to parse and a body the server sends anyway is discarded.
+      //
+      // Cancel the stream rather than leaving it unread: an abandoned body
+      // can hold a keep-alive connection open. Guarded because cancelling an
+      // absent or already-consumed stream can throw, and cleanup must never
+      // fail a request that otherwise succeeded.
+      try {
+        await response.body?.cancel()
+      } catch {
+        /* nothing to release */
+      }
+      return undefined
     case 'json':
     default: {
       // Read as text first to safely handle empty responses.
