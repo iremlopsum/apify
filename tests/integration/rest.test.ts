@@ -481,8 +481,10 @@ describe("responseType 'none'", () => {
     expect(r.response?.status).toBe(204)
   })
 
-  it('a real 204 on a json request still warns and yields null', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  it('a real 204 on a json request is a parse error', async () => {
+    // The gap 4.0.0 closes, against a genuine 204 from node:http rather than
+    // a mock. `responseType: 'none'` (the test above) is the fix; this is
+    // what happens to anyone who did not apply it.
     const api = createApi({
       baseUrl: server.baseUrl,
       requests: {
@@ -490,9 +492,9 @@ describe("responseType 'none'", () => {
       },
     })
     const r = await api.del()
-    expect(r.error).toBeNull()
+    expect(r.error?.kind).toBe('parse')
+    expect(r.error?.status).toBe(204)
     expect(r.data).toBeNull()
-    expect(warn).toHaveBeenCalledTimes(1)
-    warn.mockRestore()
+    expect(r.response?.status).toBe(204)
   })
 })

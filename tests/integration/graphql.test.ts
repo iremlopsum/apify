@@ -85,6 +85,25 @@ describe('GraphQL — flat client (operations)', () => {
     expect(data).toBeNull()
     expect(error?.status).toBe(500)
   })
+
+  it('reports a 200 carrying no data as a parse error', async () => {
+    const client = createGraphQL({
+      endpoint: `${server.baseUrl}/graphql`,
+      operations: {
+        noData: new Operation<Record<string, never>, { thing: string }>({
+          operation: gql`query { gqlNoData }`,
+        }),
+      },
+    })
+
+    const { data, error, response } = await client.noData()
+
+    expect(error?.kind).toBe('parse')
+    expect(error?.status).toBe(200)
+    expect(error?.body).toBe('{}')
+    expect(data).toBeNull()
+    expect(response?.status).toBe(200)
+  })
 })
 
 describe('GraphQL — split client (queries + mutations)', () => {
