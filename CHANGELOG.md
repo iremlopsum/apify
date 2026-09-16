@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] — 2026-09-16
+
+One rule: a success must carry data. Both clients now report a 2xx response
+that carries none as a `kind: 'parse'` error rather than resolving with
+`data: null`. See [MIGRATION.md](./MIGRATION.md#upgrading-to-400) — if you
+declared `responseType: 'none'` on the endpoints 3.1.0's warning named, this
+release is a no-op for you.
+
+### Changed
+
+- **BREAKING: an empty body under `responseType: 'json'` is a `kind: 'parse'`
+  error.** Previously it resolved as a success with `data: null`, at every
+  status including `204`. The error carries the response's own status (a `204`
+  reports `204`, not `0`), keeps the `Response`, and puts the raw body text —
+  `''` — in `error.body`. This is what makes `SuccessResult.data: TResponse`
+  true rather than documented-as-false: 3.0.0 removed the `| null` that had
+  been forcing consumers to check, so `data.deleted` against a `204` compiled
+  clean and threw at runtime. Declare `responseType: 'none'` (available since
+  3.1.0) on endpoints that answer with no body. There is no `204` special
+  case, and a literal `null` body — valid JSON — still succeeds.
+- **BREAKING: a GraphQL 2xx response carrying neither `data` nor `errors` is a
+  `kind: 'parse'` error.** Covers an empty body, `{}`, a literal
+  `{"data": null}`, and a non-object JSON root. `error.body` is the raw
+  response text. GraphQL *errors* are unchanged: `{"data": null, "errors":
+  [...]}` still reports `kind: 'http'` with `partialData`, since that branch
+  runs first and is the spec-compliant shape for a field error.
+
+### Removed
+
+- **The one-time empty-body `console.warn` from 3.1.0.** Its success condition
+  no longer exists. `responseType: 'none'`, which it pointed at, is permanent.
+
+### Unchanged
+
+- **Non-2xx responses.** Both clients still read and parse an error body for
+  `error.body`, on `'none'` as on `'json'`, and an empty error body is still a
+  `'http'` error — not a `'parse'` one. 4.0.0 changes what a *success* means
+  and nothing else.
+- **Public types.** `ResponseType` already had `'none'` and `ApiErrorKind`
+  already had `'parse'`; no type was added, removed, or changed.
+
 ## [3.1.0] — 2026-09-16
 
 Additive: a `responseType` for endpoints that answer with no body, and a
@@ -21,9 +62,10 @@ changes; see [MIGRATION.md](./MIGRATION.md#upgrading-to-310).
   `undefined` alongside it — but this is a convention, not a compile-time
   guarantee: `new Request<P, User>({ responseType: 'none' })` compiles
   clean, since TypeScript cannot infer a literal `responseType` on the
-  current non-generic constructor to enforce the pairing. Compile-time
-  enforcement is not shipped in 3.1.0; it's being considered for 4.0.0 via a
-  generic factory function. A non-2xx response is unaffected: its body is
+  current non-generic constructor to enforce the pairing.
+  Compile-time enforcement is not shipped; 4.0.0 did not add it either, since
+  a generic factory would be purely additive and needs no major-version gate.
+  A non-2xx response is unaffected: its body is
   still read and parsed as JSON for `error.body`, since `'none'` describes
   the success shape only and an error body remains diagnostic. See
   [MIGRATION.md](./MIGRATION.md#upgrading-to-310).
