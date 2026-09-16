@@ -7,6 +7,70 @@ For the full record of what changed in each release, see [CHANGELOG.md](./CHANGE
 
 ---
 
+## Upgrading to 3.1.0
+
+3.1.0 is additive — no existing behaviour changed, and no action is required
+to upgrade. It adds one new `responseType` option and a diagnostic warning;
+read on if either applies to you.
+
+### 1. New: `responseType: 'none'`
+
+Declares that an endpoint returns no body on success — the accurate
+declaration for a `204`, or a `200` with an empty body, most commonly a
+`DELETE`. Before 3.1.0, that shape only had `responseType: 'json'` (the
+default) to reach for, which parses an empty body to `data: null` at runtime
+while `TResponse` claims otherwise:
+
+```ts
+// Before — TResponse widened to admit the null the endpoint actually returns
+const deleteUserBefore = new Request<{ id: string }, { deleted: boolean } | null>({
+  method: 'DELETE',
+  path: '/users/:id',
+})
+const before = await api.deleteUserBefore({ id: '42' })
+if (before.error) return
+if (before.data) console.log(before.data.deleted) // null-check required even though error was null
+
+// After — responseType: 'none' says exactly what happens: no body, ever
+const deleteUserAfter = new Request<{ id: string }, undefined>({
+  method: 'DELETE',
+  path: '/users/:id',
+  responseType: 'none',
+})
+const after = await api.deleteUserAfter({ id: '42' })
+if (after.error) return
+console.log(after.data) // undefined -- no null-check needed, and none is possible
+```
+
+`TResponse` is enforced as `undefined` when `responseType: 'none'` is set —
+`new Request<P, User>({ responseType: 'none' })` fails to compile. A non-2xx
+response is unaffected: its body is still read and parsed as JSON for
+`error.body`, since an error body (a message, a code) is worth reading even
+when the caller wants nothing back on success.
+
+### 2. You may see a one-time console warning
+
+If any existing endpoint declares `responseType: 'json'` (the default) and
+the server answers with an empty body, 3.1.0 now logs this once per request
+name, per `createApi` instance:
+
+```
+[apify] deleteUser: server returned an empty body for responseType 'json'. This yields data: null today and will be an error in 4.0.0. Declare responseType: 'none' if the endpoint returns no content.
+```
+
+This is a diagnostic, not a behaviour change — the call still resolves as a
+success with `data: null`, exactly as it always has. It means the named
+request is one of the empty-body endpoints described above, and declaring
+`responseType: 'none'` on it both makes `TResponse` accurate and silences the
+warning.
+
+### 3. Coming in 4.0.0
+
+An empty body under `responseType: 'json'` becomes a `kind: 'parse'` error
+instead of `data: null`. Declaring `responseType: 'none'` now, on every
+endpoint the warning names, makes that upgrade a no-op for you — the endpoint
+no longer goes through the `'json'` empty-body path at all.
+
 ## Upgrading to 3.0.0
 
 3.0.0 tightens contracts the library always implied but never enforced. Most
@@ -374,18 +438,23 @@ it.
   console.log(data.deleted) // throws: data is null at runtime for a 200/204 empty body
   ```
 
-  If an endpoint can answer 204 or an empty 200, say so in its own
-  `TResponse` — `Request<{ id: string }, { deleted: boolean } | null>` — and
-  handle the `null` case explicitly. This is not a new behaviour (2.2.1 had
-  the identical runtime `null`); what changed is that the type system no
-  longer forces you to handle it.
+  If an endpoint can answer 204 or an empty 200, say so accurately in its own
+  `TResponse`. **This guidance changed in 3.1.0:** at the time of the 3.0.0
+  release, the only option was widening to `Request<{ id: string }, { deleted:
+  boolean } | null>` and handling the `null` case explicitly; as of 3.1.0, use
+  `responseType: 'none'` instead (see [Upgrading to
+  3.1.0](#upgrading-to-310) above) — it's more accurate (declares "no body,"
+  not "body or null") and it silences the empty-body warning 3.1.0 added. This
+  is not a new *behaviour* (2.2.1 had the identical runtime `null`); what
+  changed in 3.0.0 is that the type system no longer forces you to handle it,
+  and what changed in 3.1.0 is the recommended way to handle it anyway.
 
 ### Nothing to do if…
 
 …you only call API methods and check `error`, **and every endpoint's
 `TResponse` accounts for its own empty-body responses** (see the bullet
-above — a `DELETE`/204/empty-200 endpoint needs `| null` in its `TResponse`
-to stay accurate; everything else needs no change):
+above — as of 3.1.0, a `DELETE`/204/empty-200 endpoint should declare
+`responseType: 'none'` to stay accurate; everything else needs no change):
 
 ```ts
 const { data, error } = await api.getUser({ id: '42' })
