@@ -152,7 +152,9 @@ describe("responseType: 'none'", () => {
   // Regression coverage for the guard's original break: a `RequestConfig`-
   // typed variable, and a spread of one, must both still construct a
   // `Request` whose `TResponse` is a concrete (non-undefined) type. Both of
-  // these failed to compile under the dropped overload-guard attempt.
+  // these failed to compile under the single conditional constructor
+  // signature that actually shipped and broke this; the overload pair
+  // attempted later silently rejected nothing instead.
   it('accepts a RequestConfig-typed variable even when TResponse is concrete', () => {
     const cfg: RequestConfig = { method: 'GET', path: '/u/:id' }
     const req = new Request<{ id: string }, User>(cfg)
