@@ -2,10 +2,9 @@ import { ApiError, createSuccessResult, createErrorResult, createNetworkErrorRes
 import { composeMiddleware } from './middleware.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
-import { abortKind } from './utils/abort-kind.js'
-import { anySignal } from './utils/any-signal.js'
-import { timeoutSignalFor } from './utils/timeout.js'
-import type { CallOptions, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
+import { abortKind, propagatesReason } from './utils/abort-kind.js'
+import { resolveBudget } from './utils/budget.js'
+import type { CallOptions, ErrorResult, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
 
 // ---------------------------------------------------------------------------
 // Operation — typed config container for GraphQL operations
@@ -92,6 +91,11 @@ export function createGraphQL(config: any): any {
    * as the retry policy's user callbacks in `built-in-middleware.ts`.
    */
   const fireOnError = (error: ApiError): void => {
+    // Aborts are cancellations we caused — a caller's own signal, or a newer
+    // request superseding this one under dedupe. Reporting them to an error
+    // tracker is noise. Timeouts are deliberately NOT suppressed: a deadline
+    // you missed is a genuine failure, which is why the two kinds are separate.
+    if (error.kind === 'abort') return
     if (!onError) return
     try {
       onError(error)
@@ -103,6 +107,43 @@ export function createGraphQL(config: any): any {
   function buildMethod(name: string, operation: Operation<any, any>) {
     return (variables: object = {}, options: CallOptions = {}): Promise<Result<unknown>> => {
       const execute = (): Promise<Result<unknown>> => {
+        /**
+         * `create-api.ts`'s local equivalent, for the same reason: a Result
+         * for a failure that never reached (or never came back from) `core()`,
+         * construction only, no reporting — the `.then` hook below is what
+         * reports, once, so this must not report a second time.
+         *
+         * Classification is by provenance, not by sniffing `reason`'s shape —
+         * see `syntheticResult`'s doc in `create-api.ts` for the full
+         * rationale. In short: if `signal` — the AbortSignal that actually
+         * governs this operation — is the one that aborted, this failure IS
+         * that cancellation, whatever shape `reason` takes. The only fallback
+         * this function is ever called with is `'middleware'`, so the
+         * propagation check (`propagatesReason` — identity, or one level of
+         * `.cause`) always applies here: a middleware throwing its own
+         * `AbortError`-named failure, unrelated to this operation's own
+         * signal, must stay `'middleware'`.
+         */
+        function buildFailedResult(
+          reason: unknown,
+          signal: AbortSignal | undefined,
+          fallbackKind: 'abort' | 'network' | 'middleware'
+        ): ErrorResult<unknown> {
+          const isOurCancellation =
+            signal?.aborted === true &&
+            (fallbackKind !== 'middleware' || propagatesReason(reason, signal.reason))
+          const kind = isOurCancellation ? (abortKind(signal!.reason) ?? 'abort') : fallbackKind
+          const error = new ApiError({
+            kind,
+            status: 0,
+            statusText: '',
+            body: reason,
+            headers: new Headers(),
+            request: { method: 'POST', url: endpoint, params: variables },
+          })
+          return createNetworkErrorResult(error, execute)
+        }
+
         try {
           const allMiddleware: Middleware[] = [
             ...globalMiddleware,
@@ -125,8 +166,12 @@ export function createGraphQL(config: any): any {
           // means none. The signal is created once here — not inside core() —
           // so a retry sequence draws from a single budget rather than getting
           // a fresh one per attempt.
-          const timeoutSignal = timeoutSignalFor(options.timeout, operation.config.timeout)
-          const callerSignal: AbortSignal | undefined = anySignal([options.signal, timeoutSignal])
+          //
+          // GraphQL never coalesces, so the operation's deadline and this
+          // caller's patience are the same signal — both budget fields are
+          // identical and either may be read.
+          const budget = resolveBudget(options.timeout, operation.config.timeout, options.signal, false)
+          const callerSignal: AbortSignal | undefined = budget.operation
           let dedupeController: AbortController | undefined
 
           const core = async (ctx: MiddlewareContext): Promise<Result<unknown>> => {
@@ -162,11 +207,46 @@ export function createGraphQL(config: any): any {
               })
 
               if (!response.ok) {
+                // `response.text()` is the network body read, not just
+                // parsing, so an abort landing while an ERROR body downloads
+                // must not be misreported as a genuine 'http' error with a
+                // null body — the classification would otherwise be decided
+                // by the server's status code rather than by what actually
+                // happened. This is the same provenance concern the outer
+                // `catch (err)` below already handles for the fetch() call
+                // itself — NOT the success path's `JSON.parse` try further
+                // down, which deliberately keeps its own `response.text()`
+                // outside that try specifically so an abort during ITS
+                // network read falls through to that same outer catch
+                // instead of needing its own guard. The rationale for that
+                // split is written up in full in create-api.ts, on the
+                // identical `data`/success-path guard there (the comment
+                // beginning "But `parseResponse` doesn't just parse"); it is
+                // not repeated per call site in this file. A test pins this
+                // exact behaviour below — see "abort during a success-body
+                // download".
                 let body: unknown
                 try {
                   const text = await response.text()
                   body = text ? JSON.parse(text) : null
-                } catch {
+                } catch (parseErr) {
+                  const signal = ctx.request.signal
+                  // Same "aborted now, not necessarily caused by" limitation
+                  // as the outer `catch (err)` below shares — checking
+                  // `signal.aborted` at the moment of the catch, not
+                  // causation. See create-api.ts's equivalent guards for the
+                  // fuller writeup; not repeated per call site in this file.
+                  if (signal?.aborted === true) {
+                    const error = new ApiError({
+                      status: 0,
+                      kind: abortKind(signal.reason) ?? 'abort',
+                      statusText: '',
+                      body: parseErr,
+                      headers: new Headers(),
+                      request: { method: 'POST', url: ctx.request.url, params: variables },
+                    })
+                    return createNetworkErrorResult(error, execute)
+                  }
                   body = null
                 }
                 const error = new ApiError({
@@ -180,10 +260,27 @@ export function createGraphQL(config: any): any {
                 return createErrorResult(error, response, execute)
               }
 
+              // Parse in its own try so a malformed body is reported as what it
+              // is: the server responded, we could not read it. Falling through
+              // to the network catch would report status 0 and discard the
+              // Response, telling the caller they are offline when they are not.
               const text = await response.text()
-              const gqlBody = text
-                ? (JSON.parse(text) as { data?: unknown; errors?: GraphQLError[] })
-                : null
+              let gqlBody: { data?: unknown; errors?: GraphQLError[] } | null
+              try {
+                gqlBody = text
+                  ? (JSON.parse(text) as { data?: unknown; errors?: GraphQLError[] })
+                  : null
+              } catch (parseErr) {
+                const error = new ApiError({
+                  kind: 'parse',
+                  status: response.status,
+                  statusText: response.statusText,
+                  body: parseErr,
+                  headers: response.headers,
+                  request: { method: 'POST', url: ctx.request.url, params: variables },
+                })
+                return createErrorResult(error, response, execute)
+              }
 
               if (gqlBody?.errors?.length) {
                 const error = new ApiError({
@@ -193,15 +290,27 @@ export function createGraphQL(config: any): any {
                   body: gqlBody.errors,
                   headers: response.headers,
                   request: { method: 'POST', url: ctx.request.url, params: variables },
+                  partialData: gqlBody.data ?? undefined,
                 })
                 return createErrorResult(error, response, execute)
               }
 
               return createSuccessResult(gqlBody?.data ?? null, response, execute)
             } catch (err) {
+              // Provenance over name-sniffing: if the signal we actually
+              // handed to fetch is the one that's aborted, this failure IS
+              // that cancellation — whatever `fetch` threw, including a
+              // custom, non-`AbortError`-named reason a caller passed to
+              // `ac.abort(reason)`. Only fall back to sniffing `err`'s own
+              // shape when our signal is not the cause, for a genuine
+              // network failure.
+              const signal = ctx.request.signal
+              const kind = signal?.aborted === true
+                ? (abortKind(signal.reason) ?? 'abort')
+                : (abortKind(err) ?? 'network')
               const error = new ApiError({
                 status: 0,
-                kind: abortKind(err) ?? 'network',
+                kind,
                 statusText: '',
                 body: err,
                 headers: new Headers(),
@@ -232,7 +341,23 @@ export function createGraphQL(config: any): any {
           }
 
           const composed = composeMiddleware(allMiddleware, core, options.skipMiddleware ?? [])
-          return composed(context).then(result => {
+          // Same guard as create-api.ts's execute(), and for the same reason:
+          // composeMiddleware has no guard of its own, so an async middleware
+          // that throws would otherwise escape as a rejection. A middleware
+          // that throws SYNCHRONOUSLY never gets as far as handing back a
+          // promise for `.catch` to attach to — composed(context) itself
+          // throws — so that case is caught here too, rather than falling
+          // through to the outer catch below (which is for setup errors, not
+          // middleware failures, and fallback-kinds them 'network').
+          let resultPromise: Promise<Result<unknown>>
+          try {
+            resultPromise = composed(context).catch(
+              (err: unknown) => buildFailedResult(err, context.request.signal, 'middleware')
+            )
+          } catch (err) {
+            resultPromise = Promise.resolve(buildFailedResult(err, context.request.signal, 'middleware'))
+          }
+          return resultPromise.then(result => {
             // dedupeController is only assigned inside core() — if every
             // middleware short-circuited and core() never ran, it stays
             // undefined here. clear() with no controller deletes the map

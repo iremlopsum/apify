@@ -367,6 +367,32 @@ describe('createGraphQL — onError callback', () => {
     expect(error).toBeNull()
     expect(onError).not.toHaveBeenCalled()
   })
+
+  // Twin of tests/on-error.test.ts's "does not fire for a caller-initiated
+  // abort", for the GraphQL path: src/graphql.ts has its own local
+  // `fireOnError` and its own `buildFailedResult`/core() catch, so this is a
+  // separate discriminating pin, not a duplicate of the REST suite. Finding 3
+  // (round 2 review): nothing exercised this before, so the guard could be
+  // deleted here with no red test.
+  it('does not fire onError for a caller-initiated abort', async () => {
+    const op = new Operation<Record<string, never>, unknown>({ operation: gql`query { health }` })
+    vi.stubGlobal('fetch', hangingGqlFetch())
+    const kinds: string[] = []
+    const ac = new AbortController()
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { health: op },
+      onError: e => { kinds.push(e.kind) },
+    })
+
+    const p = client.health(undefined, { signal: ac.signal })
+    ac.abort()
+
+    const r = await p
+    expect(r.error?.kind).toBe('abort')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(kinds).toEqual([])
+  })
 })
 
 describe('createGraphQL — middleware', () => {
@@ -616,5 +642,200 @@ describe('createGraphQL — error kind', () => {
     // a network problem worth retrying.
     expect(error!.kind).toBe('http')
     expect(error!.status).toBe(200)
+  })
+})
+
+describe('createGraphQL — malformed body on a successful response', () => {
+  it('reports kind "parse" with the real status and a non-null response', async () => {
+    const fakeResponse = {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers(),
+      text: () => Promise.resolve('<html>oops</html>'),
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(fakeResponse))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { broken: new Operation<Record<string, never>, unknown>({ operation: 'query { broken }' }) },
+    })
+
+    const { data, error, response } = await client.broken()
+
+    // Mirrors the REST parse-errors.test.ts assertions: the server answered
+    // (2xx), but the body was not JSON. This must report as what it is --
+    // kind 'parse' with the real status and Response -- not fall through to
+    // the network catch (status 0, response null).
+    expect(data).toBeNull()
+    expect(error?.kind).toBe('parse')
+    expect(error?.status).toBe(200)
+    expect(response).not.toBeNull()
+    expect(response?.status).toBe(200)
+  })
+})
+
+// Round 4 review, Finding 2: graphql.ts's !response.ok branch has the
+// identical bug REST had — response.text() is the network body read, not
+// just parsing, and its catch swallowed everything into body: null with no
+// provenance check. An abort landing while an ERROR body downloads used to
+// misreport as a genuine 'http' error instead of the caller's own
+// cancellation.
+describe('createGraphQL — abort during an error-body download', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('does not report a real abort mid error-body-download as an http error', async () => {
+    const onError = vi.fn()
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+      const s = init.signal as AbortSignal | undefined
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        headers: new Headers(),
+        text: () => new Promise<string>((_resolve, reject) => {
+          if (s?.aborted) { reject(s.reason); return }
+          s?.addEventListener('abort', () => reject(s.reason))
+        }),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { broken: new Operation<Record<string, never>, unknown>({ operation: 'query { broken }' }) },
+      onError,
+    })
+
+    const ac = new AbortController()
+    const p = client.broken(undefined, { signal: ac.signal })
+    ac.abort()
+
+    const { data, error, response } = await p
+    expect(data).toBeNull()
+    expect(error?.kind).toBe('abort')
+    expect(response).toBeNull()
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  // Control: a genuine 503 with no abort must still classify 'http' with
+  // the real status and a non-null response, and still report.
+  it('still reports a genuine error status with no abort as http', async () => {
+    const onError = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable',
+      headers: new Headers(),
+      text: () => Promise.resolve(''),
+    }))
+
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { broken: new Operation<Record<string, never>, unknown>({ operation: 'query { broken }' }) },
+      onError,
+    })
+
+    const { data, error, response } = await client.broken()
+    expect(data).toBeNull()
+    expect(error?.kind).toBe('http')
+    expect(error?.status).toBe(503)
+    expect(response).not.toBeNull()
+    expect(response?.status).toBe(503)
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).toHaveBeenCalledTimes(1)
+  })
+})
+
+// M1 (whole-branch review, final fix wave): the 2xx success path deliberately
+// keeps its own `response.text()` (the network body read) OUTSIDE the
+// JSON.parse try, for the identical provenance reason the error-body path
+// above does — see create-api.ts:678-691 for the fuller writeup, which this
+// file's local comment now points to directly. Without a test pinning this,
+// a contributor "tidying" `await response.text()` into the try would
+// silently flip an abort mid-download from `kind: 'abort'` (status 0, no
+// Response, unreported) to `kind: 'parse'` (status 200, live Response,
+// reported) with a fully green suite.
+describe('createGraphQL — abort during a success-body download', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('does not report a real abort mid success-body-download as a parse failure', async () => {
+    const onError = vi.fn()
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+      const s = init.signal as AbortSignal | undefined
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers(),
+        text: () => new Promise<string>((_resolve, reject) => {
+          if (s?.aborted) { reject(s.reason); return }
+          s?.addEventListener('abort', () => reject(s.reason))
+        }),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const op = new Operation<Record<string, never>, unknown>({ operation: gql`query { health }` })
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: { health: op },
+      onError,
+    })
+
+    const ac = new AbortController()
+    const p = client.health(undefined, { signal: ac.signal })
+    ac.abort()
+
+    const { data, error, response } = await p
+    expect(data).toBeNull()
+    expect(error?.kind).toBe('abort')
+    expect(error?.status).toBe(0)
+    expect(response).toBeNull()
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).not.toHaveBeenCalled()
+  })
+})
+
+describe('GraphQL partial data', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('preserves partial data alongside the errors', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      data: { user: { name: 'Ada' }, posts: null },
+      errors: [{ message: 'posts unavailable' }],
+    }), { status: 200 })))
+    const client = createGraphQL({
+      endpoint: '/gql',
+      operations: { getUser: new Operation<Record<string, never>, { user: { name: string } }>({ operation: 'query { user { name } }' }) },
+    })
+    const r = await client.getUser()
+    expect(r.error).not.toBeNull()
+    expect(r.data).toBeNull()
+    expect(r.error!.partialData).toEqual({ user: { name: 'Ada' }, posts: null })
+  })
+
+  // The fixture must send `data: null` explicitly, not omit `data` entirely —
+  // what a spec-compliant GraphQL server sends when execution began and then
+  // failed outright, and the common real-world shape of "no useful data".
+  // Omitting `data` makes `gqlBody.data` already `undefined` before the `??
+  // undefined` in graphql.ts ever runs, so the assertion below would pass
+  // even with that operator deleted — it wouldn't discriminate the fix at
+  // all. With `data: null` explicit, removing `?? undefined` would leave
+  // `partialData: null`, which fails `.toBeUndefined()`.
+  it('leaves partialData undefined when no data came back', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      data: null,
+      errors: [{ message: 'totally broken' }],
+    }), { status: 200 })))
+    const client = createGraphQL({
+      endpoint: '/gql',
+      operations: { getUser: new Operation<Record<string, never>, unknown>({ operation: 'query { user { name } }' }) },
+    })
+    expect((await client.getUser()).error!.partialData).toBeUndefined()
   })
 })

@@ -41,14 +41,14 @@ import { composeMiddleware } from './middleware.js'
 import { buildUrl, joinUrl } from './utils/path-params.js'
 import { serializeBody } from './utils/serialize.js'
 import { DedupeTracker } from './utils/dedupe.js'
-import { ShareTracker } from './utils/share.js'
+import { ShareTracker, isAbandoned } from './utils/share.js'
 import { mergeHeaders } from './utils/headers.js'
-import { abortKind } from './utils/abort-kind.js'
+import { abortKind, propagatesReason } from './utils/abort-kind.js'
 import { anySignal } from './utils/any-signal.js'
-import { timeoutSignalFor } from './utils/timeout.js'
+import { operationBudget, perCallerBudget } from './utils/budget.js'
 import { stableStringify } from './utils/cache.js'
 import { isSpecialBody, isOpaqueParams } from './utils/special-body.js'
-import type { ApiConfig, CallOptions, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
+import type { ApiConfig, CallOptions, ErrorResult, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
 
 // =============================================================================
 // Type helpers — these bridge Request generics to the API method signatures
@@ -174,22 +174,56 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
  *   which is the refcount's job, not this function's;
  * - a synchronous error during request setup (`'network'`), most often the
  *   `TypeError` `buildUrl` throws for a nested query-string object;
- * - a rejection escaping the middleware chain (`'network'`).
+ * - a rejection escaping the middleware chain (`'middleware'`, or `'network'`
+ *   for a setup failure).
  *
- * `reason` is classified first, so an abort or timeout keeps its own kind
- * regardless of which caller built the Result; `fallbackKind` only applies
- * when it is neither.
+ * Classification is by **provenance**, not by sniffing `reason`'s shape: a
+ * failure only counts as *our* cancellation when `signal` — the AbortSignal
+ * that actually governs this operation — is the one that aborted. That is
+ * what lets a caller's custom abort reason (`ac.abort(new Error('x'))`, or a
+ * plain string) still classify as `'abort'`/`'timeout'` instead of falling
+ * through to `'network'` — `abortKind` only recognises the standard
+ * `AbortError`/`TimeoutError` names, but the signal itself always knows why
+ * it aborted regardless of what shape its `reason` takes.
+ *
+ * For a `'middleware'` fallback this additionally requires `reason` to
+ * *propagate* `signal.reason` (see `propagatesReason` — exact identity, or
+ * one level of `.cause`). A middleware can throw its own `AbortError`-named
+ * failure that has nothing to do with this request's own signal — a
+ * rethrown IndexedDB quota abort, say — and that must stay `'middleware'`,
+ * not be swallowed as `'abort'` just because the name matches. Propagation
+ * is a heuristic for that, not proof — `propagatesReason`'s doc names the
+ * known false positive (a middleware's own error using `{ cause }` to
+ * explain *why* it failed, not to claim it *is* the cancellation) — but it's
+ * the closest approximation available, and rejecting it in favour of exact
+ * identity alone is measurably worse (see the same doc). A non-`'middleware'`
+ * fallback doesn't need that check: a fetch rejection while our own signal
+ * is aborted IS that cancellation, whatever shape fetch happened to throw.
+ *
+ * Deferred item: `error.request.url` here is `joinUrl(baseUrl, request.config.path)`
+ * — the un-substituted path template (e.g. `/users/:id`), not the URL that was
+ * (or would have been) actually requested. That differs from the `'http'` and
+ * `'parse'` paths in `execute()`, which build `error.request.url` from
+ * `ctx.request.url` — the real, path-substituted URL `buildUrl` produced.
+ * Callers branching on `error.request.url` for a `'middleware'` result or a
+ * setup error get the template, not the resolved address. Not fixed here;
+ * recorded so a reader hitting it isn't left to rediscover it.
  */
 function syntheticResult(
   reason: unknown,
-  fallbackKind: 'abort' | 'network',
+  signal: AbortSignal | undefined,
+  fallbackKind: 'abort' | 'network' | 'middleware',
   method: string,
   url: string,
   params: unknown,
   retry: () => Promise<Result<unknown>>
-): Result<unknown> {
+): ErrorResult<unknown> {
+  const isOurCancellation =
+    signal?.aborted === true &&
+    (fallbackKind !== 'middleware' || propagatesReason(reason, signal.reason))
+  const kind = isOurCancellation ? (abortKind(signal!.reason) ?? 'abort') : fallbackKind
   const error = new ApiError({
-    kind: abortKind(reason) ?? fallbackKind,
+    kind,
     status: 0,
     statusText: '',
     body: reason,
@@ -295,6 +329,11 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
    * `onRetry` and the custom `delay` curve in `built-in-middleware.ts`.
    */
   const fireOnError = (error: ApiError): void => {
+    // Aborts are cancellations we caused — a caller's own signal, or a newer
+    // request superseding this one under dedupe. Reporting them to an error
+    // tracker is noise. Timeouts are deliberately NOT suppressed: a deadline
+    // you missed is a genuine failure, which is why the two kinds are separate.
+    if (error.kind === 'abort') return
     if (!onError) return
     try {
       onError(error)
@@ -353,16 +392,21 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * can name `execute` (as the Result's `retry`) before that binding
        * exists further down.
        *
-       * Split out of `failedResult` (below) so the share path's `onAbort` can
-       * build the Result it hands back to a caller WITHOUT necessarily
-       * reporting it: when this release was the last one, the shared
-       * `execute()` will observe the resulting abort itself and report it
-       * through the normal post-execution hook, so reporting it again here
-       * would double it (docs/FIXES.md, "Duplicate onError under share").
+       * Split out of `failedResult` (below) because the share path's `onAbort`
+       * builds a Result and reports it in two visibly separate steps. That
+       * split is now presentational rather than conditional — since the
+       * tracker marks abandonment explicitly, `onAbort` reports every time —
+       * but keeping construction free of the side effect is what let the
+       * reporting decision move out of this function in the first place.
        */
-      function buildFailedResult(reason: unknown, fallbackKind: 'abort' | 'network'): Result<unknown> {
+      function buildFailedResult(
+        reason: unknown,
+        signal: AbortSignal | undefined,
+        fallbackKind: 'abort' | 'network' | 'middleware'
+      ): ErrorResult<unknown> {
         return syntheticResult(
           reason,
+          signal,
           fallbackKind,
           request.config.method,
           joinUrl(baseUrl, request.config.path),
@@ -375,8 +419,12 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * `buildFailedResult` plus reporting to `onError` — the common case,
        * used everywhere a failure has no other path to the error tracker.
        */
-      function failedResult(reason: unknown, fallbackKind: 'abort' | 'network'): Result<unknown> {
-        const result = buildFailedResult(reason, fallbackKind)
+      function failedResult(
+        reason: unknown,
+        signal: AbortSignal | undefined,
+        fallbackKind: 'abort' | 'network' | 'middleware'
+      ): ErrorResult<unknown> {
+        const result = buildFailedResult(reason, signal, fallbackKind)
         fireOnError(result.error as ApiError)
         return result
       }
@@ -397,17 +445,24 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * errors rather than unhandled rejections, keeping the "never throws"
        * contract intact.
        *
-       * `overrideSignal`, when given, replaces the caller's own `options.signal`
-       * / timeout as the signal that actually drives the fetch. This is used
-       * only by the `share: true` path below: the first caller to acquire a
-       * shared slot hands `execute` the ShareTracker's own refcounted signal,
-       * so the real network request is governed by "has every sharer given
-       * up?" rather than by any single caller's personal signal or timeout.
+       * `sharedSignal`, when given, is merged with the operation's own
+       * deadline to form the signal that actually drives the fetch, displacing
+       * this caller's personal `options.signal` / timeout from it. It is never
+       * an override — hence the name. This is used only by the `share: true`
+       * path below: the first caller to acquire a shared slot hands `execute`
+       * the ShareTracker's own refcounted signal, so the real network request
+       * is governed by "has every sharer given up?" rather than by any single
+       * caller's personal signal or timeout.
        * `result.retry()` calls `execute` with no argument, so a retry (shared
        * or not) always falls back to this caller's own `options.signal` /
        * timeout — a retry is a fresh, unshared request.
+       *
+       * `onSettled`, when given, is invoked the instant this operation has a
+       * `Result` and BEFORE that Result is reported to `onError`. The share
+       * site uses it to tell a genuine give-up from a vestigial one; see the
+       * post-execution hook.
        */
-      const execute = (overrideSignal?: AbortSignal): Promise<Result<unknown>> => {
+      const execute = (sharedSignal?: AbortSignal, onSettled?: () => void): Promise<Result<unknown>> => {
         try {
           // -----------------------------------------------------------------
           // Step 1: Compose the middleware chain
@@ -444,7 +499,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // so a retry sequence draws from a single budget rather than getting
           // a fresh one per attempt.
           //
-          // Under `share` (overrideSignal supplied) only the *per-request*
+          // Under `share` (sharedSignal supplied) only the *per-request*
           // deadline applies here, merged with the refcount signal rather than
           // replacing it. `RequestConfig.timeout` is a property of the
           // operation — "this endpoint must answer within 5s" — so it belongs
@@ -459,9 +514,37 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // single caller's patience must not shorten (or lengthen) the shared
           // operation for everyone else, so it is observed per-caller at the
           // share site instead.
-          const callerSignal: AbortSignal | undefined = overrideSignal
-            ? anySignal([overrideSignal, timeoutSignalFor(undefined, request.config.timeout)])
-            : anySignal([options.signal, timeoutSignalFor(options.timeout, request.config.timeout)])
+          //
+          // Both deadlines come from one `resolveBudget`, which is the single
+          // place that knows the operation/per-caller split. It is resolved
+          // here, once per execute(), rather than once per api-method call:
+          // `result.retry()` re-enters execute() and must draw a FRESH
+          // deadline, not the exhausted remains of the first attempt's
+          // (tests/timeout.test.ts, "gives retry() a fresh budget"). Within a
+          // single execute() it is still resolved exactly once, so a
+          // retryMiddleware sequence draws from one budget rather than a new
+          // one per attempt.
+          //
+          // `shared` is keyed on whether THIS run was handed the tracker's
+          // signal, not on `request.config.share`: a share: true endpoint
+          // called with per-call headers, per-call middleware or opaque params
+          // declines to coalesce and arrives here with no `sharedSignal`, and
+          // so does every `result.retry()`. Both are ordinary unshared calls
+          // and must keep this caller's own `options.signal` and
+          // `options.timeout`; keying on the config would silently drop them.
+          // Only the operation half is built here: the per-caller half is the
+          // share site's business, and constructing it here would leave a
+          // retained `abort` listener on the caller's signal for a value this
+          // branch never reads.
+          const operation = operationBudget(
+            options.timeout,
+            request.config.timeout,
+            options.signal,
+            sharedSignal !== undefined
+          )
+          const callerSignal: AbortSignal | undefined = sharedSignal
+            ? anySignal([sharedSignal, operation])
+            : operation
           let dedupeController: AbortController | undefined
 
           // -----------------------------------------------------------------
@@ -502,6 +585,17 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // it. Because registration happens only once, that field still
               // holds a live signal here — never a previous attempt's already
               // aborted dedupe signal.
+
+              // A middleware may have replaced ctx.request.signal with its own
+              // (a deadline, a circuit breaker), dropping the shared
+              // controller — the same hazard the dedupe registration below
+              // re-merges for. Without this, every sharer releasing no longer
+              // aborts the real request: the socket stays open with nobody
+              // waiting on it.
+              if (sharedSignal && ctx.request.signal !== sharedSignal) {
+                ctx.request.signal = anySignal([ctx.request.signal, sharedSignal])
+              }
+
               if (request.config.dedupe && !dedupeController) {
                 const tracked = dedupeTracker.track(name, ctx.request.signal ?? callerSignal)
                 dedupeController = tracked.controller
@@ -539,10 +633,34 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 // Try to parse the error response body using the same
                 // responseType config. If parsing fails (e.g., server returned
                 // HTML for a JSON endpoint), fall back to null.
+                //
+                // Same provenance concern as the success path below —
+                // parseResponse performs the network body read here too, so
+                // an abort landing while an ERROR body downloads (a slow
+                // gateway's multi-kilobyte 502 page, say) must not be
+                // misreported as a genuine 'http' error with a null body.
+                // Without this check the classification is decided by the
+                // server's status code rather than by what actually
+                // happened — the same user action (navigating away) would
+                // read as a real 5xx to retryOn and to onError.
                 let body: unknown
                 try {
                   body = await parseResponse(response, request.config.responseType)
-                } catch {
+                } catch (parseErr) {
+                  const signal = ctx.request.signal
+                  // Same "aborted now, not necessarily caused by" limitation
+                  // as the success-path guard below — see its comment.
+                  if (signal?.aborted === true) {
+                    const error = new ApiError({
+                      status: 0,
+                      kind: abortKind(signal.reason) ?? 'abort',
+                      statusText: '',
+                      body: parseErr,
+                      headers: new Headers(),
+                      request: { method: ctx.request.method, url: ctx.request.url, params }
+                    })
+                    return createNetworkErrorResult(error, execute)
+                  }
                   body = null
                 }
 
@@ -562,7 +680,58 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // ---------------------------------------------------------------
               // Handle successful responses (2xx)
               // ---------------------------------------------------------------
-              const data = await parseResponse(response, request.config.responseType)
+              // Parse in its own try so a malformed body is reported as what it
+              // is: the server responded, we could not read it. Falling through
+              // to the network catch would report status 0 and discard the
+              // Response, telling the caller they are offline when they are not.
+              //
+              // But `parseResponse` doesn't just parse — it performs the
+              // network body read (`response.text()`/`.blob()`/etc.), so an
+              // abort that lands after headers arrive (a component unmounting
+              // mid-download) surfaces HERE, not in the outer catch below.
+              // Provenance still applies: if our own signal is what aborted,
+              // this is our cancellation, not "the server responded but the
+              // body was unreadable" — same check as the outer catch, and the
+              // same response:null/status:0 shape (createNetworkErrorResult)
+              // so this matches what graphql.ts already does for the
+              // identical scenario, which keeps its network read (`await
+              // response.text()`) outside its own JSON.parse try for exactly
+              // this reason — outside the parse-only try to fall through to
+              // the outer catch's provenance handling.
+              let data: unknown
+              try {
+                data = await parseResponse(response, request.config.responseType)
+              } catch (parseErr) {
+                const signal = ctx.request.signal
+                // Known limitation: this checks "is the signal aborted NOW",
+                // not "did the abort CAUSE this catch" — a genuinely
+                // malformed payload that happens to arrive after the signal
+                // was separately aborted is misclassified as the abort too.
+                // Narrowing that requires parseResponse to distinguish its
+                // own read failure from a parse failure across all five
+                // response types, which the doc above already declines.
+                if (signal?.aborted === true) {
+                  const error = new ApiError({
+                    status: 0,
+                    kind: abortKind(signal.reason) ?? 'abort',
+                    statusText: '',
+                    body: parseErr,
+                    headers: new Headers(),
+                    request: { method: ctx.request.method, url: ctx.request.url, params }
+                  })
+                  return createNetworkErrorResult(error, execute)
+                }
+                const error = new ApiError({
+                  kind: 'parse',
+                  status: response.status,
+                  statusText: response.statusText,
+                  body: parseErr,
+                  headers: response.headers,
+                  request: { method: ctx.request.method, url: ctx.request.url, params }
+                })
+                return createErrorResult(error, response, execute)
+              }
+
               return createSuccessResult(data, response, execute)
             } catch (err) {
               // ---------------------------------------------------------------
@@ -575,10 +744,22 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // Status 0 is the convention for "no HTTP response" — the error
               // body contains the native Error (TypeError for network, or
               // DOMException for abort) for debugging.
+              //
+              // Provenance over name-sniffing: if the signal we actually
+              // handed to fetch is the one that's aborted, this failure IS
+              // that cancellation — whatever `fetch` threw, including a
+              // custom, non-`AbortError`-named reason a caller passed to
+              // `ac.abort(reason)`. Only fall back to sniffing `err`'s own
+              // shape when our signal is not the cause, for a genuine
+              // network failure.
               // ---------------------------------------------------------------
+              const signal = ctx.request.signal
+              const kind = signal?.aborted === true
+                ? (abortKind(signal.reason) ?? 'abort')
+                : (abortKind(err) ?? 'network')
               const error = new ApiError({
                 status: 0,
-                kind: abortKind(err) ?? 'network',
+                kind,
                 statusText: '',
                 body: err,
                 headers: new Headers(),
@@ -692,7 +873,29 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // skipMiddleware filters out specific middleware by reference (===).
           // -----------------------------------------------------------------
           const composed = composeMiddleware(allMiddleware, core, options.skipMiddleware ?? [])
-          const resultPromise = composed(context)
+          // composeMiddleware has no guard of its own, and execute()'s try/catch
+          // only covers the synchronous setup above — so an async middleware
+          // that throws escapes as a rejection and breaks the library's one
+          // headline guarantee. Convert it here, before the post-execution
+          // hook, so the failure reaches onError like any other.
+          //
+          // A middleware that throws SYNCHRONOUSLY (a plain, non-async
+          // function) never gets as far as handing back a promise for
+          // `.catch` to attach to — composed(context) itself throws, before
+          // this statement finishes evaluating. The surrounding try/catch
+          // below already turns that into a Result, but with fallback kind
+          // 'network' — correct for a setup error (e.g. buildUrl's
+          // TypeError), wrong for a throwing middleware. Catching it here
+          // too, right alongside the async case, keeps both classified as
+          // 'middleware' and routed through the same post-execution hook.
+          let resultPromise: Promise<Result<unknown>>
+          try {
+            resultPromise = composed(context).catch(
+              (err: unknown) => buildFailedResult(err, context.request.signal, 'middleware')
+            )
+          } catch (err) {
+            resultPromise = Promise.resolve(buildFailedResult(err, context.request.signal, 'middleware'))
+          }
 
           // -----------------------------------------------------------------
           // Step 9: Post-execution hooks (dedupe cleanup + onError)
@@ -704,6 +907,26 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           //    (only fires on final error — if retry middleware recovered, no fire)
           // -----------------------------------------------------------------
           return resultPromise.then(result => {
+            // This operation now has a Result. Announce it before reporting
+            // anything: a sharer whose own signal is aborted from inside the
+            // `onError` below must be able to tell, synchronously, that it was
+            // never left waiting. Every later hop is too late — see the share
+            // site's `onAbort`.
+            // `retry` hands this very function to consumers, so the second
+            // parameter can receive anything a caller's call shape supplies —
+            // `arr.map(result.retry)` passes the index. Guard on the type
+            // rather than trusting the shape: a non-function here would throw
+            // from inside the one path that must always produce a Result.
+            // A function that itself throws is guarded too, for the same
+            // reason: this hook must never fail a request that already has a
+            // perfectly good Result, and a throw here is exactly the kind of
+            // consumer-supplied misbehaviour that would resurrect the
+            // rejection path the share site's defense-in-depth handlers exist
+            // to catch (see ShareTracker's callers in this file).
+            if (typeof onSettled === 'function') {
+              try { onSettled() } catch { /* a settlement callback must not fail a request */ }
+            }
+
             // Clean up dedupe tracking after the request completes.
             // This must happen before onError so that onError handlers can
             // immediately fire a new request without triggering a dedupe abort.
@@ -721,7 +944,51 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // This is the "last chance" error hook — middleware has already had
             // its opportunity to handle/recover the error. Guarded: a throwing
             // handler must not reject a promise that already holds a Result.
-            if (result.error) fireOnError(result.error as ApiError)
+            //
+            // Abandonment is not itself a failure: the tracker aborted this
+            // request because nobody is waiting on it any more, not because
+            // anything went wrong. This guard exists so that outcome doesn't
+            // get reported here as an operation-level failure. `sharedSignal`
+            // is consulted rather than the error's body because the tracker's
+            // abort reason is authoritative: it says *why the request ended*,
+            // whereas the error body is whatever `fetch` (or a middleware
+            // reacting to the abort) happened to produce.
+            //
+            // This is NOT "every caller has already received and reported its
+            // own Result" — that used to be true, but Task 10 (`onError` no
+            // longer fires for `error.kind === 'abort'`) broke it. A plain
+            // abort-flavoured give-up is dropped by `fireOnError`'s own kind
+            // check regardless of this guard, so it produces ZERO reports —
+            // the caller still gets a real `ErrorResult` back, it just never
+            // reaches `onError`. `tests/share.test.ts`'s "two sharers both
+            // abort" (row 2) pins exactly that: `kinds` ends up `[]`. Only a
+            // give-up whose kind survives `fireOnError` (a genuine timeout) is
+            // actually reported, by that caller's own `onAbort` — see "two
+            // sharers both time out" (row 2b) in the same file.
+            //
+            // What this guard does still guarantee: it is never a *second*
+            // report of a failure a sharer's own `onAbort` already reported or
+            // will report for the SAME operation-level outcome. Two legs, both
+            // load-bearing:
+            //
+            //  1. `release()` has exactly one call site — the share site's
+            //     `onAbort` — and the `fireOnError` call there is `if
+            //     (!hasSettled()) fireOnError(...)`, not unconditional. The
+            //     guard can only suppress that caller's own report; it never
+            //     adds one, so it can never turn into a SECOND report for
+            //     the same operation-level outcome.
+            //  2. A sharer with no `perCaller` budget never releases at all.
+            //     It takes the `if (!perCaller) return promise.then(...)`
+            //     fast path, so it holds its reference for as long as it
+            //     waits, which keeps `refs > 0` and makes abandonment
+            //     unreachable while any such caller is still waiting.
+            //
+            // Leg 2 is why abandonment can never fire out from under a caller
+            // that has no give-up path of its own. Adding a second `release()`
+            // call site, or giving that fast path one, breaks the invariant
+            // this suppression assumes.
+            const abandoned = sharedSignal?.aborted === true && isAbandoned(sharedSignal.reason)
+            if (result.error && !abandoned) fireOnError(result.error as ApiError)
 
             return result
           })
@@ -739,7 +1006,17 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // unhandled rejection.
           // -----------------------------------------------------------------
           // Fire onError for synchronous errors too — they're still errors.
-          return Promise.resolve(failedResult(err, 'network'))
+          // `undefined`, not `callerSignal`, is passed here for two reasons:
+          // (a) `callerSignal` is a `const` scoped inside the `try` above and
+          // is simply unreachable from this `catch` block; and (b), the
+          // reason that matters — this is a deliberate policy, not a
+          // limitation to route around by hoisting it into scope. A bug in
+          // request *setup* (buildUrl's TypeError, a BigInt timeout reaching
+          // Math.min) must always report as the setup bug it is, even when
+          // the caller has ALSO aborted around the same time — silently
+          // reclassifying a real setup failure as 'abort' just because a
+          // signal happens to be aborted would hide it from onError.
+          return Promise.resolve(failedResult(err, undefined, 'network'))
         }
       }
 
@@ -800,16 +1077,21 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
         //
         // Deliberately *not* `request.config.timeout`: that one belongs to the
         // operation, is shared by every caller, and is applied inside execute()
-        // against the request's own start time. Computed before acquire() so a
+        // against the request's own start time. `perCallerBudget` is the half
+        // of the budget that knows only about this caller — asking for exactly
+        // that half is what keeps the two straight, and avoids allocating an
+        // operation deadline nobody here reads. Computed before acquire() so a
         // throw from here cannot strand a shared request that this caller then
         // never releases.
-        const perCaller = anySignal([options.signal, timeoutSignalFor(options.timeout, undefined)])
+        const perCaller = perCallerBudget(options.timeout, options.signal)
 
         // acquire() either starts the real request (first caller — exec is
         // called with the tracker's own refcounted signal, which becomes the
         // signal that actually drives fetch) or joins an identical one already
         // in flight. Either way every sharer gets the same promise back.
-        const { promise, release } = shareTracker.acquire(shareKey, signal => execute(signal))
+        const { promise, release, hasSettled } = shareTracker.acquire(shareKey, (signal, markSettled) =>
+          execute(signal, markSettled)
+        )
 
         // execute() converts synchronous errors to Results, but a *rejection*
         // from the middleware chain (an async middleware that throws) escapes
@@ -823,7 +1105,18 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
         // for this caller to race against — it can only ever learn its result
         // from `promise` settling, so this is the whole story for it, same as
         // it always reported.
-        if (!perCaller) return promise.then(r => r, (err: unknown) => failedResult(err, 'network'))
+        //
+        // As of the never-throws fix (Task 9), `execute()` itself converts a
+        // middleware rejection into a Result before it ever gets here — so
+        // `promise` has no live producer of a rejection today, and this arm
+        // is dead in normal operation. Kept as defense-in-depth: "execute()
+        // never rejects" is an invariant held by code, not by types. The
+        // invariant itself — not this now-unreachable arm — is what is
+        // pinned, by `tests/never-throws.test.ts`: if a future change lets
+        // `execute()` reject again, those tests fail loudly, and this arm
+        // becomes live again to catch exactly the rejection they'd be
+        // failing on.
+        if (!perCaller) return promise.then(r => r, (err: unknown) => failedResult(err, undefined, 'network'))
 
         // Race this caller's own giving-up against the shared result settling.
         // Giving up calls release(), which only decrements the refcount — the
@@ -849,39 +1142,53 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
               // underlying give-up a second time, under a DIFFERENT kind
               // ('network' here vs. whatever `onAbort` already reported).
               // Bail before constructing anything.
+              //
+              // Same status as the `!perCaller` arm above: since Task 9,
+              // `execute()` converts a middleware rejection into a Result
+              // before `promise` can ever reject, so this whole rejection
+              // handler — the `done` bail included — has no live producer
+              // today. Kept as defense-in-depth for the same reason: the
+              // no-reject invariant lives in code, not in types, and it is
+              // that invariant — pinned by `tests/never-throws.test.ts` —
+              // rather than this arm itself, that is what is actually
+              // tested. If `execute()` ever rejects again, those tests fail
+              // loudly, and this bail (and the arm around it) is what
+              // catches the fallout.
               if (done) return
-              finish(failedResult(err, 'network'))
+              finish(failedResult(err, undefined, 'network'))
             }
           )
 
-          // Fix 1 (2.2.1, "Duplicate onError under share"): a sharer's own
-          // timeout or abort is a genuine failure that belongs in an error
-          // tracker, and this path builds its Result directly, bypassing
-          // execute()'s post-execution hook entirely — so when this is NOT
-          // the last release, nothing else will ever report it, and this
-          // path must. When it WAS the last reference, that release aborts
-          // the shared controller — but the shared execute()'s hook only
-          // reports when the operation then RESOLVES WITH AN ERROR RESULT.
-          // Two reachable cases where it doesn't (review finding, 2.2.1):
-          // the shared chain REJECTS instead of resolving (a middleware that
-          // throws on abort — a token-fetching auth middleware is the
-          // realistic case), or it SHORT-CIRCUITS TO SUCCESS regardless of
-          // the abort (a cacheMiddleware hit, which we ship, never consults
-          // the signal). Assuming the delegate always reports produced ZERO
-          // reports in both — worse than the duplicate this fix removes. So
-          // don't assume: watch what the shared promise actually does, and
-          // report here whenever the delegate didn't (and won't).
+          // This caller gave up. That is its own failure, distinct from the
+          // operation's, and this path builds its Result directly rather than
+          // through execute()'s hook — so it reports, always.
+          //
+          // Unconditional is now correct because abandonment is explicit: if
+          // this release was the last one, the tracker aborts the shared
+          // request with ABANDONED and execute()'s hook stays silent. Before
+          // that sentinel existed this had to guess whether the delegate would
+          // report, and guessed wrong in both directions — twice producing a
+          // duplicate, twice producing zero.
+          //
+          // "Gave up" is the load-bearing word. A caller whose operation has
+          // already produced a Result was never left waiting: its abort is
+          // vestigial, and the operation has already reported that Result
+          // itself. The realistic source is an `onError` handler that cancels
+          // the rest of a batch on the first failure — it runs inside the
+          // hook above, so the abort lands while this listener is still
+          // armed. Reporting then produces two reports ('http' and 'abort')
+          // where an identical non-shared call produces one.
+          //
+          // `hasSettled()` is the operation's own synchronous answer, taken
+          // before it reported. Neither `done` nor any flag set from
+          // `promise.then` can serve here: the hook fires ~3 microtask hops
+          // ahead of them, so both are still false in exactly the window this
+          // guards. The Result handed back is unchanged either way — only the
+          // report is suppressed.
           const onAbort = (): void => {
-            const wasLast = release(perCaller.reason)
-            const result = buildFailedResult(perCaller.reason, 'abort')
-            if (!wasLast) {
-              fireOnError(result.error as ApiError)
-            } else {
-              promise.then(
-                r => { if (!r.error) fireOnError(result.error as ApiError) },
-                () => fireOnError(result.error as ApiError)
-              )
-            }
+            release()
+            const result = buildFailedResult(perCaller.reason, perCaller, 'abort')
+            if (!hasSettled()) fireOnError(result.error as ApiError)
             finish(result)
           }
 
@@ -889,7 +1196,10 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           else perCaller.addEventListener('abort', onAbort, { once: true })
         })
       } catch (err) {
-        return Promise.resolve(failedResult(err, 'network'))
+        // Setup for the share path itself threw (e.g. a BigInt timeout
+        // reaching Math.min in perCallerBudget) — before acquire(), so there
+        // is no operative signal yet to check provenance against.
+        return Promise.resolve(failedResult(err, undefined, 'network'))
       }
     }
   }

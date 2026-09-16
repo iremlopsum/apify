@@ -12,7 +12,7 @@
 // 3. Network error (offline, DNS, abort) → createNetworkErrorResult (no Response)
 // =============================================================================
 
-import type { Result } from './types.js'
+import type { Result, SuccessResult, ErrorResult } from './types.js'
 
 // -----------------------------------------------------------------------------
 // ApiError Kind
@@ -25,10 +25,14 @@ import type { Result } from './types.js'
  * `'timeout'` all carry `status: 0`, and they call for completely different
  * handling — retry, ignore, and report respectively.
  *
- * `'parse'` is declared for forward compatibility and is not produced by this
- * release.
+ * `'parse'` is produced starting this release, for a response body that
+ * failed to parse according to the request's `responseType`.
+ *
+ * `'middleware'` means a middleware threw rather than the request itself
+ * failing — a bug in consumer code you would fix, not a transient failure
+ * you would retry.
  */
-export type ApiErrorKind = 'http' | 'network' | 'abort' | 'timeout' | 'parse'
+export type ApiErrorKind = 'http' | 'network' | 'abort' | 'timeout' | 'parse' | 'middleware'
 
 // -----------------------------------------------------------------------------
 // ApiError Options
@@ -44,8 +48,8 @@ interface ApiErrorOptions {
   /** HTTP status code (e.g., 404, 500). Use 0 for network errors and aborts. */
   status: number
 
-  /** What category of failure this is. Optional for backward compatibility. */
-  kind?: ApiErrorKind
+  /** What category of failure this is. */
+  kind: ApiErrorKind
 
   /** HTTP status text (e.g., 'Not Found'). Use '' for network errors and aborts. */
   statusText: string
@@ -74,6 +78,18 @@ interface ApiErrorOptions {
     url: string
     params: unknown
   }
+
+  /**
+   * Data the server returned alongside the errors.
+   *
+   * GraphQL allows partial success — a nullable field errors while the rest of
+   * the query resolves. That data lives here rather than in `Result.data` so
+   * the Result stays a clean discriminated union: `data` is non-null if and
+   * only if `error` is null.
+   *
+   * `undefined` for every REST error and for GraphQL responses carrying no data.
+   */
+  partialData?: unknown
 }
 
 // -----------------------------------------------------------------------------
@@ -118,13 +134,8 @@ export class ApiError {
   /** HTTP status code, or 0 for network errors and aborted requests. */
   readonly status: number
 
-  /**
-   * What category of failure this is.
-   *
-   * `undefined` only if an `ApiError` was constructed without one — every
-   * error the library itself produces sets it.
-   */
-  readonly kind?: ApiErrorKind
+  /** What category of failure this is. */
+  readonly kind: ApiErrorKind
 
   /** HTTP status text, or '' for network errors and aborted requests. */
   readonly statusText: string
@@ -147,6 +158,18 @@ export class ApiError {
    */
   readonly request: { method: string; url: string; params: unknown }
 
+  /**
+   * Data the server returned alongside the errors.
+   *
+   * GraphQL allows partial success — a nullable field errors while the rest of
+   * the query resolves. That data lives here rather than in `Result.data` so
+   * the Result stays a clean discriminated union: `data` is non-null if and
+   * only if `error` is null.
+   *
+   * `undefined` for every REST error and for GraphQL responses carrying no data.
+   */
+  readonly partialData?: unknown
+
   constructor(options: ApiErrorOptions) {
     this.status = options.status
     this.kind = options.kind
@@ -154,6 +177,7 @@ export class ApiError {
     this.body = options.body
     this.headers = options.headers
     this.request = options.request
+    this.partialData = options.partialData
   }
 }
 
@@ -182,7 +206,7 @@ export function createSuccessResult<TResponse>(
   data: TResponse,
   response: Response,
   retry: () => Promise<Result<TResponse>>
-): Result<TResponse> {
+): SuccessResult<TResponse> {
   return { data, error: null, response, retry }
 }
 
@@ -203,7 +227,7 @@ export function createErrorResult<TResponse>(
   error: ApiError,
   response: Response,
   retry: () => Promise<Result<TResponse>>
-): Result<TResponse> {
+): ErrorResult<TResponse> {
   return { data: null, error, response, retry }
 }
 
@@ -221,6 +245,6 @@ export function createErrorResult<TResponse>(
 export function createNetworkErrorResult<TResponse>(
   error: ApiError,
   retry: () => Promise<Result<TResponse>>
-): Result<TResponse> {
+): ErrorResult<TResponse> {
   return { data: null, error, response: null, retry }
 }

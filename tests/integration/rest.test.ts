@@ -313,6 +313,106 @@ describe('onError', () => {
     expect(data?.recovered).toBe(true)
     expect(onError).not.toHaveBeenCalled()
   })
+
+  // Round 3 review, Finding 1: parseResponse doesn't just parse — it
+  // performs the network body read (response.text()/.blob()/etc.), so an
+  // abort landing AFTER headers arrive (a component unmounting mid-download)
+  // used to surface in the success-path `catch (parseErr)` block, which had
+  // no provenance check: `kind: 'parse'`, `status: 200`, and — worse for
+  // this describe block — reported to onError, mislabelling a user's own
+  // cancellation as "the server responded but the body would not parse".
+  // graphql.ts already got this right by accident of structure (its network
+  // read is outside its own JSON.parse try); this is REST's real-server
+  // reproduction of the same scenario, using a server that sends real
+  // headers, a real partial body, then genuinely pauses — so the abort lands
+  // while parseResponse's response.text() is actually in flight, not
+  // simulated.
+  it('does not report a real abort that lands mid-body-download as a parse failure', async () => {
+    const onError = vi.fn()
+    const slowBody = new Request<Record<string, never>, unknown>({
+      method: 'GET',
+      path: '/slow-body',
+    })
+    const api = createApi({ baseUrl: server.baseUrl, requests: { slowBody }, onError })
+
+    const ac = new AbortController()
+    const p = api.slowBody(undefined, { signal: ac.signal })
+    // Give the real headers (and the partial chunk) time to arrive before
+    // aborting — the server's own completion is 2000ms out, well past this.
+    await new Promise(resolve => setTimeout(resolve, 100))
+    ac.abort()
+
+    const { data, error, response } = await p
+    expect(data).toBeNull()
+    expect(error!.kind).toBe('abort')
+    expect(response).toBeNull()
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  // Round 4 review, Finding 2: the !response.ok branch reads the error
+  // body too (parseResponse again), and its catch swallowed EVERYTHING into
+  // body: null with no provenance check — so an abort landing while an
+  // error body downloads used to misreport as a genuine 'http' error
+  // (status 503, body null) instead of the user's own cancellation. Same
+  // user action as the 2xx test above; only the server's status code used
+  // to decide which story the caller got.
+  it('does not report a real abort that lands mid-error-body-download as an http error', async () => {
+    const onError = vi.fn()
+    const slowBodyError = new Request<Record<string, never>, unknown>({
+      method: 'GET',
+      path: '/slow-body-error',
+    })
+    const api = createApi({ baseUrl: server.baseUrl, requests: { slowBodyError }, onError })
+
+    const ac = new AbortController()
+    const p = api.slowBodyError(undefined, { signal: ac.signal })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    ac.abort()
+
+    const { data, error, response } = await p
+    expect(data).toBeNull()
+    expect(error!.kind).toBe('abort')
+    expect(response).toBeNull()
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  // Control, reworded (round 5 review, Finding M3): /slow-body-error writes
+  // '{"partial":true,' then finishes with '"done":true}' -- the ASSEMBLED
+  // body ('{"partial":true,"done":true}') is valid JSON, so parseResponse
+  // succeeds here and the new abort-provenance catch above is never
+  // entered at all; `error.body` is the parsed object, not null. This does
+  // NOT exercise that catch's fallback branch (see
+  // tests/parse-errors.test.ts's "classifies as http with a null body..."
+  // for the test that actually pins kind: 'http' + body: null against a
+  // genuinely unparseable body). What this control proves is narrower but
+  // still real: the slow-but-uncancelled non-2xx path completes end to end
+  // over a real connection -- real status, a real (parsed) body, classified
+  // 'http', reported once -- unaffected by the new check that only
+  // activates on an aborted signal.
+  it('completes a slow (but uncancelled) non-2xx response normally, end to end', async () => {
+    const onError = vi.fn()
+    const slowBodyError = new Request<Record<string, never>, { partial: boolean; done: boolean }>({
+      method: 'GET',
+      path: '/slow-body-error',
+    })
+    const api = createApi({ baseUrl: server.baseUrl, requests: { slowBodyError }, onError })
+
+    const { data, error, response } = await api.slowBodyError()
+
+    expect(data).toBeNull()
+    expect(error!.kind).toBe('http')
+    expect(error!.status).toBe(503)
+    expect(error!.body).toEqual({ partial: true, done: true })
+    expect(response).not.toBeNull()
+    expect(response!.status).toBe(503)
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(onError).toHaveBeenCalledTimes(1)
+  }, 5000)
 })
 
 describe('retry()', () => {

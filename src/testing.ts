@@ -18,7 +18,7 @@
 // =============================================================================
 
 import { createSuccessResult, createErrorResult, ApiError } from './result.js'
-import type { Result } from './types.js'
+import type { Result, SuccessResult, ErrorResult } from './types.js'
 
 /** A JSON response with the right content-type, for use as a route value. */
 export function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
@@ -198,6 +198,11 @@ export function mockFetch(routes: Record<string, RouteValue>) {
   }
 }
 
+// The `SuccessResult<T>` / `ErrorResult<T>` locals below (rather than `Result<T>`)
+// are what make a future `Result` change fail loudly here — that's enforced by
+// `npm run typecheck` (tsc over src/), not by tests/types.test-d.ts, which
+// asserts the public `Result<T>` contract these builders still expose.
+
 /**
  * A success `Result`, for consumers stubbing at the api level.
  *
@@ -206,7 +211,7 @@ export function mockFetch(routes: Record<string, RouteValue>) {
  * success, so a hand-rolled literal breaks on that upgrade and this does not.
  */
 export function successResult<T>(data: T, init: ResponseInit = {}): Result<T> {
-  const result: Result<T> = createSuccessResult(data, jsonResponse(data, init), async () => result)
+  const result: SuccessResult<T> = createSuccessResult(data, jsonResponse(data, init), async () => result)
   return result
 }
 
@@ -220,6 +225,6 @@ export function errorResult<T>(status: number, body: unknown = null): Result<T> 
     headers: new Headers(),
     request: { method: 'GET', url: '', params: {} },
   })
-  const result: Result<T> = createErrorResult<T>(error, jsonResponse(body, { status }), async () => result)
+  const result: ErrorResult<T> = createErrorResult<T>(error, jsonResponse(body, { status }), async () => result)
   return result
 }
