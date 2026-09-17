@@ -55,11 +55,18 @@ type TakeName<S extends string, Acc extends string = ''> =
  * holds, so `ApiMethod`'s optional-params branch still fires and `api.health()`
  * stays callable with no arguments.
  *
+ * A token must BEGIN a path segment, mirroring `buildUrl`'s Phase 1b
+ * (src/utils/path-params.ts, search "A token must BEGIN a path segment"):
+ * matching is anchored to `/:` rather than a bare `:`, so a colon that appears
+ * mid-segment — a Google-style custom method like `/v1/documents:batchGet`,
+ * or a time like `/events/at/12:30` — is never mistaken for a token. Both of
+ * those paths parse to `{}`, not `{ batchGet: ... }` or `{ '30': ... }`.
+ *
  * Exported for `tests/types.test-d.ts`. Not re-exported from `src/index.ts`, so
  * it is not public API — see index.ts's note on what is deliberately withheld.
  */
 export type PathParams<P extends string> =
-  P extends `${string}:${infer Tail}`
+  P extends `${string}/:${infer Tail}`
     ? TakeName<Tail> extends infer Name extends string
       ? Name extends ''
         ? PathParams<Tail>
@@ -90,6 +97,12 @@ export type Id<T> = { [K in keyof T]: T[K] } & {}
  * through untouched. That matters: constraining the config parameter directly
  * rejects both of those legitimate forms, which is exactly the permissiveness
  * problem recorded in `ResponseType`'s JSDoc in types.ts.
+ *
+ * The other side of "literal only" is `TResponse`, not `TRT`: the check is
+ * `undefined extends TResponse`, so any `TResponse` that ADMITS `undefined` —
+ * `User | undefined`, `any`, `unknown` — satisfies the guard and is not
+ * rejected, same as the exact type `undefined`. Only a `TResponse` that
+ * excludes `undefined` entirely trips it.
  *
  * The failure branch uses a non-colliding marker property, `__emptyBodyMismatch`,
  * rather than reusing `responseType`. Reusing `responseType` collapses that

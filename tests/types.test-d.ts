@@ -192,6 +192,11 @@ describe('defineRequest — the path parser', () => {
     // than tested. Note buildUrl produces a second '?' if the call also has
     // query params (BACKLOG §2.3); that is pre-existing and not this feature's.
     expectTypeOf<keyof PathParams<'/search/:q?x=1'>>().toEqualTypeOf<'q'>()
+    // A token must BEGIN a path segment, matching buildUrl's Phase 1b. A colon
+    // inside a segment — a Google-style custom method, or a time — is not a token.
+    expectTypeOf<keyof PathParams<'/v1/documents:batchGet'>>().toEqualTypeOf<never>()
+    expectTypeOf<keyof PathParams<'/events/at/12:30'>>().toEqualTypeOf<never>()
+    expectTypeOf<keyof PathParams<'/v1/docs:run/:id'>>().toEqualTypeOf<'id'>()
   })
 })
 
@@ -246,9 +251,21 @@ describe('defineRequest — inference through createApi', () => {
 })
 
 describe('defineRequest — the responseType: none guard', () => {
-  it("accepts 'none' when TResponse is undefined", () => {
-    const ping = defineRequest<undefined>()({ method: 'POST', path: '/ping', responseType: 'none' })
-    expectTypeOf(ping).toMatchTypeOf<Request<object, undefined>>()
+  it("accepts 'none' when TResponse is undefined", async () => {
+    // `toMatchTypeOf<Request<object, undefined>>()` is structural and this
+    // shape is nearly vacuous — it would pass for almost any Request. Route
+    // it through createApi instead and pin the thing that actually matters:
+    // `data` is `undefined` on the success branch, in the style of the
+    // `responseType: 'none'` describe block above.
+    const pingApi = createApi({
+      baseUrl: '/api',
+      requests: {
+        ping: defineRequest<undefined>()({ method: 'POST', path: '/ping', responseType: 'none' }),
+      },
+    })
+    const r = await pingApi.ping()
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<undefined>()
   })
 
   it("rejects 'none' paired with a declared response body", () => {

@@ -26,6 +26,12 @@ const cases: Array<[path: string, params: Record<string, string | number>, url: 
   ['/users/:id_v2',           { id_v2: 9 },                        '/users/9'],
   ['/a/:one/b/:two/c/:three', { one: 1, two: 2, three: 3 },        '/a/1/b/2/c/3'],
   ['/search/:q?x=1',          { q: 'hi' },                         '/search/hi?x=1'],
+  // A token must BEGIN a path segment, matching buildUrl's Phase 1b. A colon
+  // mid-segment — a Google-style custom method, or a time — is not a token,
+  // so the path is returned unchanged and the params are NOT consumed.
+  ['/v1/documents:batchGet',  {},                                  '/v1/documents:batchGet'],
+  ['/events/at/12:30',        {},                                  '/events/at/12:30'],
+  ['/v1/docs:run/:id',        { id: 7 },                           '/v1/docs:run/7'],
 ]
 
 describe('the type-level parser agrees with buildUrl', () => {
