@@ -5,6 +5,7 @@ import type { MiddlewareContext, CallOptions, RequestConfig } from '../src/types
 import type { ApiErrorKind } from '../src/types.js'
 import { successResult, errorResult } from '../src/testing.js'
 import type { ApiError } from '../src/types.js'
+import type { PathParams } from '../src/define-request.js'
 
 interface User { id: string; name: string }
 
@@ -165,5 +166,25 @@ describe("responseType: 'none'", () => {
     const base: RequestConfig = { method: 'GET', path: '/u/:id' }
     const req = new Request<{ id: string }, User>({ ...base, path: '/x' })
     expectTypeOf(req).toEqualTypeOf<Request<{ id: string }, User>>()
+  })
+})
+
+describe('defineRequest — the path parser', () => {
+  it('extracts exactly the tokens buildUrl substitutes', () => {
+    // Deliberately duplicates tests/define-request.test.ts's case table. That
+    // test proves what the RUNTIME does; this one proves what the TYPE says.
+    // A single case table would prove only that a file agrees with itself.
+    expectTypeOf<keyof PathParams<'/users/:id'>>().toEqualTypeOf<'id'>()
+    expectTypeOf<keyof PathParams<'/orgs/:org/repos/:repo'>>().toEqualTypeOf<'org' | 'repo'>()
+    expectTypeOf<keyof PathParams<'/health'>>().toEqualTypeOf<never>()
+    expectTypeOf<keyof PathParams<'/orgs/:id/members/:id'>>().toEqualTypeOf<'id'>()
+    expectTypeOf<keyof PathParams<'/users/:id.json'>>().toEqualTypeOf<'id'>()
+    expectTypeOf<keyof PathParams<'/a/:id-b'>>().toEqualTypeOf<'id'>()
+    expectTypeOf<keyof PathParams<'/users/:id_v2'>>().toEqualTypeOf<'id_v2'>()
+    expectTypeOf<keyof PathParams<'/a/:one/b/:two/c/:three'>>().toEqualTypeOf<'one' | 'two' | 'three'>()
+    // A '?' ends a token name too — the spec flagged this as assumed rather
+    // than tested. Note buildUrl produces a second '?' if the call also has
+    // query params (BACKLOG §2.3); that is pre-existing and not this feature's.
+    expectTypeOf<keyof PathParams<'/search/:q?x=1'>>().toEqualTypeOf<'q'>()
   })
 })
