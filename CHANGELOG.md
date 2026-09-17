@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.2] — 2026-09-17
+
+One fix, completing 4.0.1's work. No public API change, and no behavioural
+change to any successful call.
+
+### Fixed
+
+- **`error.request.url` now reports the resolved, path-substituted URL on every
+  error path that can name one.** Three paths previously carried the raw route
+  template (`/users/:id`): a `share: true` caller giving up, `execute()`'s
+  setup-error catch, and the share path's own setup catch. Grouping telemetry
+  by that field produced two shapes for the same endpoint. 4.0.1 fixed the
+  `'middleware'` paths; this completes the set.
+
+  **Ordinary aborts were already correct** and are unchanged — a caller
+  cancelling mid-flight, a dedupe supersede, and a middleware rethrowing the
+  signal reason are all classified inside `execute()`'s `core` catch and have
+  reported the resolved URL since before 4.0.1.
+
+  The template still appears in the one case where it is the only honest
+  answer: `buildUrl` itself threw, so no URL was ever resolved. An unresolved
+  `:token` and a nested object reaching a query string both land there.
+
+  Consumers asserting on the template string in their own tests will see a
+  change. The value was wrong, and this is the same class of correction 4.0.1
+  shipped as a patch.
+
 ## [4.0.1] — 2026-09-16
 
 Three consistency fixes. No behavioural change to any successful call, and no
@@ -569,6 +596,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.0.2]: https://github.com/iremlopsum/apify/compare/v4.0.1...v4.0.2
 [4.0.1]: https://github.com/iremlopsum/apify/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/iremlopsum/apify/compare/v3.1.0...v4.0.0
 [3.1.0]: https://github.com/iremlopsum/apify/compare/v3.0.0...v3.1.0
