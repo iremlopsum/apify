@@ -354,7 +354,7 @@ describe('cacheMiddleware', () => {
     expect(callCount).toBe(2)
   })
   // ---------------------------------------------------------------------------
-  // docs/FIXES.md #14: stableStringify collapses FormData, Blob, ArrayBuffer
+  // FIXES audit #14: stableStringify collapses FormData, Blob, ArrayBuffer
   // and URLSearchParams to the literal string "{}" — it falls through to
   // Object.keys() for any object, and Object.keys() returns [] for all of them
   // regardless of content. Two different uploads through one cache therefore
@@ -442,7 +442,7 @@ describe('cacheMiddleware', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // Fix 3 (2.2.1): the guard added for docs/FIXES.md #14 reused isSpecialBody,
+  // Fix 3 (2.2.1): the guard added for FIXES audit #14 reused isSpecialBody,
   // which also excludes a raw `string` — but stableStringify keys a string
   // correctly (via JSON.stringify), so a string-param endpoint is soundly
   // cacheable. Sharing the predicate with isSpecialBody silently disabled

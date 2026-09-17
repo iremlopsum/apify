@@ -449,7 +449,7 @@ describe('share', () => {
 
   // ---------------------------------------------------------------------------
   // Fix 3 (2.2.1): canShare shared isSpecialBody with cacheMiddleware's guard
-  // for docs/FIXES.md #14, which also excludes a raw string — but
+  // for FIXES audit #14, which also excludes a raw string — but
   // stableStringify keys a string correctly (via JSON.stringify), so a
   // string-param endpoint is soundly coalescable. Narrowed to isOpaqueParams
   // (the four object types only); FormData/Blob/ArrayBuffer/URLSearchParams
@@ -559,7 +559,7 @@ describe('share', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Fix 1 (2.2.1, docs/FIXES.md "Duplicate onError under share"): a sharer that
+// Fix 1 (2.2.1, "Duplicate onError under share"): a sharer that
 // gives up reports its own failure via failedResult, which is correct and
 // necessary for a non-last release — the shared execute() never fails on its
 // own account, so nothing else would report it. But when the release IS the

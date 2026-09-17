@@ -4,3 +4,10 @@ dist
 .superpowers
 .worktrees
 BACKLOG.md
+
+# Agent-facing working notes — local only, never committed. Claude Code reads
+# these from disk, so ignoring them costs nothing operationally.
+/CLAUDE.md
+/architecture.md
+docs/
+.claude/

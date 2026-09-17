@@ -247,7 +247,7 @@ worked before/after examples for every one of them.
 
 Five fixes closing findings that were identified and deliberately parked
 during 2.2.0's final review (see "Known, recorded, not fixed" in that
-release's notes, and `docs/FIXES.md`). No public API change.
+release's notes). No public API change.
 
 ### Fixed
 
