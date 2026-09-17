@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { buildUrl } from '../src/utils/path-params.js'
+import { createApi } from '../src/create-api.js'
+import { defineRequest } from '../src/define-request.js'
+import { Request } from '../src/request.js'
+import { vi, afterEach } from 'vitest'
 
 /**
  * Each row is a path and the params the TYPE-LEVEL parser infers for it (see
@@ -31,5 +35,37 @@ describe('the type-level parser agrees with buildUrl', () => {
     // Every key the type declares must be CONSUMED by substitution. A key left
     // in `remaining` means the type named a param the path does not have.
     expect(Object.keys(out.remaining)).toEqual([])
+  })
+})
+
+describe('defineRequest at runtime', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('builds the same URL as an equivalent new Request', async () => {
+    const seen: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (u: string) => { seen.push(u); return new Response('{"ok":1}', { status: 200 }) }))
+    const api = createApi({
+      baseUrl: 'https://api.test',
+      requests: {
+        viaFactory: defineRequest<{ ok: number }>()({ method: 'GET', path: '/users/:id' }),
+        viaClass: new Request<{ id: string }, { ok: number }>({ method: 'GET', path: '/users/:id' }),
+      },
+    })
+    await api.viaFactory({ id: '42' })
+    await api.viaClass({ id: '42' })
+    expect(seen[0]).toBe('https://api.test/users/42')
+    expect(seen[0]).toBe(seen[1])
+  })
+
+  it('substitutes and encodes a numeric path param', async () => {
+    const seen: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (u: string) => { seen.push(u); return new Response('{"ok":1}', { status: 200 }) }))
+    const api = createApi({
+      baseUrl: 'https://api.test',
+      requests: { get: defineRequest<{ ok: number }>()({ method: 'GET', path: '/users/:id' }) },
+    })
+    const r = await api.get({ id: 42 })
+    expect(seen[0]).toBe('https://api.test/users/42')
+    expect(r.error).toBeNull()
   })
 })

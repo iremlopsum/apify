@@ -76,3 +76,40 @@ export type PathParams<P extends string> =
  * number }` instead of `{ org: string | number; page?: number }`.
  */
 export type Id<T> = { [K in keyof T]: T[K] } & {}
+
+/**
+ * Declares an endpoint, inferring its path parameters from the `path` literal.
+ *
+ * Curried because TypeScript has no partial type-argument inference: supplying
+ * `TResponse` and the config in ONE call makes `TPath` fall back to its
+ * constraint, `PathParams<string>` resolve to `{}`, and `{}` accepts anything —
+ * the feature disappears with no error anywhere, which is precisely how the
+ * 3.1.0 guard attempt failed. Two calls keep the response type explicit and the
+ * path inferred.
+ *
+ * `TExtra` is for params the path does not name — query or body fields.
+ *
+ * Returns an ordinary `Request`, so `createApi` needs no knowledge of this
+ * function: its `ExtractParams`/`ExtractResponse` already match structurally.
+ * `new Request(...)` remains and is not deprecated; this is a second way to
+ * construct, which is what makes it additive.
+ *
+ * @example
+ * ```ts
+ * const getUser = defineRequest<User>()({ method: 'GET', path: '/users/:id' })
+ * const listRepos = defineRequest<Repo[], { page?: number }>()({
+ *   method: 'GET',
+ *   path: '/orgs/:org/repos',
+ * })
+ *
+ * api.getUser({ id: '42' })               // ✓
+ * api.getUser({ userId: '42' })           // ✗ compile error
+ * api.listRepos({ org: 'acme', page: 2 }) // ✓
+ * ```
+ */
+export function defineRequest<TResponse, TExtra extends object = {}>() {
+  return <TPath extends string>(
+    config: RequestConfig & { path: TPath }
+  ): Request<Id<PathParams<TPath> & TExtra>, TResponse> =>
+    new Request<Id<PathParams<TPath> & TExtra>, TResponse>(config)
+}

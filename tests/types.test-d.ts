@@ -6,6 +6,7 @@ import type { ApiErrorKind } from '../src/types.js'
 import { successResult, errorResult } from '../src/testing.js'
 import type { ApiError } from '../src/types.js'
 import type { PathParams } from '../src/define-request.js'
+import { defineRequest } from '../src/define-request.js'
 
 interface User { id: string; name: string }
 
@@ -186,5 +187,55 @@ describe('defineRequest — the path parser', () => {
     // than tested. Note buildUrl produces a second '?' if the call also has
     // query params (BACKLOG §2.3); that is pre-existing and not this feature's.
     expectTypeOf<keyof PathParams<'/search/:q?x=1'>>().toEqualTypeOf<'q'>()
+  })
+})
+
+describe('defineRequest — inference through createApi', () => {
+  interface Repo { id: string }
+
+  const inferApi = createApi({
+    baseUrl: '/api',
+    requests: {
+      getUser: defineRequest<User>()({ method: 'GET', path: '/users/:id' }),
+      listRepos: defineRequest<Repo[], { page?: number }>()({ method: 'GET', path: '/orgs/:org/repos' }),
+      health: defineRequest<{ ok: boolean }>()({ method: 'GET', path: '/health' }),
+      legacy: new Request<{ id: string }, User>({ method: 'GET', path: '/legacy/:id' }),
+    },
+  })
+
+  it('infers path params and keeps the response type', async () => {
+    const r = await inferApi.getUser({ id: '42' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+
+  it('accepts a numeric path param', () => {
+    expectTypeOf(inferApi.getUser).toBeCallableWith({ id: 42 })
+  })
+
+  it('merges extra params and keeps them optional', () => {
+    expectTypeOf(inferApi.listRepos).toBeCallableWith({ org: 'acme' })
+    expectTypeOf(inferApi.listRepos).toBeCallableWith({ org: 'acme', page: 2 })
+  })
+
+  it('leaves params optional for a path with no tokens', () => {
+    expectTypeOf(inferApi.health).toBeCallableWith()
+  })
+
+  it('coexists with new Request in one client', async () => {
+    const r = await inferApi.legacy({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+
+  it('rejects the wrong param name, an object value, a missing path param, and a typo', () => {
+    // @ts-expect-error  the path says :id, not :userId — the whole point
+    void inferApi.getUser({ userId: '42' })
+    // @ts-expect-error  a path param cannot be an object
+    void inferApi.getUser({ id: { a: 1 } })
+    // @ts-expect-error  org comes from the path and is required
+    void inferApi.listRepos({ page: 2 })
+    // @ts-expect-error  typo in an extra param
+    void inferApi.listRepos({ org: 'acme', pge: 2 })
   })
 })
