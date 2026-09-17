@@ -37,3 +37,35 @@ jobs:
       - run: npm run test:run
       - run: npm run test:integration
       - run: npm run build
+
+  # Commit messages carry no co-author or "generated with" trailer naming an
+  # authoring tool. The convention needs a gate rather than a sentence: a
+  # trailer is easy to miss in review, and removing one after the fact means
+  # rewriting published history, which is far more expensive than rejecting it
+  # here. Kept out of the `test` matrix so a failure names its own cause.
+  attribution:
+    # Without this the job also runs on push to main, where the pull_request
+    # context is empty -- `set -u` would then fail the build on a bad range
+    # rather than on a real trailer.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The default shallow clone cannot see the PR's own commits.
+          fetch-depth: 0
+      - name: Reject agent attribution in commit messages
+        # Passed as env rather than interpolated into the script: ${{ }} inside
+        # run: splices text straight into the shell.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          count=$(git rev-list --count "$BASE_SHA..$HEAD_SHA")
+          if git log "$BASE_SHA..$HEAD_SHA" --format='%H%n%B' \
+             | grep -niE 'co-authored-by:[[:space:]]*.*(claude|copilot|cursor|codex|gpt|anthropic|openai)|generated with[[:space:]]*\[?(claude|copilot|cursor)|noreply@anthropic'; then
+            echo "::error::A commit message carries agent attribution. CLAUDE.md: no agent attribution in commits or PRs, no exceptions."
+            exit 1
+          fi
+          echo "Checked $count commit(s): no agent attribution."
