@@ -120,3 +120,68 @@ describe('share: true callers agree with each other', () => {
     expect(jr.error?.request.url).toBe(ir.error?.request.url)
   })
 })
+
+describe('error.request.url on the share give-up path', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('reports the resolved URL for a joiner that gives up', async () => {
+    const f = controllable()
+    vi.stubGlobal('fetch', f.fn)
+    const shared = sharedApi()
+    const a = new AbortController()
+    const b = new AbortController()
+    const initiator = shared.getUser({ id: '42' }, { signal: a.signal })
+    const joiner = shared.getUser({ id: '42' }, { signal: b.signal })
+    await flush()
+    b.abort()
+    const jr = await joiner
+    a.abort()
+    await initiator
+    expect(jr.error?.kind).toBe('abort')
+    expect(jr.error?.request.url).toBe('https://api.test/users/42')
+  })
+
+  it('reports the resolved URL for the initiator that gives up', async () => {
+    const f = controllable()
+    vi.stubGlobal('fetch', f.fn)
+    const shared = sharedApi()
+    const a = new AbortController()
+    const b = new AbortController()
+    const initiator = shared.getUser({ id: '42' }, { signal: a.signal })
+    const joiner = shared.getUser({ id: '42' }, { signal: b.signal })
+    await flush()
+    a.abort()
+    const ir = await initiator
+    b.abort()
+    await joiner
+    expect(ir.error?.kind).toBe('abort')
+    expect(ir.error?.request.url).toBe('https://api.test/users/42')
+  })
+})
+
+describe('error.request.url when setup threw before the URL was built', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  // A BigInt timeout is the cheapest reachable setup failure: TypeScript
+  // forbids it, JavaScript callers and `as any` config loaders do not, and it
+  // reaches Math.min inside timeoutSignalFor. Both budget calls that use it run
+  // BEFORE the URL is ever built — operationBudget at Step 2 for an unshared
+  // call, perCallerBudget before acquire() for a shared one. Neither request
+  // resolved a URL for itself; both can still name the one it was for, which is
+  // what error.request.url documents.
+  it('reports the resolved URL for an unshared call', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const r = await api([]).getUser({ id: '42' }, { timeout: 10n as unknown as number })
+    expect(r.error).not.toBeNull()
+    expect(r.error?.request.url).toBe('https://api.test/users/42')
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+
+  it('reports the resolved URL when the share block itself threw', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const r = await sharedApi().getUser({ id: '42' }, { timeout: 10n as unknown as number })
+    expect(r.error).not.toBeNull()
+    expect(r.error?.request.url).toBe('https://api.test/users/42')
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+})
