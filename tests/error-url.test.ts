@@ -13,6 +13,38 @@ const api = (middleware: Middleware[]) => createApi({
 
 const throwing: Middleware = async () => { throw new Error('middleware exploded') }
 
+/**
+ * Flushes the entire microtask queue: a macrotask only runs once every pending
+ * microtask has drained, so this guarantees any report still in flight through
+ * a promise chain has fired before we assert on it.
+ */
+const flush = () => new Promise<void>(resolve => setTimeout(resolve, 0))
+
+/**
+ * A fetch that never settles until told to, and rejects if its signal aborts.
+ * Copied from tests/share.test.ts rather than shared — each unit test file in
+ * this repo defines its own fetch helpers.
+ */
+function controllable() {
+  const calls: { resolve: () => void; aborted: () => boolean }[] = []
+  const fn = vi.fn((_u: string, init: RequestInit) => new Promise<Response>((res, rej) => {
+    const s = init.signal as AbortSignal | undefined
+    s?.addEventListener('abort', () => rej(s.reason))
+    calls.push({
+      resolve: () => res(new Response('{"ok":1}', { status: 200 })),
+      aborted: () => !!s?.aborted,
+    })
+  }))
+  return { fn, calls }
+}
+
+const sharedApi = () => createApi({
+  baseUrl: 'https://api.test',
+  requests: {
+    getUser: new Request<{ id: string }, unknown>({ method: 'GET', path: '/users/:id', share: true }),
+  },
+})
+
 describe('error.request.url on a middleware failure', () => {
   afterEach(() => { vi.restoreAllMocks() })
 
@@ -65,25 +97,20 @@ describe('share: true callers agree with each other', () => {
   afterEach(() => { vi.restoreAllMocks() })
 
   it('a joiner and the initiator report the same URL when both give up', async () => {
-    // Pinned as agreement, not as a literal value: this must hold whether both
-    // report the template (today) or both report the resolved URL (if the
-    // abort path is ever fixed properly, which needs a ShareTracker change).
-    // It fails if only one of the two learns the real URL.
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(r =>
-      setTimeout(() => r(new Response('{}', { status: 200 })), 300)
-    )))
-    const shared = createApi({
-      baseUrl: 'https://api.test',
-      requests: {
-        getUser: new Request<{ id: string }, unknown>({ method: 'GET', path: '/users/:id', share: true }),
-      },
-    })
+    // Pinned as agreement, deliberately separate from the literal-value
+    // assertions elsewhere in this file: agreement alone would still pass if
+    // both sides regressed to the template together. It fails if only one of
+    // the two learns the real URL — which is what a closure-captured URL
+    // produces, since a joiner never runs its own execute().
+    const f = controllable()
+    vi.stubGlobal('fetch', f.fn)
+    const shared = sharedApi()
     const a = new AbortController()
     const b = new AbortController()
     const initiator = shared.getUser({ id: '42' }, { signal: a.signal })
-    await new Promise(r => setTimeout(r, 20))
     const joiner = shared.getUser({ id: '42' }, { signal: b.signal })
-    await new Promise(r => setTimeout(r, 20))
+    await flush()
+    expect(f.fn.mock.calls.length).toBe(1)
     b.abort()
     const jr = await joiner
     a.abort()
