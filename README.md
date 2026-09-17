@@ -201,9 +201,12 @@ const triggerJob = new Request<{ priority: number }, Job>({
 and nothing checks the two against each other:
 
 ```ts
-const getUser = new Request<{ id: string }, User>({ method: 'GET', path: '/users/:id' })
+// The params are restated by hand, and nothing checks them against the path:
+const getUser = new Request<{ userId: string }, User>({ method: 'GET', path: '/users/:id' })
 
-api.getUser({ userId: '42' })  // compiles — then throws at runtime
+api.getUser({ userId: '42' })  // compiles — then fails at runtime: buildUrl finds
+                               // no `:userId` to substitute, `:id` survives, and
+                               // the unresolved-token check throws
 ```
 
 `defineRequest` infers the params from the path literal instead:
@@ -240,10 +243,11 @@ defineRequest<undefined>()({ method: 'POST', path: '/ping', responseType: 'none'
 defineRequest<User>()({ method: 'POST', path: '/ping', responseType: 'none' })       // ✗
 ```
 
-**Why two calls.** TypeScript has no partial type-argument inference: writing
-`defineRequest<User>({ ... })` in one call would stop the path inferring and
-silently give you no checking at all. The empty `()` is what keeps the response
-type explicit and the path inferred.
+**Why two calls.** TypeScript has no partial type-argument inference: if the response
+type and the config were arguments to one call, supplying the response type explicitly
+would stop the path from being inferred, and the checking would quietly do nothing.
+Splitting them keeps the response type explicit and the path inferred. Calling it
+wrong is a compile error, not a silent one.
 
 `new Request(...)` is unchanged and not deprecated — use it when the config is
 not a literal, or when you do not want the path checked.

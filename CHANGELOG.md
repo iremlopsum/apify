@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.1.0] — 2026-09-17
+## [4.1.0] — 2026-09-18
 
 ### Added
 
@@ -17,8 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `defineRequest<Repo[], { page?: number }>()`.
 
   The two calls are load-bearing. TypeScript has no partial type-argument
-  inference, so a single call taking an explicit response type stops the path
-  inferring and silently provides no checking.
+  inference, so if the response type and the config were arguments to one call,
+  supplying the response type explicitly would stop the path from being inferred,
+  and the checking would quietly do nothing. Splitting them keeps the response
+  type explicit and the path inferred.
 
   It also enforces `responseType: 'none'`, which `new Request` could only
   document — a guard attempted in 3.1.0 and dropped, because an overload pair
