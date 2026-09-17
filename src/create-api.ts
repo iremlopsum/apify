@@ -192,6 +192,84 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
 }
 
 /**
+ * Builds the request's URL, plus the two flags Step 4's later steps need
+ * alongside it.
+ *
+ * One implementation, two callers: Step 4 inside `execute()`, and
+ * `urlForError` below. That is the entire reason it exists as a function.
+ * Step 4 is not a `buildUrl` call — it is the `shouldSerializeAsQuery` getter,
+ * an `isSpecialBody` check, and a conditional `{}` substitution wrapped around
+ * one. An error path that hand-reproduced that would be free to drift from the
+ * real one, which is why recomputing the URL for diagnostics was rejected
+ * before this extraction existed.
+ *
+ * Throws whatever `buildUrl` throws — an unresolved `:token`, or a nested
+ * object reaching a query string. Step 4 lets that propagate to `execute()`'s
+ * setup catch; `urlForError` catches it and falls back to the template.
+ */
+function resolveRequestUrl(
+  baseUrl: string,
+  request: Request<any, any>,
+  params: object
+): { url: string; remaining: Record<string, unknown>; asQuery: boolean; paramsIsSpecialBody: boolean } {
+  // Respects the bodyAs config override, then the HTTP method default.
+  const asQuery = request.shouldSerializeAsQuery
+
+  // A non-plain-object body (FormData, Blob, ...) cannot be decomposed into
+  // key-value pairs for path substitution or query serialization. The URL still
+  // needs building for baseUrl + path, so buildUrl is handed an empty params
+  // object and the real params go straight to serializeBody.
+  const paramsIsSpecialBody = isSpecialBody(params)
+
+  const { url, remaining } = buildUrl(
+    baseUrl,
+    request.config.path,
+    paramsIsSpecialBody ? {} : (params as Record<string, unknown>),
+    asQuery
+  )
+
+  return { url, remaining, asQuery, paramsIsSpecialBody }
+}
+
+/**
+ * The most accurate URL that can be named for an error report.
+ *
+ * `buildFailedResult`'s default: used by every failure with no `Response`
+ * behind it that did not capture a URL of its own — the `share: true` give-up
+ * path, `execute()`'s setup catch, and the share block's own setup catch.
+ * Each of those now names the address the call was *for*, which is what
+ * `error.request.url` documents; it is not a claim that bytes went there.
+ * 4.0.1 settled that reading when a middleware failing before `fetch` started
+ * reporting the resolved URL.
+ *
+ * The `catch` is load-bearing on exactly one path: when `buildUrl` is what
+ * threw, no URL was ever resolvable and the un-substituted template is the
+ * only honest answer. `buildUrl` throws a second time here to establish that —
+ * harmless, and only on a path that is already failing.
+ *
+ * Deliberately not memoized. Caching Step 4's value in the `api[name]` closure
+ * would fill it for a share initiator and leave it empty for a joiner, and the
+ * two would then disagree — which is what `tests/error-url.test.ts`'s
+ * agreement test exists to catch. The recompute is identical for identical
+ * inputs, so the cache would buy nothing on a path that is already failing.
+ * Two cases make the inputs not actually identical, and a cache would not fix
+ * either: `stableStringify` sorts keys when building `shareKey`
+ * (`src/utils/cache.ts:33`) while `buildUrl` serializes query params in
+ * `Object.entries` insertion order, so two callers that coalesce into one
+ * shared request (an agreeing `shareKey`) can still recompute different query
+ * strings; and `params` reaches middleware by reference, so an in-place
+ * mutation there can make the recompute differ from what Step 4 built. Each
+ * caller's URL is still correct for its own params in both cases.
+ */
+function urlForError(baseUrl: string, request: Request<any, any>, params: object): string {
+  try {
+    return resolveRequestUrl(baseUrl, request, params).url
+  } catch {
+    return joinUrl(baseUrl, request.config.path)
+  }
+}
+
+/**
  * Builds a `Result` for a failure that never reached (or never came back
  * from) `core()`, so there is no `Response` to report and no HTTP status.
  *
@@ -229,17 +307,13 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
  * is aborted IS that cancellation, whatever shape fetch happened to throw.
  *
  * `error.request.url` here is exactly the `url` argument passed in below —
- * see `buildFailedResult`'s doc, inside `createApi`, for which call sites
- * supply the real, path-substituted URL and which fall back to
- * `joinUrl(baseUrl, request.config.path)`, the un-substituted path template.
- * In short: both `'middleware'` call sites in `execute()` now pass
- * `context.request.url`, so a `'middleware'` result carries the resolved
- * address. The `'abort'` call site (the share site's `onAbort`) and the
- * setup-error path still get the template, for a structural reason: the
- * resolved URL is built at Step 4 inside `execute()`, and both of those
- * sites live in the outer closure where it is not in scope. Note this is
- * the share give-up path only — an ordinary caller abort mid-flight is
- * classified inside `core` and already reports the resolved URL.
+ * see `buildFailedResult`'s doc, inside `createApi`, for where it comes from.
+ * Every call site reports a resolved, path-substituted address: the two
+ * `'middleware'` sites pass `context.request.url` explicitly, because only
+ * they can observe a middleware that rewrote it, and everything else takes
+ * `urlForError`, which rebuilds it through the same `resolveRequestUrl` Step 4
+ * uses. The un-substituted template survives in one case only — `buildUrl`
+ * itself threw, so no URL was ever resolvable.
  */
 function syntheticResult(
   reason: unknown,
@@ -431,21 +505,30 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * but keeping construction free of the side effect is what let the
        * reporting decision move out of this function in the first place.
        *
-       * `url`, when supplied, is the resolved (path-substituted) URL to
-       * report instead of the raw route template. Only the two 'middleware'
-       * call sites in `execute()` pass it, from `context.request.url` — that
-       * reflects a middleware which rewrote the URL, which a value captured
-       * earlier could not. The 'abort' and setup-error call sites don't pass
-       * it and fall back to the template, for a structural reason, not a
-       * semantic one: the resolved URL is built at Step 4 inside `execute()`,
-       * and both of these sites live in this outer closure, where it is not
-       * in scope. It isn't that a joiner's URL would be inconsistent with the
-       * initiator's — `shareKey` is `name` plus stringified params, so every
-       * sharer would compute an identical URL — and a setup error can happen
-       * after `buildUrl` already succeeded. Reaching it would mean either
-       * threading the URL through `ShareTracker.acquire`, or recomputing
-       * `buildUrl` here and risking drift from Step 4's special-body/`asQuery`
-       * handling.
+       * `url`, when supplied, overrides the default. Only the two
+       * `'middleware'` call sites in `execute()` pass it, from
+       * `context.request.url` — that reflects a middleware which rewrote the
+       * URL, which nothing recomputed here could know about.
+       *
+       * Every other site takes the default, `urlForError`, which rebuilds the
+       * address through the same `resolveRequestUrl` Step 4 uses. A recompute
+       * is sound because a joiner and the initiator agree on the request name
+       * and on every param value: `shareKey` is `name` plus stringified params.
+       * Two caveats to that agreement, neither of which breaks it: `params`
+       * reaches middleware by reference, so an in-place mutation there can
+       * make the recompute differ from what Step 4 built; and `stableStringify`
+       * sorts keys for `shareKey` while `buildUrl` serializes query params in
+       * insertion order, so an agreeing `shareKey` does not guarantee an
+       * identical query string. Each caller's URL is still correct for its own
+       * params either way. It was not done before that extraction existed
+       * because hand-reproducing Step 4 at a second site would have been free
+       * to drift from it — the extraction removed the objection; it was not a
+       * change of mind about the risk.
+       *
+       * Considered and rejected: capturing Step 4's `url` in this closure. A
+       * joiner never runs its own `execute()`, so its capture stays empty while
+       * the initiator's is set, and the two then disagree — which the agreement
+       * test in `tests/error-url.test.ts` exists to catch.
        */
       function buildFailedResult(
         reason: unknown,
@@ -458,7 +541,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           signal,
           fallbackKind,
           request.config.method,
-          url ?? joinUrl(baseUrl, request.config.path),
+          url ?? urlForError(baseUrl, request, params),
           params,
           execute
         )
@@ -878,27 +961,11 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // b. Appends remaining params as query string (when asQuery is true)
           // c. Returns the remaining (unconsumed) params for body serialization
           //
-          // The asQuery flag is determined by the Request's shouldSerializeAsQuery
-          // getter, which respects the bodyAs config override and HTTP method defaults.
+          // All of it lives in `resolveRequestUrl` rather than here, because
+          // the error paths call the same function to name `error.request.url`
+          // — see its doc for why that matters.
           // -----------------------------------------------------------------
-          const asQuery = request.shouldSerializeAsQuery
-
-          // Check if the params is a non-plain-object body type (FormData, Blob, etc.)
-          // before passing it through buildUrl. These types can't be decomposed into
-          // key-value pairs for path param substitution or query string serialization.
-          // When a special body type is detected, we skip buildUrl entirely for the
-          // body portion and pass the params directly to serializeBody.
-          const paramsIsSpecialBody = isSpecialBody(params)
-
-          // For special body types, we still need to build the URL (for baseUrl + path),
-          // but we pass an empty params object since there are no key-value pairs to
-          // substitute or serialize as query params.
-          const { url, remaining } = buildUrl(
-            baseUrl,
-            request.config.path,
-            paramsIsSpecialBody ? {} : (params as Record<string, unknown>),
-            asQuery
-          )
+          const { url, remaining, asQuery, paramsIsSpecialBody } = resolveRequestUrl(baseUrl, request, params)
 
           // -----------------------------------------------------------------
           // Step 5: Merge headers from all three layers

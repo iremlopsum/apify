@@ -13,6 +13,38 @@ const api = (middleware: Middleware[]) => createApi({
 
 const throwing: Middleware = async () => { throw new Error('middleware exploded') }
 
+/**
+ * Flushes the entire microtask queue: a macrotask only runs once every pending
+ * microtask has drained, so this guarantees any report still in flight through
+ * a promise chain has fired before we assert on it.
+ */
+const flush = () => new Promise<void>(resolve => setTimeout(resolve, 0))
+
+/**
+ * A fetch that never settles until told to, and rejects if its signal aborts.
+ * Copied from tests/share.test.ts rather than shared — each unit test file in
+ * this repo defines its own fetch helpers.
+ */
+function controllable() {
+  const calls: { resolve: () => void; aborted: () => boolean }[] = []
+  const fn = vi.fn((_u: string, init: RequestInit) => new Promise<Response>((res, rej) => {
+    const s = init.signal as AbortSignal | undefined
+    s?.addEventListener('abort', () => rej(s.reason))
+    calls.push({
+      resolve: () => res(new Response('{"ok":1}', { status: 200 })),
+      aborted: () => !!s?.aborted,
+    })
+  }))
+  return { fn, calls }
+}
+
+const sharedApi = () => createApi({
+  baseUrl: 'https://api.test',
+  requests: {
+    getUser: new Request<{ id: string }, unknown>({ method: 'GET', path: '/users/:id', share: true }),
+  },
+})
+
 describe('error.request.url on a middleware failure', () => {
   afterEach(() => { vi.restoreAllMocks() })
 
@@ -65,25 +97,20 @@ describe('share: true callers agree with each other', () => {
   afterEach(() => { vi.restoreAllMocks() })
 
   it('a joiner and the initiator report the same URL when both give up', async () => {
-    // Pinned as agreement, not as a literal value: this must hold whether both
-    // report the template (today) or both report the resolved URL (if the
-    // abort path is ever fixed properly, which needs a ShareTracker change).
-    // It fails if only one of the two learns the real URL.
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(r =>
-      setTimeout(() => r(new Response('{}', { status: 200 })), 300)
-    )))
-    const shared = createApi({
-      baseUrl: 'https://api.test',
-      requests: {
-        getUser: new Request<{ id: string }, unknown>({ method: 'GET', path: '/users/:id', share: true }),
-      },
-    })
+    // Pinned as agreement, deliberately separate from the literal-value
+    // assertions elsewhere in this file: agreement alone would still pass if
+    // both sides regressed to the template together. It fails if only one of
+    // the two learns the real URL — which is what a closure-captured URL
+    // produces, since a joiner never runs its own execute().
+    const f = controllable()
+    vi.stubGlobal('fetch', f.fn)
+    const shared = sharedApi()
     const a = new AbortController()
     const b = new AbortController()
     const initiator = shared.getUser({ id: '42' }, { signal: a.signal })
-    await new Promise(r => setTimeout(r, 20))
     const joiner = shared.getUser({ id: '42' }, { signal: b.signal })
-    await new Promise(r => setTimeout(r, 20))
+    await flush()
+    expect(f.fn.mock.calls.length).toBe(1)
     b.abort()
     const jr = await joiner
     a.abort()
@@ -91,5 +118,98 @@ describe('share: true callers agree with each other', () => {
     expect(jr.error?.kind).toBe('abort')
     expect(ir.error?.kind).toBe('abort')
     expect(jr.error?.request.url).toBe(ir.error?.request.url)
+  })
+})
+
+describe('error.request.url on the share give-up path', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('reports the resolved URL for a joiner that gives up', async () => {
+    const f = controllable()
+    vi.stubGlobal('fetch', f.fn)
+    const shared = sharedApi()
+    const a = new AbortController()
+    const b = new AbortController()
+    const initiator = shared.getUser({ id: '42' }, { signal: a.signal })
+    const joiner = shared.getUser({ id: '42' }, { signal: b.signal })
+    await flush()
+    b.abort()
+    const jr = await joiner
+    a.abort()
+    await initiator
+    expect(jr.error?.kind).toBe('abort')
+    expect(jr.error?.request.url).toBe('https://api.test/users/42')
+  })
+
+  it('reports the resolved URL for the initiator that gives up', async () => {
+    const f = controllable()
+    vi.stubGlobal('fetch', f.fn)
+    const shared = sharedApi()
+    const a = new AbortController()
+    const b = new AbortController()
+    const initiator = shared.getUser({ id: '42' }, { signal: a.signal })
+    const joiner = shared.getUser({ id: '42' }, { signal: b.signal })
+    await flush()
+    a.abort()
+    const ir = await initiator
+    b.abort()
+    await joiner
+    expect(ir.error?.kind).toBe('abort')
+    expect(ir.error?.request.url).toBe('https://api.test/users/42')
+  })
+})
+
+describe('error.request.url when setup threw before the URL was built', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  // A BigInt timeout is the cheapest reachable setup failure: TypeScript
+  // forbids it, JavaScript callers and `as any` config loaders do not, and it
+  // reaches Math.min inside timeoutSignalFor. Both budget calls that use it run
+  // BEFORE the URL is ever built — operationBudget at Step 2 for an unshared
+  // call, perCallerBudget before acquire() for a shared one. Neither request
+  // resolved a URL for itself; both can still name the one it was for, which is
+  // what error.request.url documents.
+  it('reports the resolved URL for an unshared call', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const r = await api([]).getUser({ id: '42' }, { timeout: 10n as unknown as number })
+    expect(r.error).not.toBeNull()
+    expect(r.error?.request.url).toBe('https://api.test/users/42')
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+
+  it('reports the resolved URL when the share block itself threw', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const r = await sharedApi().getUser({ id: '42' }, { timeout: 10n as unknown as number })
+    expect(r.error).not.toBeNull()
+    expect(r.error?.request.url).toBe('https://api.test/users/42')
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+})
+
+describe('error.request.url when a middleware rethrows the signal reason', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  // Pins the CHANGELOG's 4.0.2 "ordinary aborts were already correct"
+  // paragraph for the one example whose mechanism it misstated: this
+  // rejection never reaches core()'s fetch catch, because the middleware
+  // never calls next() — it races the caller's signal instead, so the call
+  // is left pending ("mid-flight") until the abort fires. The rejection
+  // escapes composed(context) and is caught by Step 8's 'middleware' catch,
+  // which passes context.request.url explicitly, then propagatesReason
+  // reclassifies it to 'abort' inside syntheticResult.
+  it('reports the resolved URL, not the template, on an ordinary caller abort', async () => {
+    const rethrows: Middleware = ctx => new Promise((_resolve, reject) => {
+      const s = ctx.request.signal
+      if (s?.aborted) { reject(s.reason); return }
+      s?.addEventListener('abort', () => reject(s.reason), { once: true })
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const ac = new AbortController()
+    const p = api([rethrows]).getUser({ id: '42' }, { signal: ac.signal })
+    await flush()
+    ac.abort()
+    const r = await p
+    expect(r.error?.kind).toBe('abort')
+    expect(r.error?.request.url).toBe('https://api.test/users/42')
   })
 })
