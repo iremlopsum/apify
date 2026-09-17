@@ -57,6 +57,7 @@ describe('defineRequest at runtime', () => {
     expect(seen[0]).toBe(seen[1])
     expect(viaFactoryResult.error).toBeNull()
     expect(viaClassResult.error).toBeNull()
+    expect(viaFactoryResult.data).toEqual({ ok: 1 })
     expect(viaFactoryResult.data).toEqual(viaClassResult.data)
   })
 

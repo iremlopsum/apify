@@ -78,6 +78,35 @@ export type PathParams<P extends string> =
 export type Id<T> = { [K in keyof T]: T[K] } & {}
 
 /**
+ * Rejects `responseType: 'none'` when `TResponse` is a real type.
+ *
+ * `'none'` means the endpoint sends no body on success and `data` is
+ * `undefined` at runtime. Declaring a response type alongside it is a
+ * contradiction that was, until now, only a documented convention.
+ *
+ * Fires only on the LITERAL `'none'`. A config whose `responseType` is the
+ * widened `ResponseType | undefined` — a `RequestConfig`-typed variable, or a
+ * spread of one — infers as the whole union, which is not `'none'`, and passes
+ * through untouched. That matters: constraining the config parameter directly
+ * rejects both of those legitimate forms, which is exactly the permissiveness
+ * problem recorded in `ResponseType`'s JSDoc in types.ts.
+ *
+ * The failure branch uses a non-colliding marker property, `__emptyBodyMismatch`,
+ * rather than reusing `responseType`. Reusing `responseType` collapses that
+ * property's type to `never` via intersection with the existing `responseType?:
+ * TRT`, which TypeScript then reports as a per-property mismatch on unrelated
+ * fields like `method`, never mentioning the message. `__emptyBodyMismatch`
+ * collides with nothing a real config has, so TypeScript instead reports it as
+ * a missing required property, and the sentence rides along in that message.
+ */
+type EmptyBodyGuard<TRT, TResponse> =
+  [TRT] extends ['none']
+    ? undefined extends TResponse
+      ? unknown
+      : { __emptyBodyMismatch: 'declare TResponse as undefined when responseType is none' }
+    : unknown
+
+/**
  * Declares an endpoint, inferring its path parameters from the `path` literal.
  *
  * Curried because TypeScript has no partial type-argument inference: supplying
@@ -107,31 +136,6 @@ export type Id<T> = { [K in keyof T]: T[K] } & {}
  * api.listRepos({ org: 'acme', page: 2 }) // ✓
  * ```
  */
-
-/**
- * Rejects `responseType: 'none'` when `TResponse` is a real type.
- *
- * `'none'` means the endpoint sends no body on success and `data` is
- * `undefined` at runtime. Declaring a response type alongside it is a
- * contradiction that was, until now, only a documented convention.
- *
- * Fires only on the LITERAL `'none'`. A config whose `responseType` is the
- * widened `ResponseType | undefined` — a `RequestConfig`-typed variable, or a
- * spread of one — infers as the whole union, which is not `'none'`, and passes
- * through untouched. That matters: constraining the config parameter directly
- * rejects both of those legitimate forms, which is exactly the permissiveness
- * problem recorded in `ResponseType`'s JSDoc in types.ts.
- *
- * The message rides in the expected type so a mismatch reads as a sentence
- * rather than a bare union mismatch.
- */
-type EmptyBodyGuard<TRT, TResponse> =
-  [TRT] extends ['none']
-    ? undefined extends TResponse
-      ? unknown
-      : { responseType: 'declare TResponse as undefined when responseType is none' }
-    : unknown
-
 export function defineRequest<TResponse, TExtra extends object = {}>() {
   return <TPath extends string, TRT extends ResponseType | undefined>(
     config: RequestConfig & { path: TPath; responseType?: TRT } & EmptyBodyGuard<TRT, TResponse>
