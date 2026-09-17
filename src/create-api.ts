@@ -192,6 +192,46 @@ async function parseResponse(response: Response, responseType: ResponseType = 'j
 }
 
 /**
+ * Builds the request's URL, plus the two flags Step 4's later steps need
+ * alongside it.
+ *
+ * One implementation, two callers: Step 4 inside `execute()`, and
+ * `urlForError` below. That is the entire reason it exists as a function.
+ * Step 4 is not a `buildUrl` call — it is the `shouldSerializeAsQuery` getter,
+ * an `isSpecialBody` check, and a conditional `{}` substitution wrapped around
+ * one. An error path that hand-reproduced that would be free to drift from the
+ * real one, which is why recomputing the URL for diagnostics was rejected
+ * before this extraction existed.
+ *
+ * Throws whatever `buildUrl` throws — an unresolved `:token`, or a nested
+ * object reaching a query string. Step 4 lets that propagate to `execute()`'s
+ * setup catch; `urlForError` catches it and falls back to the template.
+ */
+function resolveRequestUrl(
+  baseUrl: string,
+  request: Request<any, any>,
+  params: object
+): { url: string; remaining: Record<string, unknown>; asQuery: boolean; paramsIsSpecialBody: boolean } {
+  // Respects the bodyAs config override, then the HTTP method default.
+  const asQuery = request.shouldSerializeAsQuery
+
+  // A non-plain-object body (FormData, Blob, ...) cannot be decomposed into
+  // key-value pairs for path substitution or query serialization. The URL still
+  // needs building for baseUrl + path, so buildUrl is handed an empty params
+  // object and the real params go straight to serializeBody.
+  const paramsIsSpecialBody = isSpecialBody(params)
+
+  const { url, remaining } = buildUrl(
+    baseUrl,
+    request.config.path,
+    paramsIsSpecialBody ? {} : (params as Record<string, unknown>),
+    asQuery
+  )
+
+  return { url, remaining, asQuery, paramsIsSpecialBody }
+}
+
+/**
  * Builds a `Result` for a failure that never reached (or never came back
  * from) `core()`, so there is no `Response` to report and no HTTP status.
  *
@@ -878,27 +918,11 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // b. Appends remaining params as query string (when asQuery is true)
           // c. Returns the remaining (unconsumed) params for body serialization
           //
-          // The asQuery flag is determined by the Request's shouldSerializeAsQuery
-          // getter, which respects the bodyAs config override and HTTP method defaults.
+          // All of it lives in `resolveRequestUrl` rather than here, because
+          // the error paths call the same function to name `error.request.url`
+          // — see its doc for why that matters.
           // -----------------------------------------------------------------
-          const asQuery = request.shouldSerializeAsQuery
-
-          // Check if the params is a non-plain-object body type (FormData, Blob, etc.)
-          // before passing it through buildUrl. These types can't be decomposed into
-          // key-value pairs for path param substitution or query string serialization.
-          // When a special body type is detected, we skip buildUrl entirely for the
-          // body portion and pass the params directly to serializeBody.
-          const paramsIsSpecialBody = isSpecialBody(params)
-
-          // For special body types, we still need to build the URL (for baseUrl + path),
-          // but we pass an empty params object since there are no key-value pairs to
-          // substitute or serialize as query params.
-          const { url, remaining } = buildUrl(
-            baseUrl,
-            request.config.path,
-            paramsIsSpecialBody ? {} : (params as Record<string, unknown>),
-            asQuery
-          )
+          const { url, remaining, asQuery, paramsIsSpecialBody } = resolveRequestUrl(baseUrl, request, params)
 
           // -----------------------------------------------------------------
           // Step 5: Merge headers from all three layers
