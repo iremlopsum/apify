@@ -107,9 +107,34 @@ export type Id<T> = { [K in keyof T]: T[K] } & {}
  * api.listRepos({ org: 'acme', page: 2 }) // ✓
  * ```
  */
+
+/**
+ * Rejects `responseType: 'none'` when `TResponse` is a real type.
+ *
+ * `'none'` means the endpoint sends no body on success and `data` is
+ * `undefined` at runtime. Declaring a response type alongside it is a
+ * contradiction that was, until now, only a documented convention.
+ *
+ * Fires only on the LITERAL `'none'`. A config whose `responseType` is the
+ * widened `ResponseType | undefined` — a `RequestConfig`-typed variable, or a
+ * spread of one — infers as the whole union, which is not `'none'`, and passes
+ * through untouched. That matters: constraining the config parameter directly
+ * rejects both of those legitimate forms, which is exactly the permissiveness
+ * problem recorded in `ResponseType`'s JSDoc in types.ts.
+ *
+ * The message rides in the expected type so a mismatch reads as a sentence
+ * rather than a bare union mismatch.
+ */
+type EmptyBodyGuard<TRT, TResponse> =
+  [TRT] extends ['none']
+    ? undefined extends TResponse
+      ? unknown
+      : { responseType: 'declare TResponse as undefined when responseType is none' }
+    : unknown
+
 export function defineRequest<TResponse, TExtra extends object = {}>() {
-  return <TPath extends string>(
-    config: RequestConfig & { path: TPath }
+  return <TPath extends string, TRT extends ResponseType | undefined>(
+    config: RequestConfig & { path: TPath; responseType?: TRT } & EmptyBodyGuard<TRT, TResponse>
   ): Request<Id<PathParams<TPath> & TExtra>, TResponse> =>
     new Request<Id<PathParams<TPath> & TExtra>, TResponse>(config)
 }

@@ -51,10 +51,13 @@ describe('defineRequest at runtime', () => {
         viaClass: new Request<{ id: string }, { ok: number }>({ method: 'GET', path: '/users/:id' }),
       },
     })
-    await api.viaFactory({ id: '42' })
-    await api.viaClass({ id: '42' })
+    const viaFactoryResult = await api.viaFactory({ id: '42' })
+    const viaClassResult = await api.viaClass({ id: '42' })
     expect(seen[0]).toBe('https://api.test/users/42')
     expect(seen[0]).toBe(seen[1])
+    expect(viaFactoryResult.error).toBeNull()
+    expect(viaClassResult.error).toBeNull()
+    expect(viaFactoryResult.data).toEqual(viaClassResult.data)
   })
 
   it('substitutes and encodes a numeric path param', async () => {

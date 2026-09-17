@@ -148,6 +148,11 @@ describe("responseType: 'none'", () => {
     // compiles today; it is a documented convention violation, not a caught
     // one. Do NOT re-add a `// @ts-expect-error` above this — there is
     // nothing here for the compiler to flag.
+    //
+    // As of 4.1.0 `defineRequest` DOES catch this — see "defineRequest — the
+    // responseType: none guard" below. This test is the `new Request` half of
+    // that comparison: the class still cannot, for the reason above, and that
+    // is why the factory exists. Still do NOT add a `@ts-expect-error` here.
     new Request<{ id: string }, User>({ method: 'DELETE', path: '/u/:id', responseType: 'none' })
   })
 
@@ -237,5 +242,35 @@ describe('defineRequest — inference through createApi', () => {
     void inferApi.listRepos({ page: 2 })
     // @ts-expect-error  typo in an extra param
     void inferApi.listRepos({ org: 'acme', pge: 2 })
+  })
+})
+
+describe('defineRequest — the responseType: none guard', () => {
+  it("accepts 'none' when TResponse is undefined", () => {
+    const ping = defineRequest<undefined>()({ method: 'POST', path: '/ping', responseType: 'none' })
+    expectTypeOf(ping).toMatchTypeOf<Request<object, undefined>>()
+  })
+
+  it("rejects 'none' paired with a declared response body", () => {
+    // This is what 3.1.0 tried and dropped. An overload pair could not do it:
+    // TS falls through to the general signature for any call the narrow one
+    // refuses, so the guard reported nothing. A single signature has nothing
+    // to fall through to.
+    // @ts-expect-error  declaring User while saying the body is empty
+    defineRequest<User>()({ method: 'DELETE', path: '/u/:id', responseType: 'none' })
+  })
+
+  it('still accepts a RequestConfig-typed variable and a spread of one', () => {
+    // The naive guard — constraining the config whenever TResponse is not
+    // undefined — rejects BOTH of these, and both must keep compiling. They
+    // are the forms src/types.ts's ResponseType JSDoc names as the reason the
+    // original guard had to stay permissive.
+    const loose: RequestConfig = { method: 'GET', path: '/x' }
+    defineRequest<User>()(loose)
+    defineRequest<User>()({ ...loose, path: '/users/:id' })
+  })
+
+  it("accepts an ordinary responseType alongside a real response type", () => {
+    defineRequest<User>()({ method: 'GET', path: '/u/:id', responseType: 'json' })
   })
 })
