@@ -303,7 +303,7 @@ The error object on failed calls. It is not a subclass of `Error` -- it is a str
 | `statusText` | `string`  | HTTP status text (e.g., 'Not Found'). `''` for network errors.    |
 | `body`       | `unknown` | Parsed response body -- but for `'parse'`, either the thrown exception (a malformed body) or the raw response text (an empty body, or a GraphQL response carrying no data). The native Error for network failures. |
 | `headers`    | `Headers` | Response headers. Empty `Headers` for network errors.             |
-| `request`    | `object`  | `{ method, url, params }` -- metadata about the failed request.   |
+| `request`    | `object`  | `{ method, url, params }` -- metadata about the failed request; `url` is the resolved, path-substituted address, falling back to the route template only when it could not be built. |
 | `partialData` | `unknown` (optional) | GraphQL data returned alongside `{ errors }` (partial success). Lives here, not on `Result.data`, so the `Result` stays a clean union: `data` is non-null iff `error` is null. `undefined` for every REST error and for GraphQL responses carrying no data. |
 
 `kind` exists because `status` alone cannot tell some outcomes apart: an HTTP error (`'http'`), a `fetch` failure with no response (`'network'`), a cancellation — your own signal, a dedupe supersede, or a whole-operation deadline firing — (`'abort'`/`'timeout'`), a 2xx (or non-2xx) body that failed to parse (`'parse'`), and a middleware that threw instead of the request itself failing (`'middleware'`) all need different handling, but `'network'`, `'abort'`, and `'timeout'` all carry `status: 0`.

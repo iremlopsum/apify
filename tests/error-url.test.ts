@@ -185,3 +185,31 @@ describe('error.request.url when setup threw before the URL was built', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled()
   })
 })
+
+describe('error.request.url when a middleware rethrows the signal reason', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  // Pins the CHANGELOG's 4.0.2 "ordinary aborts were already correct"
+  // paragraph for the one example whose mechanism it misstated: this
+  // rejection never reaches core()'s fetch catch, because the middleware
+  // never calls next() — it races the caller's signal instead, so the call
+  // is left pending ("mid-flight") until the abort fires. The rejection
+  // escapes composed(context) and is caught by Step 8's 'middleware' catch,
+  // which passes context.request.url explicitly, then propagatesReason
+  // reclassifies it to 'abort' inside syntheticResult.
+  it('reports the resolved URL, not the template, on an ordinary caller abort', async () => {
+    const rethrows: Middleware = ctx => new Promise((_resolve, reject) => {
+      const s = ctx.request.signal
+      if (s?.aborted) { reject(s.reason); return }
+      s?.addEventListener('abort', () => reject(s.reason), { once: true })
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const ac = new AbortController()
+    const p = api([rethrows]).getUser({ id: '42' }, { signal: ac.signal })
+    await flush()
+    ac.abort()
+    const r = await p
+    expect(r.error?.kind).toBe('abort')
+    expect(r.error?.request.url).toBe('https://api.test/users/42')
+  })
+})

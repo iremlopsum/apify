@@ -250,8 +250,16 @@ function resolveRequestUrl(
  * Deliberately not memoized. Caching Step 4's value in the `api[name]` closure
  * would fill it for a share initiator and leave it empty for a joiner, and the
  * two would then disagree — which is what `tests/error-url.test.ts`'s
- * agreement test exists to catch. The recompute is byte-identical, so the
- * cache would buy nothing on a path that is already failing.
+ * agreement test exists to catch. The recompute is identical for identical
+ * inputs, so the cache would buy nothing on a path that is already failing.
+ * Two cases make the inputs not actually identical, and a cache would not fix
+ * either: `stableStringify` sorts keys when building `shareKey`
+ * (`src/utils/cache.ts:33`) while `buildUrl` serializes query params in
+ * `Object.entries` insertion order, so two callers that coalesce into one
+ * shared request (an agreeing `shareKey`) can still recompute different query
+ * strings; and `params` reaches middleware by reference, so an in-place
+ * mutation there can make the recompute differ from what Step 4 built. Each
+ * caller's URL is still correct for its own params in both cases.
  */
 function urlForError(baseUrl: string, request: Request<any, any>, params: object): string {
   try {
@@ -504,12 +512,18 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        *
        * Every other site takes the default, `urlForError`, which rebuilds the
        * address through the same `resolveRequestUrl` Step 4 uses. A recompute
-       * is sound because it has identical inputs: `shareKey` is `name` plus
-       * stringified params, so a joiner and the initiator agree on every one of
-       * them. It was not done before that extraction existed because
-       * hand-reproducing Step 4 at a second site would have been free to drift
-       * from it — the extraction removed the objection; it was not a change of
-       * mind about the risk.
+       * is sound because a joiner and the initiator agree on the request name
+       * and on every param value: `shareKey` is `name` plus stringified params.
+       * Two caveats to that agreement, neither of which breaks it: `params`
+       * reaches middleware by reference, so an in-place mutation there can
+       * make the recompute differ from what Step 4 built; and `stableStringify`
+       * sorts keys for `shareKey` while `buildUrl` serializes query params in
+       * insertion order, so an agreeing `shareKey` does not guarantee an
+       * identical query string. Each caller's URL is still correct for its own
+       * params either way. It was not done before that extraction existed
+       * because hand-reproducing Step 4 at a second site would have been free
+       * to drift from it — the extraction removed the objection; it was not a
+       * change of mind about the risk.
        *
        * Considered and rejected: capturing Step 4's `url` in this closure. A
        * joiner never runs its own `execute()`, so its capture stays empty while

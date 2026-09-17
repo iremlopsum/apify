@@ -21,8 +21,8 @@ change to any successful call.
 
   **Ordinary aborts were already correct** and are unchanged — a caller
   cancelling mid-flight, a dedupe supersede, and a middleware rethrowing the
-  signal reason are all classified inside `execute()`'s `core` catch and have
-  reported the resolved URL since before 4.0.1.
+  signal reason are all reclassified from the signal that cancelled them, and
+  none of them reaches the default this release changes.
 
   The template still appears in the one case where it is the only honest
   answer: `buildUrl` itself threw, so no URL was ever resolved. An unresolved
