@@ -205,9 +205,12 @@ export function buildUrl(baseUrl: string, path: string, params: Record<string, u
       }
     }
 
-    // Only append the '?' if there are actual query params
+    // Only append a separator if there are actual query params -- and only a
+    // '?' if the URL does not already have one. A `path` template may carry its
+    // own query string ('/search/:q?x=1'), and appending a second '?' produced
+    // a URL no server parses as intended.
     const query = searchParams.toString()
-    if (query) url = `${url}?${query}`
+    if (query) url = `${url}${url.includes('?') ? '&' : '?'}${query}`
 
     // All remaining params have been consumed by the query string,
     // so return an empty object to signal "nothing left for the body"
