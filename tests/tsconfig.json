@@ -1,0 +1,8 @@
+{
+  // Editors only auto-discover `tsconfig.json`, and the root one excludes
+  // `tests/`, so test files would otherwise land in an inferred project with no
+  // @types/node — `import http from 'node:http'` in integration/server.ts shows
+  // up as ts(2591). This file exists solely so the editor resolves test files
+  // against `tsconfig.test.json`; it adds no options of its own.
+  "extends": "../tsconfig.test.json"
+}
