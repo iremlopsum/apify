@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.1] — 2026-09-18
+
+### Fixed
+
+- **`defineRequest` now infers a path parameter that starts the path.** A `path`
+  of `':id'` or `':id/foo'` — the token at the very start of the string —
+  inferred no parameters at all, while the request still required one and failed
+  at runtime with `Unresolved path parameter :id`.
+
+  4.1.0 anchored the type-level parser to a preceding `/`, mirroring the rule
+  that stops a colon *inside* a segment (`/v1/documents:batchGet`, `/events/at/12:30`)
+  being read as a parameter. But the runtime anchors to the start of each
+  `/`-separated segment, and the first segment begins at the start of the string
+  whether or not a slash precedes it — so a leading token was a parameter to the
+  request and not to the type.
+
+  A missing leading slash is now normalised before anchoring, making the type's
+  rule exactly equivalent to the runtime's. Paths that begin with `/` — every one
+  in this project's documentation and tests — are unaffected, as is a path like
+  `'users/:id'`, whose token was already preceded by a slash.
+
 ## [4.1.0] — 2026-09-18
 
 ### Added
@@ -631,6 +652,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.1.1]: https://github.com/iremlopsum/apify/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/iremlopsum/apify/compare/v4.0.2...v4.1.0
 [4.0.2]: https://github.com/iremlopsum/apify/compare/v4.0.1...v4.0.2
 [4.0.1]: https://github.com/iremlopsum/apify/compare/v4.0.0...v4.0.1

@@ -62,18 +62,32 @@ type TakeName<S extends string, Acc extends string = ''> =
  * or a time like `/events/at/12:30` — is never mistaken for a token. Both of
  * those paths parse to `{}`, not `{ batchGet: ... }` or `{ '30': ... }`.
  *
+ * A missing leading slash is normalised before anchoring. `buildUrl` requires a
+ * token to sit at index 0 of a `split('/')` segment, which means "preceded by
+ * `/`, **or at the very start of the string**" — and segment 0 always starts at
+ * index 0. Prepending `/` when it is absent makes this type's `/:` requirement
+ * exactly equivalent to that condition, and is a no-op for a path that already
+ * has one.
+ *
+ * 4.1.0 shipped the anchor without the normalisation and so under-inferred a
+ * path whose token *starts the string*: `':id'` inferred nothing while the
+ * request still demanded `id`, failing at runtime. A path like `'users/:id'`
+ * was never affected — it contains a literal `/:`.
+ *
  * Exported for `tests/types.test-d.ts`. Not re-exported from `src/index.ts`, so
  * it is not public API — see index.ts's note on what is deliberately withheld.
  */
-export type PathParams<P extends string> =
+type Anchored<P extends string> =
   P extends `${string}/:${infer Tail}`
     ? TakeName<Tail> extends infer Name extends string
       ? Name extends ''
-        ? PathParams<Tail>
+        ? Anchored<Tail>
         : { [K in Name]: string | number } &
-          (Tail extends `${Name}${infer Rest}` ? PathParams<Rest> : {})
+          (Tail extends `${Name}${infer Rest}` ? Anchored<Rest> : {})
       : {}
     : {}
+
+export type PathParams<P extends string> = Anchored<P extends `/${string}` ? P : `/${P}`>
 
 /**
  * Flattens an intersection into a single object type.
