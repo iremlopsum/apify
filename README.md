@@ -252,6 +252,74 @@ wrong is a compile error, not a silent one.
 `new Request(...)` is unchanged and not deprecated — use it when the config is
 not a literal, or when you do not want the path checked.
 
+### Response validation
+
+Pass any [Standard Schema](https://standardschema.dev) validator — Zod, Valibot,
+ArkType — and the response is checked before you see it. apify takes no
+dependency on one; Standard Schema is an interface, not a package.
+
+```ts
+import { z } from 'zod'
+
+const getUser = defineRequest()({
+  method: 'GET',
+  path: '/users/:id',
+  schema: z.object({ id: z.string(), name: z.string() }),
+})
+
+const { data, error } = await api.getUser({ id: '42' })
+//      ^? { id: string; name: string } | null
+```
+
+The schema supplies the response type, so there is no type argument to write —
+and no second place for it to drift out of date.
+
+**`data` is the schema's output.** A schema that transforms changes what you
+receive:
+
+```ts
+const getUser = defineRequest()({
+  method: 'GET',
+  path: '/users/:id',
+  schema: z.object({
+    id: z.string(),
+    createdAt: z.coerce.date(),        // the wire sends a string
+    role: z.string().default('user'),  // absent on the wire
+  }),
+})
+
+const { data } = await api.getUser({ id: '42' })
+data.createdAt   // a real Date
+data.role        // 'user' when the server omitted it
+```
+
+That is the point of validating through a schema rather than merely checking
+one — but it does mean `data` is no longer byte-identical to the response.
+
+A response the schema refuses is an error `Result`, never a throw:
+
+```ts
+const { error } = await api.getUser({ id: '42' })
+if (error?.kind === 'parse') {
+  console.error(error.body)  // the validator's issues
+  error.status               // the response's own status — the server was fine
+}
+```
+
+Only the **success** body is validated. A non-2xx body is diagnostic and often a
+different shape, so it is left alone.
+
+Schemas work on the GraphQL client too, validating the response's `data`:
+
+```ts
+const me = new Operation<{}, User>({
+  operation: gql`query { me { id name } }`,
+  schema: UserSchema,
+})
+```
+
+There the response type stays explicit — only `defineRequest` infers it.
+
 ### Query strings
 
 For GET and DELETE requests (or any request with `bodyAs: 'query'`), params that are not consumed by path substitution are serialized as a query string using `URLSearchParams`.
@@ -1141,6 +1209,8 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 | `createApi`     | function | Creates a typed API client from a config of Request definitions    |
 | `Request`       | class    | Typed endpoint definition -- one instance per endpoint             |
 | `defineRequest` | function | Typed factory — infers path params from the `path` literal, and enforces `responseType: 'none'`. |
+| `StandardSchemaV1` | type | The Standard Schema contract — for typing a helper that takes a validator. |
+| `InferOutput`      | type | The type a schema produces on success. |
 | `ApiError`      | class    | Structured error with status, kind, body, headers, and request metadata |
 | `ApiErrorKind`  | type     | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse' \| 'middleware'` -- discriminates `ApiError.kind` |
 | `RequestConfig` | type     | Config object for the `Request` constructor                        |
