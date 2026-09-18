@@ -186,16 +186,32 @@ type SchemaOut<TSchema> = [TSchema] extends [undefined] ? unknown : InferOutput<
  * schema (the widened `StandardSchemaV1<unknown>`, same as a plain
  * `undefined`) reads as "not given" right alongside the real absence.
  *
- * The cost of that permissiveness: an explicit response type alongside a
- * schema whose output is `unknown` (or `any`) is silently DISCARDED, not
- * rejected — `defineRequest<User>()(someRequestConfigVariable)` compiles, but
- * if that variable's `schema` were ever populated, `data` would be `unknown`,
- * not `User`, with no error anywhere. This is deliberately the same shape as
- * `EmptyBodyGuard`'s permissiveness for a widened `responseType`, and for the
- * same reason: rejecting it would also reject the two legitimate widened-
- * config forms. Do not "fix" this without re-verifying, via
- * `tests/types.test-d.ts`, that a bare `RequestConfig`-typed variable and a
- * spread of one both still compile through `defineRequest`.
+ * A schema carrying no type information — an OUTPUT of `unknown` or `any` —
+ * is treated as no schema at all: the explicit response type is HONOURED, and
+ * no conflict is raised. `defineRequest<User>()({ ..., schema:
+ * looselyTypedSchema })` compiles and its `data` is `User`, not `unknown`.
+ * This is not a gap being tolerated; it is what makes a widened
+ * `RequestConfig`-typed config work at all — a spread of one carries exactly
+ * `schema?: StandardSchemaV1<unknown>`, inherited from `RequestConfig` itself,
+ * and a schema written directly can be just as loosely typed. A schema that
+ * DOES carry type information — a concrete `Output` — supplies the response
+ * type instead (see `defineRequest`'s return-type expression), and an
+ * explicit type alongside THAT is the conflict this guard exists to catch.
+ *
+ * This falls out of `SchemaOut` for free, and only BECAUSE the guard and
+ * `defineRequest`'s return type read it identically. That took two attempts:
+ * moving the guard onto `SchemaOut` (the OUTPUT paragraph above) fixed the
+ * guard's own over-rejection of widened configs, but the return type was left
+ * reading `[TSchema] extends [undefined]` directly — the schema's PRESENCE,
+ * not its output — so a widened config now passed the guard while the return
+ * type still discarded its `TResponse`. Same mistake as the original
+ * over-rejection, just relocated: two formulas answering one question. Both
+ * disappeared once both sites read `SchemaOut`. Do not let them drift apart
+ * again: change `SchemaConflictGuard` and `defineRequest`'s return-type
+ * expression together, and reverify against `tests/types.test-d.ts`'s
+ * widened-config assertions, which check the resulting `data` type via
+ * `createApi` rather than merely that the call compiles — editing one site
+ * without the other, unverified, is exactly how this regressed.
  */
 type SchemaConflictGuard<TSchema, TResponse> =
   unknown extends SchemaOut<TSchema>

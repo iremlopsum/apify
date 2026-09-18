@@ -326,13 +326,21 @@ describe('defineRequest — schema-inferred response types', () => {
   const userSchema: StandardSchemaV1<User> = {
     '~standard': { version: 1, vendor: 'test', validate: (v: unknown) => ({ value: v as User }) },
   }
+  // A schema whose OUTPUT is `unknown` — the same shape a bare `RequestConfig`
+  // variable's own `schema` field infers as. Distinct from `evenSchema` and
+  // `userSchema` above, which both carry a concrete Output and so DO conflict
+  // with an explicit response type.
+  const looseSchema: StandardSchemaV1<unknown> = {
+    '~standard': { version: 1, vendor: 'test', validate: (v: unknown) => ({ value: v }) },
+  }
 
   const schemaApi = createApi({
     baseUrl: '/api',
     requests: {
-      fromSchema: defineRequest()({ method: 'GET', path: '/users/:id', schema: userSchema }),
-      explicit:   defineRequest<User>()({ method: 'GET', path: '/users/:id' }),
-      neither:    defineRequest()({ method: 'GET', path: '/x' }),
+      fromSchema:       defineRequest()({ method: 'GET', path: '/users/:id', schema: userSchema }),
+      explicit:         defineRequest<User>()({ method: 'GET', path: '/users/:id' }),
+      neither:          defineRequest()({ method: 'GET', path: '/x' }),
+      explicitAndLoose: defineRequest<User>()({ method: 'GET', path: '/users/:id', schema: looseSchema }),
     },
   })
 
@@ -350,6 +358,19 @@ describe('defineRequest — schema-inferred response types', () => {
 
   it('honours an explicit response type when there is no schema', async () => {
     const r = await schemaApi.explicit({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+
+  it('honours an explicit response type when the schema carries no type information', async () => {
+    // A schema whose OUTPUT is `unknown` (or `any`) is treated as no schema at
+    // all — see SchemaConflictGuard's JSDoc. It neither conflicts with the
+    // explicit type (contrast the next test, where the schemas DO carry a
+    // concrete Output) nor gets read for the response type: the explicit
+    // TResponse wins. This is what lets a widened `RequestConfig`-typed
+    // config's inherited `schema?: StandardSchemaV1<unknown>` field coexist
+    // with an explicit response type at all.
+    const r = await schemaApi.explicitAndLoose({ id: '1' })
     if (r.error) return
     expectTypeOf(r.data).toEqualTypeOf<User>()
   })
