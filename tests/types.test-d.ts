@@ -197,6 +197,12 @@ describe('defineRequest — the path parser', () => {
     expectTypeOf<keyof PathParams<'/v1/documents:batchGet'>>().toEqualTypeOf<never>()
     expectTypeOf<keyof PathParams<'/events/at/12:30'>>().toEqualTypeOf<never>()
     expectTypeOf<keyof PathParams<'/v1/docs:run/:id'>>().toEqualTypeOf<'id'>()
+    // ...but a token at character zero IS one: buildUrl's anchor is the start of
+    // each split('/') segment, and segment 0 begins at index 0 whether or not the
+    // path has a leading slash.
+    expectTypeOf<keyof PathParams<':id'>>().toEqualTypeOf<'id'>()
+    expectTypeOf<keyof PathParams<':id/foo'>>().toEqualTypeOf<'id'>()
+    expectTypeOf<keyof PathParams<'users/:id'>>().toEqualTypeOf<'id'>()
   })
 })
 

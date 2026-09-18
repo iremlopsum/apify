@@ -32,6 +32,15 @@ const cases: Array<[path: string, params: Record<string, string | number>, url: 
   ['/v1/documents:batchGet',  {},                                  '/v1/documents:batchGet'],
   ['/events/at/12:30',        {},                                  '/events/at/12:30'],
   ['/v1/docs:run/:id',        { id: 7 },                           '/v1/docs:run/7'],
+  // A token at character zero, with no leading slash. buildUrl splits on '/' and
+  // segment 0 begins at index 0, so this IS a token to the runtime — and the type
+  // must agree. It did not in 4.1.0 for the first two: the anchor added there
+  // required a literal '/' before the ':', which a token at index 0 has not got.
+  // The third, 'users/:id', was always correct and is here as a regression guard
+  // — it contains a literal '/:', so the 4.1.0 anchor matched it fine.
+  [':id',                     { id: 42 },                          '42'],
+  [':id/foo',                 { id: 42 },                          '42/foo'],
+  ['users/:id',               { id: 42 },                          'users/42'],
 ]
 
 describe('the type-level parser agrees with buildUrl', () => {
