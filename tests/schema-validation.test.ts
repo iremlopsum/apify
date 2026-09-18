@@ -104,3 +104,60 @@ describe('REST — schema validation', () => {
     expect(r.data).toEqual({ anything: true })
   })
 })
+
+import { createGraphQL, Operation, gql } from '../src/graphql.js'
+
+describe('GraphQL — schema validation', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  const gqlWith = (schema?: StandardSchemaV1<unknown>) => createGraphQL({
+    endpoint: 'https://api.test/graphql',
+    operations: { thing: new Operation<Record<string, never>, unknown>({ operation: gql`query { thing }`, schema }) },
+  })
+
+  const gqlData = (data: unknown) =>
+    vi.fn(async () => new Response(JSON.stringify({ data }), { status: 200, headers: { 'content-type': 'application/json' } }))
+
+  it('returns data when the schema accepts', async () => {
+    vi.stubGlobal('fetch', gqlData(4))
+    const r = await gqlWith(evenNumber()).thing()
+    expect(r.error).toBeNull()
+    expect(r.data).toBe(4)
+  })
+
+  it('reports a parse error with the issues in body when the schema refuses', async () => {
+    vi.stubGlobal('fetch', gqlData(3))
+    const r = await gqlWith(evenNumber()).thing()
+    expect(r.error?.kind).toBe('parse')
+    expect(r.error?.body).toEqual([{ message: 'not an even number' }])
+    expect(r.error?.status).toBe(200)
+  })
+
+  it('awaits an async validator', async () => {
+    vi.stubGlobal('fetch', gqlData(4))
+    const r = await gqlWith(evenNumber(true)).thing()
+    expect(r.data).toBe(4)
+  })
+
+  it('gives data the schema OUTPUT, not the wire value', async () => {
+    vi.stubGlobal('fetch', gqlData(21))
+    const doubled = schemaOf<number>(v => ({ value: (v as number) * 2 }))
+    const r = await gqlWith(doubled).thing()
+    expect(r.data).toBe(42)
+  })
+
+  it('reports a THROWING validator as parse, not as a network failure', async () => {
+    vi.stubGlobal('fetch', gqlData(4))
+    const boom = schemaOf<number>(() => { throw new Error('validator exploded') })
+    const r = await gqlWith(boom).thing()
+    expect(r.error?.kind).toBe('parse')
+    expect(r.error?.status).toBe(200)
+  })
+
+  it('changes nothing when no schema is given', async () => {
+    vi.stubGlobal('fetch', gqlData({ anything: true }))
+    const r = await gqlWith().thing()
+    expect(r.error).toBeNull()
+    expect(r.data).toEqual({ anything: true })
+  })
+})

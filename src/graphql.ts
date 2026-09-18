@@ -4,6 +4,8 @@ import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
 import { abortKind, propagatesReason } from './utils/abort-kind.js'
 import { resolveBudget } from './utils/budget.js'
+import { runSchema } from './utils/validate.js'
+import type { SchemaOutcome } from './utils/validate.js'
 import type { CallOptions, ErrorResult, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -326,6 +328,53 @@ export function createGraphQL(config: any): any {
                   request: { method: 'POST', url: ctx.request.url, params: variables },
                 })
                 return createErrorResult(error, response, execute)
+              }
+
+              // -------------------------------------------------------------
+              // Optional schema validation
+              // -------------------------------------------------------------
+              // The REST pipeline carries the same block. The two clients are
+              // parallel implementations, so this is duplicated on purpose:
+              // there is no shared seam, and a change made to one is not made
+              // to the other.
+              //
+              // The try/catch is load-bearing. This statement sits AFTER the
+              // parse try/catch has closed, inside the outer handler — the one
+              // that reports status 0 with kind 'network', and that checks
+              // signal.aborted first. A validator that throws instead of
+              // returning issues would otherwise surface as a network failure,
+              // or as a cancellation that never happened, on a request that
+              // completed successfully.
+              // -------------------------------------------------------------
+              if (operation.config.schema) {
+                let outcome: SchemaOutcome
+                try {
+                  outcome = await runSchema(operation.config.schema, gqlBody.data)
+                } catch (validatorErr) {
+                  const error = new ApiError({
+                    kind: 'parse',
+                    status: response.status,
+                    statusText: response.statusText,
+                    body: validatorErr,
+                    headers: response.headers,
+                    request: { method: 'POST', url: ctx.request.url, params: variables }
+                  })
+                  return createErrorResult(error, response, execute)
+                }
+
+                if (!outcome.ok) {
+                  const error = new ApiError({
+                    kind: 'parse',
+                    status: response.status,
+                    statusText: response.statusText,
+                    body: outcome.issues,
+                    headers: response.headers,
+                    request: { method: 'POST', url: ctx.request.url, params: variables }
+                  })
+                  return createErrorResult(error, response, execute)
+                }
+
+                return createSuccessResult(outcome.value, response, execute)
               }
 
               return createSuccessResult(gqlBody.data, response, execute)
