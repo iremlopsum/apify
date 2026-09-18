@@ -5,6 +5,8 @@ import type { MiddlewareContext, CallOptions, RequestConfig } from '../src/types
 import type { ApiErrorKind } from '../src/types.js'
 import { successResult, errorResult } from '../src/testing.js'
 import type { ApiError } from '../src/types.js'
+import type { PathParams } from '../src/define-request.js'
+import { defineRequest } from '../src/define-request.js'
 
 interface User { id: string; name: string }
 
@@ -146,6 +148,11 @@ describe("responseType: 'none'", () => {
     // compiles today; it is a documented convention violation, not a caught
     // one. Do NOT re-add a `// @ts-expect-error` above this — there is
     // nothing here for the compiler to flag.
+    //
+    // As of 4.1.0 `defineRequest` DOES catch this — see "defineRequest — the
+    // responseType: none guard" below. This test is the `new Request` half of
+    // that comparison: the class still cannot, for the reason above, and that
+    // is why the factory exists. Still do NOT add a `@ts-expect-error` here.
     new Request<{ id: string }, User>({ method: 'DELETE', path: '/u/:id', responseType: 'none' })
   })
 
@@ -165,5 +172,122 @@ describe("responseType: 'none'", () => {
     const base: RequestConfig = { method: 'GET', path: '/u/:id' }
     const req = new Request<{ id: string }, User>({ ...base, path: '/x' })
     expectTypeOf(req).toEqualTypeOf<Request<{ id: string }, User>>()
+  })
+})
+
+describe('defineRequest — the path parser', () => {
+  it('extracts exactly the tokens buildUrl substitutes', () => {
+    // Deliberately duplicates tests/define-request.test.ts's case table. That
+    // test proves what the RUNTIME does; this one proves what the TYPE says.
+    // A single case table would prove only that a file agrees with itself.
+    expectTypeOf<keyof PathParams<'/users/:id'>>().toEqualTypeOf<'id'>()
+    expectTypeOf<keyof PathParams<'/orgs/:org/repos/:repo'>>().toEqualTypeOf<'org' | 'repo'>()
+    expectTypeOf<keyof PathParams<'/health'>>().toEqualTypeOf<never>()
+    expectTypeOf<keyof PathParams<'/orgs/:id/members/:id'>>().toEqualTypeOf<'id'>()
+    expectTypeOf<keyof PathParams<'/users/:id.json'>>().toEqualTypeOf<'id'>()
+    expectTypeOf<keyof PathParams<'/a/:id-b'>>().toEqualTypeOf<'id'>()
+    expectTypeOf<keyof PathParams<'/users/:id_v2'>>().toEqualTypeOf<'id_v2'>()
+    expectTypeOf<keyof PathParams<'/a/:one/b/:two/c/:three'>>().toEqualTypeOf<'one' | 'two' | 'three'>()
+    // A '?' ends a token name too — the spec flagged this as assumed rather
+    // than tested. Note buildUrl produces a second '?' if the call also has
+    // query params (BACKLOG §2.3); that is pre-existing and not this feature's.
+    expectTypeOf<keyof PathParams<'/search/:q?x=1'>>().toEqualTypeOf<'q'>()
+    // A token must BEGIN a path segment, matching buildUrl's Phase 1b. A colon
+    // inside a segment — a Google-style custom method, or a time — is not a token.
+    expectTypeOf<keyof PathParams<'/v1/documents:batchGet'>>().toEqualTypeOf<never>()
+    expectTypeOf<keyof PathParams<'/events/at/12:30'>>().toEqualTypeOf<never>()
+    expectTypeOf<keyof PathParams<'/v1/docs:run/:id'>>().toEqualTypeOf<'id'>()
+  })
+})
+
+describe('defineRequest — inference through createApi', () => {
+  interface Repo { id: string }
+
+  const inferApi = createApi({
+    baseUrl: '/api',
+    requests: {
+      getUser: defineRequest<User>()({ method: 'GET', path: '/users/:id' }),
+      listRepos: defineRequest<Repo[], { page?: number }>()({ method: 'GET', path: '/orgs/:org/repos' }),
+      health: defineRequest<{ ok: boolean }>()({ method: 'GET', path: '/health' }),
+      legacy: new Request<{ id: string }, User>({ method: 'GET', path: '/legacy/:id' }),
+    },
+  })
+
+  it('infers path params and keeps the response type', async () => {
+    const r = await inferApi.getUser({ id: '42' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+
+  it('accepts a numeric path param', () => {
+    expectTypeOf(inferApi.getUser).toBeCallableWith({ id: 42 })
+  })
+
+  it('merges extra params and keeps them optional', () => {
+    expectTypeOf(inferApi.listRepos).toBeCallableWith({ org: 'acme' })
+    expectTypeOf(inferApi.listRepos).toBeCallableWith({ org: 'acme', page: 2 })
+  })
+
+  it('leaves params optional for a path with no tokens', () => {
+    expectTypeOf(inferApi.health).toBeCallableWith()
+  })
+
+  it('coexists with new Request in one client', async () => {
+    const r = await inferApi.legacy({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+
+  it('rejects the wrong param name, an object value, a missing path param, and a typo', () => {
+    // @ts-expect-error  the path says :id, not :userId — the whole point
+    void inferApi.getUser({ userId: '42' })
+    // @ts-expect-error  a path param cannot be an object
+    void inferApi.getUser({ id: { a: 1 } })
+    // @ts-expect-error  org comes from the path and is required
+    void inferApi.listRepos({ page: 2 })
+    // @ts-expect-error  typo in an extra param
+    void inferApi.listRepos({ org: 'acme', pge: 2 })
+  })
+})
+
+describe('defineRequest — the responseType: none guard', () => {
+  it("accepts 'none' when TResponse is undefined", async () => {
+    // `toMatchTypeOf<Request<object, undefined>>()` is structural and this
+    // shape is nearly vacuous — it would pass for almost any Request. Route
+    // it through createApi instead and pin the thing that actually matters:
+    // `data` is `undefined` on the success branch, in the style of the
+    // `responseType: 'none'` describe block above.
+    const pingApi = createApi({
+      baseUrl: '/api',
+      requests: {
+        ping: defineRequest<undefined>()({ method: 'POST', path: '/ping', responseType: 'none' }),
+      },
+    })
+    const r = await pingApi.ping()
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<undefined>()
+  })
+
+  it("rejects 'none' paired with a declared response body", () => {
+    // This is what 3.1.0 tried and dropped. An overload pair could not do it:
+    // TS falls through to the general signature for any call the narrow one
+    // refuses, so the guard reported nothing. A single signature has nothing
+    // to fall through to.
+    // @ts-expect-error  declaring User while saying the body is empty
+    defineRequest<User>()({ method: 'DELETE', path: '/u/:id', responseType: 'none' })
+  })
+
+  it('still accepts a RequestConfig-typed variable and a spread of one', () => {
+    // The naive guard — constraining the config whenever TResponse is not
+    // undefined — rejects BOTH of these, and both must keep compiling. They
+    // are the forms src/types.ts's ResponseType JSDoc names as the reason the
+    // original guard had to stay permissive.
+    const loose: RequestConfig = { method: 'GET', path: '/x' }
+    defineRequest<User>()(loose)
+    defineRequest<User>()({ ...loose, path: '/users/:id' })
+  })
+
+  it("accepts an ordinary responseType alongside a real response type", () => {
+    defineRequest<User>()({ method: 'GET', path: '/u/:id', responseType: 'json' })
   })
 })

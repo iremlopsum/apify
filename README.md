@@ -195,6 +195,63 @@ const triggerJob = new Request<{ priority: number }, Job>({
 })
 ```
 
+### `defineRequest`
+
+`new Request<TParams, TResponse>` makes you restate what the path already says,
+and nothing checks the two against each other:
+
+```ts
+// The params are restated by hand, and nothing checks them against the path:
+const getUser = new Request<{ userId: string }, User>({ method: 'GET', path: '/users/:id' })
+
+api.getUser({ userId: '42' })  // compiles — then fails at runtime: buildUrl finds
+                               // no `:userId` to substitute, `:id` survives, and
+                               // the unresolved-token check throws
+```
+
+`defineRequest` infers the params from the path literal instead:
+
+```ts
+import { defineRequest } from '@iremlopsum/apify'
+
+const getUser = defineRequest<User>()({ method: 'GET', path: '/users/:id' })
+
+api.getUser({ id: '42' })      // ✓
+api.getUser({ id: 42 })        // ✓ — numbers are encoded
+api.getUser({ userId: '42' })  // ✗ Object literal may only specify known properties
+```
+
+Params the path does not name — query or body fields — go in the second type
+argument:
+
+```ts
+const listRepos = defineRequest<Repo[], { page?: number }>()({
+  method: 'GET',
+  path: '/orgs/:org/repos',
+})
+
+api.listRepos({ org: 'acme' })            // ✓ page is optional
+api.listRepos({ org: 'acme', page: 2 })   // ✓
+api.listRepos({ page: 2 })                // ✗ org is required
+```
+
+It also enforces the `responseType: 'none'` convention that `new Request` can
+only document:
+
+```ts
+defineRequest<undefined>()({ method: 'POST', path: '/ping', responseType: 'none' })  // ✓
+defineRequest<User>()({ method: 'POST', path: '/ping', responseType: 'none' })       // ✗
+```
+
+**Why two calls.** TypeScript has no partial type-argument inference: if the response
+type and the config were arguments to one call, supplying the response type explicitly
+would stop the path from being inferred, and the checking would quietly do nothing.
+Splitting them keeps the response type explicit and the path inferred. Calling it
+wrong is a compile error, not a silent one.
+
+`new Request(...)` is unchanged and not deprecated — use it when the config is
+not a literal, or when you do not want the path checked.
+
 ### Query strings
 
 For GET and DELETE requests (or any request with `bodyAs: 'query'`), params that are not consumed by path substitution are serialized as a query string using `URLSearchParams`.
@@ -1083,6 +1140,7 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 | --------------- | -------- | ------------------------------------------------------------------ |
 | `createApi`     | function | Creates a typed API client from a config of Request definitions    |
 | `Request`       | class    | Typed endpoint definition -- one instance per endpoint             |
+| `defineRequest` | function | Typed factory — infers path params from the `path` literal, and enforces `responseType: 'none'`. |
 | `ApiError`      | class    | Structured error with status, kind, body, headers, and request metadata |
 | `ApiErrorKind`  | type     | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse' \| 'middleware'` -- discriminates `ApiError.kind` |
 | `RequestConfig` | type     | Config object for the `Request` constructor                        |

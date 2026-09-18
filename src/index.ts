@@ -16,6 +16,9 @@ export { createApi } from './create-api.js'
 /** Typed request definition — one instance per API endpoint. */
 export { Request } from './request.js'
 
+/** Typed factory — infers path params from the `path` literal. */
+export { defineRequest } from './define-request.js'
+
 // ---------------------------------------------------------------------------
 // Error class — exported as a value so consumers can use `instanceof`
 // ---------------------------------------------------------------------------

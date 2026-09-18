@@ -76,6 +76,12 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
  *   ceremony with no effect. Mismatch it and you get a wrong `TResponse`
  *   silently, same as always — declare it as `undefined`.
  *
+ *   This describes `new Request`'s behaviour specifically. As of 4.1.0,
+ *   `defineRequest` DOES enforce this pairing at compile time — see
+ *   `EmptyBodyGuard` in `define-request.ts` — because a curried function,
+ *   unlike a constructor, has no permissive overload for the guard to fall
+ *   through to.
+ *
  * Set this on the {@link RequestConfig} for a specific endpoint. If omitted,
  * the library defaults to `'json'`.
  */

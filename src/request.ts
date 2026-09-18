@@ -152,7 +152,11 @@ export class Request<TParams extends object, TResponse> {
     // No type-level guard ties `responseType: 'none'` to `TResponse` being
     // `undefined` — see the JSDoc on `ResponseType` in types.ts for why an
     // attempted guard was tried and dropped, and for the convention this
-    // relies on instead.
+    // relies on instead. This describes THIS class: as of 4.1.0, the
+    // `defineRequest` factory (define-request.ts) does enforce the pairing
+    // via `EmptyBodyGuard` — `new Request` has no equivalent because a
+    // constructor's permissive overload gives any such check nothing to
+    // reject through.
     this.config = config
   }
 

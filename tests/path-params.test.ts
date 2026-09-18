@@ -186,3 +186,24 @@ describe('baseUrl and path joining', () => {
       .toBe('https://x.com/items?page=1')
   })
 })
+
+describe('query append when the URL already carries a query string', () => {
+  it('uses & when the path template has its own query string', () => {
+    // Phase 3 appended '?' unconditionally, so a path template carrying its own
+    // query string produced two of them: '/search/hi?x=1?page=2'. Token
+    // substitution was never the problem -- ':q' resolves correctly, and '?'
+    // correctly ends the token name.
+    const { url } = buildUrl('', '/search/:q?x=1', { q: 'hi', page: 2 }, true)
+    expect(url).toBe('/search/hi?x=1&page=2')
+  })
+
+  it('still uses ? when there is no existing query string', () => {
+    const { url } = buildUrl('', '/items', { page: 2 }, true)
+    expect(url).toBe('/items?page=2')
+  })
+
+  it('appends nothing when the path consumed every param', () => {
+    const { url } = buildUrl('', '/search/:q?x=1', { q: 'hi' }, true)
+    expect(url).toBe('/search/hi?x=1')
+  })
+})
