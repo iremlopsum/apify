@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0] — 2026-09-18
+
+### Added
+
+- **Optional response validation against a Standard Schema validator.** Pass
+  `schema` on a request or a GraphQL operation and the successful response is
+  validated before it reaches you. Zod, Valibot and ArkType all implement the
+  interface; apify takes no dependency on any of them, because Standard Schema
+  is an interface rather than a package.
+
+  On the REST side the schema also **supplies the response type**, so
+  `defineRequest()({ method, path, schema })` needs no type argument at all —
+  which is what the curried factory added in 4.1.0 was for. Passing both a
+  schema and an explicit response type is a compile error, even when the two
+  agree: the failure that guards against is the schema changing later while the
+  explicit type quietly does not.
+
+  `data` is the schema's **output**, so transforms, coercions and defaults
+  apply — `z.coerce.date()` gives you a `Date`. This means `data` is no longer
+  byte-identical to the response body when a schema transforms.
+
+  A refusal is a `kind: 'parse'` error with the validator's issues in
+  `error.body` and the response's own status, matching every other parse error:
+  the server answered, we could not accept the answer. A validator that throws
+  rather than returning issues is reported the same way.
+
+  Only the success body is validated; a non-2xx body is left alone. On the
+  GraphQL client the response type stays explicit — only `defineRequest` infers.
+
 ## [4.1.1] — 2026-09-18
 
 ### Fixed
@@ -652,6 +681,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.2.0]: https://github.com/iremlopsum/apify/compare/v4.1.1...v4.2.0
 [4.1.1]: https://github.com/iremlopsum/apify/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/iremlopsum/apify/compare/v4.0.2...v4.1.0
 [4.0.2]: https://github.com/iremlopsum/apify/compare/v4.0.1...v4.0.2

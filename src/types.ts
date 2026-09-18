@@ -92,6 +92,59 @@ export type ResponseType = 'json' | 'text' | 'blob' | 'arrayBuffer' | 'formData'
 // ---------------------------------------------------------------------------
 
 /**
+ * The [Standard Schema](https://standardschema.dev) v1 contract, inlined.
+ *
+ * Standard Schema is an interface, not a package: Zod, Valibot and ArkType all
+ * implement it. Declaring the shape here means a consumer brings their own
+ * validator and this library takes no dependency — the zero-dependency pillar
+ * holds with nothing added to `package.json`.
+ *
+ * Only the structural contract is copied, not the published namespace, which
+ * has grown a `StandardTypedV1` base since it was written. `validate` plus the
+ * phantom `types` is all this library reads, and copying more would mean
+ * tracking a moving document for no gain.
+ */
+export interface StandardSchemaV1<Output = unknown> {
+  readonly '~standard': {
+    readonly version: 1
+    readonly vendor: string
+    readonly validate: (value: unknown) => StandardResult<Output> | Promise<StandardResult<Output>>
+    readonly types?: { readonly input: unknown; readonly output: Output } | undefined
+  }
+}
+
+/** One validation failure. `path` is absent for a failure at the root. */
+export interface StandardIssue {
+  readonly message: string
+  readonly path?: ReadonlyArray<PropertyKey | { readonly key: PropertyKey }> | undefined
+}
+
+/** What a validator hands back: a value, or the reasons it refused. */
+export type StandardResult<Output> =
+  | { readonly value: Output; readonly issues?: undefined }
+  | { readonly issues: ReadonlyArray<StandardIssue> }
+
+/**
+ * The type a schema produces on success — what `data` will be.
+ *
+ * Infers structurally against the whole `StandardSchemaV1<Output>` interface —
+ * conditional-type inference matches `O` wherever it appears in the shape, and
+ * here that is `validate`'s return type, `StandardResult<Output> |
+ * Promise<StandardResult<Output>>`. THAT is the operative inference site, not
+ * the optional `types` phantom: a schema whose `validate` is concretely typed
+ * infers correctly even with no `types` property at all, while a schema whose
+ * `validate` is widened (e.g. to `unknown`) infers `unknown` even when `types`
+ * is present and correctly typed. Do not "simplify" this to
+ * `S['~standard']['types']['output']` — that reads the phantom directly and
+ * would silently yield `never` or `unknown` for every validator that omits it.
+ *
+ * Note this is the OUTPUT type: a schema that transforms (a coerced date, a
+ * defaulted field) describes what the caller receives, not what the server
+ * sent. See `schema` on `RequestConfig`.
+ */
+export type InferOutput<S> = S extends StandardSchemaV1<infer O> ? O : never
+
+/**
  * Configuration object passed to the `Request` class constructor.
  *
  * Each API endpoint is defined as a `new Request<TParams, TResponse>(config)`.
@@ -146,6 +199,33 @@ export interface RequestConfig {
    * @see {@link ResponseType} for available options.
    */
   responseType?: ResponseType
+
+  /**
+   * Optional runtime validation of the successful response body.
+   *
+   * Bring any [Standard Schema](https://standardschema.dev) validator — Zod,
+   * Valibot, ArkType. This library takes no dependency on one.
+   *
+   * **`data` becomes the schema's output, not the raw body.** A schema that
+   * coerces or defaults changes what the caller receives; that is the point of
+   * validating through a schema rather than merely checking one. A failure is a
+   * `kind: 'parse'` error carrying the issues in `error.body`.
+   *
+   * Only the **success** body is validated. A non-2xx body is diagnostic and
+   * frequently a different shape, so it is left alone.
+   *
+   * Declaring `responseType: 'none'` alongside a schema is a contradiction —
+   * there is no body to validate, and every call will fail validation. It is
+   * not rejected at compile time because the runtime failure is immediate and
+   * loud; see the spec's non-goals.
+   *
+   * On this class path, `schema` and `TResponse` are also not tied together at
+   * compile time: `new Request<P, User>({ ..., schema: numberSchema })`
+   * compiles and hands back a `number` typed as `User`, the same class of
+   * mismatch as the `responseType: 'none'` case above. `defineRequest` is the
+   * path that checks this — see `SchemaConflictGuard` in `define-request.ts`.
+   */
+  schema?: StandardSchemaV1<unknown>
 
   /**
    * When `true`, enables auto-cancellation of duplicate in-flight requests.
@@ -678,6 +758,19 @@ export interface OperationConfig {
    * @default false
    */
   dedupe?: boolean
+
+  /**
+   * Optional runtime validation of the GraphQL response's `data`.
+   *
+   * Same contract as `RequestConfig.schema`: any Standard Schema validator, no
+   * dependency taken, `data` becomes the schema's output, and a failure is a
+   * `kind: 'parse'` error with the issues in `error.body`.
+   *
+   * Unlike the REST side, a schema here does **not** supply the response type —
+   * `Operation`'s `TData` stays explicit, because only the REST pipeline has a
+   * factory that can infer it. See the spec's non-goals.
+   */
+  schema?: StandardSchemaV1<unknown>
 
   /**
    * Abort this operation if it has not completed within this many

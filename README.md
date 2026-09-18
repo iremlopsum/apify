@@ -252,6 +252,74 @@ wrong is a compile error, not a silent one.
 `new Request(...)` is unchanged and not deprecated — use it when the config is
 not a literal, or when you do not want the path checked.
 
+### Response validation
+
+Pass any [Standard Schema](https://standardschema.dev) validator — Zod, Valibot,
+ArkType — and the response is checked before you see it. apify takes no
+dependency on one; Standard Schema is an interface, not a package.
+
+```ts
+import { z } from 'zod'
+
+const getUser = defineRequest()({
+  method: 'GET',
+  path: '/users/:id',
+  schema: z.object({ id: z.string(), name: z.string() }),
+})
+
+const { data, error } = await api.getUser({ id: '42' })
+//      ^? { id: string; name: string } | null
+```
+
+The schema supplies the response type, so there is no type argument to write —
+and no second place for it to drift out of date.
+
+**`data` is the schema's output.** A schema that transforms changes what you
+receive:
+
+```ts
+const getUser = defineRequest()({
+  method: 'GET',
+  path: '/users/:id',
+  schema: z.object({
+    id: z.string(),
+    createdAt: z.coerce.date(),        // the wire sends a string
+    role: z.string().default('user'),  // absent on the wire
+  }),
+})
+
+const { data } = await api.getUser({ id: '42' })
+data.createdAt   // a real Date
+data.role        // 'user' when the server omitted it
+```
+
+That is the point of validating through a schema rather than merely checking
+one — but it does mean `data` is no longer byte-identical to the response.
+
+A response the schema refuses is an error `Result`, never a throw:
+
+```ts
+const { error } = await api.getUser({ id: '42' })
+if (error?.kind === 'parse') {
+  console.error(error.body)  // the validator's issues
+  error.status               // the response's own status — the server was fine
+}
+```
+
+Only the **success** body is validated. A non-2xx body is diagnostic and often a
+different shape, so it is left alone.
+
+Schemas work on the GraphQL client too, validating the response's `data`:
+
+```ts
+const me = new Operation<{}, User>({
+  operation: gql`query { me { id name } }`,
+  schema: UserSchema,
+})
+```
+
+There the response type stays explicit — only `defineRequest` infers it.
+
 ### Query strings
 
 For GET and DELETE requests (or any request with `bodyAs: 'query'`), params that are not consumed by path substitution are serialized as a query string using `URLSearchParams`.
@@ -358,7 +426,7 @@ The error object on failed calls. It is not a subclass of `Error` -- it is a str
 | `status`     | `number`  | HTTP status code (e.g., 404, 500). `0` for network errors, aborts, and timeouts. |
 | `kind`       | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse' \| 'middleware'` | What category of failure this is. See below. Required -- constructing an `ApiError` yourself (e.g. in custom middleware) must supply it. |
 | `statusText` | `string`  | HTTP status text (e.g., 'Not Found'). `''` for network errors.    |
-| `body`       | `unknown` | Parsed response body -- but for `'parse'`, either the thrown exception (a malformed body) or the raw response text (an empty body, or a GraphQL response carrying no data). The native Error for network failures. |
+| `body`       | `unknown` | Parsed response body -- but for `'parse'`, one of: the thrown exception (a malformed body), the raw response text (an empty body, or a GraphQL response carrying no data), a schema's issues array (the response failed validation), or a value a schema threw. The native Error for network failures. |
 | `headers`    | `Headers` | Response headers. Empty `Headers` for network errors.             |
 | `request`    | `object`  | `{ method, url, params }` -- metadata about the failed request; `url` is the resolved, path-substituted address, falling back to the route template only when it could not be built. |
 | `partialData` | `unknown` (optional) | GraphQL data returned alongside `{ errors }` (partial success). Lives here, not on `Result.data`, so the `Result` stays a clean union: `data` is non-null iff `error` is null. `undefined` for every REST error and for GraphQL responses carrying no data. |
@@ -367,7 +435,7 @@ The error object on failed calls. It is not a subclass of `Error` -- it is a str
 
 `'parse'` is for a **2xx** response that arrived but whose body failed to parse according to `responseType` -- you get the real `status`, a non-null `response`, and `kind: 'parse'`. A **non-2xx** response with an unparseable body is unaffected and still reports `kind: 'http'` -- the status code is checked before the body is parsed, so a 500 with a broken JSON body is still a 500, and `retryMiddleware`'s default 5xx retry still applies to it. An **empty** body under `'json'` is also `'parse'` -- see [Response
 parsing](#response-parsing). GraphQL applies the same rule to a 2xx response
-carrying neither `data` nor `errors`.
+carrying neither `data` nor `errors`. An optional [`schema`](#response-validation) on the request adds two more `'parse'` producers: a **2xx** body the schema refuses (`error.body` is its issues array) and a validator that throws (`error.body` is the thrown value) -- both only for the success body, never for a non-2xx one, which is never validated.
 
 `'middleware'` means a middleware threw rather than the request itself failing -- a bug in your own pipeline you'd fix, not a transient failure you'd retry. A middleware that propagates the library's own abort/timeout signal (verbatim, or wrapped one level as `.cause`) is classified `'abort'`/`'timeout'` instead, by provenance rather than by the reason's name -- see [Cancellation](#cancellation).
 
@@ -1141,6 +1209,9 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 | `createApi`     | function | Creates a typed API client from a config of Request definitions    |
 | `Request`       | class    | Typed endpoint definition -- one instance per endpoint             |
 | `defineRequest` | function | Typed factory — infers path params from the `path` literal, and enforces `responseType: 'none'`. |
+| `StandardSchemaV1` | type | The Standard Schema contract — for typing a helper that takes a validator. |
+| `InferOutput`      | type | The type a schema produces on success. |
+| `StandardIssue`    | type | One validation failure -- the shape of each entry in `error.body` when a schema refuses. |
 | `ApiError`      | class    | Structured error with status, kind, body, headers, and request metadata |
 | `ApiErrorKind`  | type     | `'http' \| 'network' \| 'abort' \| 'timeout' \| 'parse' \| 'middleware'` -- discriminates `ApiError.kind` |
 | `RequestConfig` | type     | Config object for the `Request` constructor                        |

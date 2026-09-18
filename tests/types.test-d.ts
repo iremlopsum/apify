@@ -5,6 +5,7 @@ import type { MiddlewareContext, CallOptions, RequestConfig } from '../src/types
 import type { ApiErrorKind } from '../src/types.js'
 import { successResult, errorResult } from '../src/testing.js'
 import type { ApiError } from '../src/types.js'
+import type { StandardSchemaV1 } from '../src/types.js'
 import type { PathParams } from '../src/define-request.js'
 import { defineRequest } from '../src/define-request.js'
 
@@ -283,17 +284,138 @@ describe('defineRequest — the responseType: none guard', () => {
     defineRequest<User>()({ method: 'DELETE', path: '/u/:id', responseType: 'none' })
   })
 
-  it('still accepts a RequestConfig-typed variable and a spread of one', () => {
+  it('still accepts a RequestConfig-typed variable and a spread of one, and keeps TResponse', async () => {
     // The naive guard — constraining the config whenever TResponse is not
     // undefined — rejects BOTH of these, and both must keep compiling. They
     // are the forms src/types.ts's ResponseType JSDoc names as the reason the
     // original guard had to stay permissive.
+    //
+    // Compiling is not enough. The schema-conflict guard's first cut asked
+    // "was a schema given?" one way for the guard and a different way for the
+    // return type, so both of these compiled while silently discarding the
+    // explicit TResponse — `data` came back `unknown`, not `User`, with no
+    // error anywhere. Route through createApi and assert on `data` so a
+    // regression like that fails loudly instead of merely failing to compile.
     const loose: RequestConfig = { method: 'GET', path: '/x' }
-    defineRequest<User>()(loose)
-    defineRequest<User>()({ ...loose, path: '/users/:id' })
+    const wideApi = createApi({
+      baseUrl: '/api',
+      requests: {
+        bare: defineRequest<User>()(loose),
+        spread: defineRequest<User>()({ ...loose, path: '/users/:id' }),
+      },
+    })
+
+    const bareResult = await wideApi.bare()
+    if (bareResult.error) return
+    expectTypeOf(bareResult.data).toEqualTypeOf<User>()
+
+    const spreadResult = await wideApi.spread({ id: '1' })
+    if (spreadResult.error) return
+    expectTypeOf(spreadResult.data).toEqualTypeOf<User>()
   })
 
   it("accepts an ordinary responseType alongside a real response type", () => {
     defineRequest<User>()({ method: 'GET', path: '/u/:id', responseType: 'json' })
+  })
+})
+
+describe('defineRequest — schema-inferred response types', () => {
+  const evenSchema: StandardSchemaV1<number> = {
+    '~standard': { version: 1, vendor: 'test', validate: (v: unknown) => ({ value: v as number }) },
+  }
+  const userSchema: StandardSchemaV1<User> = {
+    '~standard': { version: 1, vendor: 'test', validate: (v: unknown) => ({ value: v as User }) },
+  }
+  // A schema whose OUTPUT is `unknown` — the same shape a bare `RequestConfig`
+  // variable's own `schema` field infers as. Distinct from `evenSchema` and
+  // `userSchema` above, which both carry a concrete Output and so DO conflict
+  // with an explicit response type.
+  const looseSchema: StandardSchemaV1<unknown> = {
+    '~standard': { version: 1, vendor: 'test', validate: (v: unknown) => ({ value: v }) },
+  }
+
+  const schemaApi = createApi({
+    baseUrl: '/api',
+    requests: {
+      fromSchema:       defineRequest()({ method: 'GET', path: '/users/:id', schema: userSchema }),
+      explicit:         defineRequest<User>()({ method: 'GET', path: '/users/:id' }),
+      neither:          defineRequest()({ method: 'GET', path: '/x' }),
+      explicitAndLoose: defineRequest<User>()({ method: 'GET', path: '/users/:id', schema: looseSchema }),
+    },
+  })
+
+  it('takes the response type from the schema', async () => {
+    const r = await schemaApi.fromSchema({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+
+  it('still infers path params alongside a schema', () => {
+    expectTypeOf(schemaApi.fromSchema).toBeCallableWith({ id: '42' })
+    // @ts-expect-error  the path says :id
+    void schemaApi.fromSchema({ userId: '42' })
+  })
+
+  it('honours an explicit response type when there is no schema', async () => {
+    const r = await schemaApi.explicit({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+
+  it('honours an explicit response type when the schema carries no type information', async () => {
+    // A schema whose OUTPUT is `unknown` (or `any`) is treated as no schema at
+    // all — see SchemaConflictGuard's JSDoc. It neither conflicts with the
+    // explicit type (contrast the next test, where the schemas DO carry a
+    // concrete Output) nor gets read for the response type: the explicit
+    // TResponse wins. This is what lets a widened `RequestConfig`-typed
+    // config's inherited `schema?: StandardSchemaV1<unknown>` field coexist
+    // with an explicit response type at all.
+    const r = await schemaApi.explicitAndLoose({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+
+  it('is unknown when neither is given, exactly as 4.1.1 behaved', async () => {
+    const r = await schemaApi.neither()
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<unknown>()
+  })
+
+  it('refuses a schema alongside an explicit response type, even when they agree', () => {
+    // Two sources of truth that can drift apart. The failure this prevents is
+    // temporal: the schema changes, the explicit type is now wrong, and nothing
+    // says so because it was never being read.
+    // @ts-expect-error  they disagree
+    defineRequest<User>()({ method: 'GET', path: '/u', schema: evenSchema })
+    // @ts-expect-error  ...and they agree
+    defineRequest<User>()({ method: 'GET', path: '/u', schema: userSchema })
+  })
+
+  it('leaves the empty-body guard and widened configs alone', async () => {
+    defineRequest<undefined>()({ method: 'POST', path: '/p', responseType: 'none' })
+
+    // Compiling alone doesn't prove TResponse survived — see the identical
+    // regression note on "still accepts a RequestConfig-typed variable and a
+    // spread of one" in the responseType: 'none' guard block above. Assert on
+    // `data` here too.
+    const loose: RequestConfig = { method: 'GET', path: '/x' }
+    const wideApi = createApi({
+      baseUrl: '/api',
+      requests: {
+        bare: defineRequest<User>()(loose),
+        spread: defineRequest<User>()({ ...loose, path: '/users/:id' }),
+      },
+    })
+
+    const bareResult = await wideApi.bare()
+    if (bareResult.error) return
+    expectTypeOf(bareResult.data).toEqualTypeOf<User>()
+
+    const spreadResult = await wideApi.spread({ id: '1' })
+    if (spreadResult.error) return
+    expectTypeOf(spreadResult.data).toEqualTypeOf<User>()
+
+    // @ts-expect-error  the empty-body guard still fires
+    defineRequest<User>()({ method: 'DELETE', path: '/u', responseType: 'none' })
   })
 })

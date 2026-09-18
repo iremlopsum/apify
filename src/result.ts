@@ -25,8 +25,10 @@ import type { Result, SuccessResult, ErrorResult } from './types.js'
  * `'timeout'` all carry `status: 0`, and they call for completely different
  * handling — retry, ignore, and report respectively.
  *
- * `'parse'` is produced starting this release, for a response body that
- * failed to parse according to the request's `responseType`.
+ * `'parse'` is produced for a response body that failed to parse according to
+ * the request's `responseType`. Since 4.2.0 it also covers an optional
+ * `schema` on the request: a validator that refuses the body (`body` is its
+ * issues array) or one that throws (`body` is the thrown value).
  *
  * `'middleware'` means a middleware threw rather than the request itself
  * failing — a bug in consumer code you would fix, not a transient failure

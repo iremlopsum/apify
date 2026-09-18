@@ -1,6 +1,6 @@
 {
   "name": "@iremlopsum/apify",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "description": "Runtime-agnostic, type-safe API client built on standard fetch. Zero dependencies.",
   "type": "module",
   "sideEffects": false,

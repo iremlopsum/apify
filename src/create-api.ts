@@ -48,6 +48,8 @@ import { anySignal } from './utils/any-signal.js'
 import { operationBudget, perCallerBudget } from './utils/budget.js'
 import { stableStringify } from './utils/cache.js'
 import { isSpecialBody, isOpaqueParams } from './utils/special-body.js'
+import { runSchema } from './utils/validate.js'
+import type { SchemaOutcome } from './utils/validate.js'
 import type { ApiConfig, CallOptions, ErrorResult, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
 
 // =============================================================================
@@ -913,6 +915,54 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                   request: { method: ctx.request.method, url: ctx.request.url, params }
                 })
                 return createErrorResult(error, response, execute)
+              }
+
+              // -------------------------------------------------------------
+              // Optional schema validation
+              // -------------------------------------------------------------
+              // Runs after the empty-body check: that check's diagnosis ("the
+              // server sent nothing under responseType json") is more specific
+              // than "your schema rejected undefined".
+              //
+              // The try/catch is load-bearing. This statement sits AFTER the
+              // parse try/catch has closed, inside the outer handler — the one
+              // that reports status 0 with kind 'network', and that checks
+              // signal.aborted first. A validator that throws instead of
+              // returning issues would otherwise surface as a network failure,
+              // or as a cancellation that never happened, on a request that
+              // completed successfully.
+              // -------------------------------------------------------------
+              if (request.config.schema) {
+                let outcome: SchemaOutcome
+                try {
+                  outcome = await runSchema(request.config.schema, data)
+                } catch (validatorErr) {
+                  const error = new ApiError({
+                    kind: 'parse',
+                    status: response.status,
+                    statusText: response.statusText,
+                    body: validatorErr,
+                    headers: response.headers,
+                    request: { method: ctx.request.method, url: ctx.request.url, params }
+                  })
+                  return createErrorResult(error, response, execute)
+                }
+
+                if (!outcome.ok) {
+                  const error = new ApiError({
+                    kind: 'parse',
+                    status: response.status,
+                    statusText: response.statusText,
+                    body: outcome.issues,
+                    headers: response.headers,
+                    request: { method: ctx.request.method, url: ctx.request.url, params }
+                  })
+                  return createErrorResult(error, response, execute)
+                }
+
+                // `data` becomes the schema's OUTPUT — transforms, coercions and
+                // defaults apply. See `schema` on RequestConfig.
+                data = outcome.value
               }
 
               return createSuccessResult(data, response, execute)
