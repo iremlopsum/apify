@@ -144,10 +144,12 @@ type EmptyBodyGuard<TRT, TResponse> =
  * what lets `SchemaConflictGuard` and `defineRequest`'s return type ask the
  * SAME question ("did a schema meaningfully narrow the response?") and get the
  * same answer. They used to ask it separately and disagreed: the guard read
- * `TSchema`'s presence while the return type read `InferOutput<TSchema>`
- * directly, so a widened config passed the guard (no schema "given") but the
- * return type still took the `InferOutput` branch and produced `unknown` —
- * silently discarding an explicit `TResponse`. One shared rule, asked once.
+ * the schema's OUTPUT (`unknown extends InferOutput<TSchema>`) while the
+ * return type read `TSchema`'s presence directly (`[TSchema] extends
+ * [undefined]`), so a widened config passed the guard (its output read as "not
+ * given") but the return type's presence check still saw `TSchema` and took
+ * the `InferOutput` branch, producing `unknown` — silently discarding an
+ * explicit `TResponse`. One shared rule, asked once.
  */
 type SchemaOut<TSchema> = [TSchema] extends [undefined] ? unknown : InferOutput<TSchema>
 

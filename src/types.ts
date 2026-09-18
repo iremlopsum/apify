@@ -127,10 +127,20 @@ export type StandardResult<Output> =
 /**
  * The type a schema produces on success — what `data` will be.
  *
- * Reads the phantom `types` property, which is how Standard Schema carries
- * inference. Note this is the OUTPUT type: a schema that transforms (a coerced
- * date, a defaulted field) describes what the caller receives, not what the
- * server sent. See `schema` on `RequestConfig`.
+ * Infers structurally against the whole `StandardSchemaV1<Output>` interface —
+ * conditional-type inference matches `O` wherever it appears in the shape, and
+ * here that is `validate`'s return type, `StandardResult<Output> |
+ * Promise<StandardResult<Output>>`. THAT is the operative inference site, not
+ * the optional `types` phantom: a schema whose `validate` is concretely typed
+ * infers correctly even with no `types` property at all, while a schema whose
+ * `validate` is widened (e.g. to `unknown`) infers `unknown` even when `types`
+ * is present and correctly typed. Do not "simplify" this to
+ * `S['~standard']['types']['output']` — that reads the phantom directly and
+ * would silently yield `never` or `unknown` for every validator that omits it.
+ *
+ * Note this is the OUTPUT type: a schema that transforms (a coerced date, a
+ * defaulted field) describes what the caller receives, not what the server
+ * sent. See `schema` on `RequestConfig`.
  */
 export type InferOutput<S> = S extends StandardSchemaV1<infer O> ? O : never
 
@@ -208,6 +218,12 @@ export interface RequestConfig {
    * there is no body to validate, and every call will fail validation. It is
    * not rejected at compile time because the runtime failure is immediate and
    * loud; see the spec's non-goals.
+   *
+   * On this class path, `schema` and `TResponse` are also not tied together at
+   * compile time: `new Request<P, User>({ ..., schema: numberSchema })`
+   * compiles and hands back a `number` typed as `User`, the same class of
+   * mismatch as the `responseType: 'none'` case above. `defineRequest` is the
+   * path that checks this — see `SchemaConflictGuard` in `define-request.ts`.
    */
   schema?: StandardSchemaV1<unknown>
 

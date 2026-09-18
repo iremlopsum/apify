@@ -31,6 +31,15 @@ export type SchemaOutcome =
  * report that as a `'parse'` error with the right request metadata — a throw
  * escaping to the seam's enclosing catch would be classified as a network
  * failure instead. See the spec's D7.
+ *
+ * The discriminant is `result.issues === undefined`, so a validator that
+ * returns neither `{ value }` nor `{ issues }` — a bare `{}`, out of contract
+ * for Standard Schema — reads as success with `value: undefined`, not as a
+ * throw. That is a deliberate reading of an already-out-of-contract result,
+ * not an accident: this function never throws, so the never-throws pillar
+ * holds either way, and there is no third bucket to route a malformed
+ * validator result to that wouldn't also mis-handle some other legitimate
+ * shape.
  */
 export async function runSchema(schema: StandardSchemaV1<unknown>, value: unknown): Promise<SchemaOutcome> {
   const result = await schema['~standard'].validate(value)

@@ -103,6 +103,28 @@ describe('REST — schema validation', () => {
     expect(r.error).toBeNull()
     expect(r.data).toEqual({ anything: true })
   })
+
+  it('does not validate a non-2xx body — reports kind: http with the body untouched', async () => {
+    // A non-2xx body is diagnostic and often a different shape; the schema
+    // never sees it, and it must not be misreported as a validation failure.
+    vi.stubGlobal('fetch', jsonOf({ message: 'boom' }, 500))
+    const r = await apiWith(evenNumber()).get()
+    expect(r.error?.kind).toBe('http')
+    expect(r.error?.body).toEqual({ message: 'boom' })
+  })
+
+  it('responseType: none plus a schema reaches validation with undefined and reports parse', async () => {
+    vi.stubGlobal('fetch', jsonOf({ anything: true }))
+    const api = createApi({
+      baseUrl: 'https://api.test',
+      requests: {
+        get: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/x', responseType: 'none', schema: evenNumber() }),
+      },
+    })
+    const r = await api.get()
+    expect(r.error?.kind).toBe('parse')
+    expect(r.error?.body).toEqual([{ message: 'not an even number' }])
+  })
 })
 
 import { createGraphQL, Operation, gql } from '../src/graphql.js'
@@ -152,6 +174,7 @@ describe('GraphQL — schema validation', () => {
     const r = await gqlWith(boom).thing()
     expect(r.error?.kind).toBe('parse')
     expect(r.error?.status).toBe(200)
+    expect(String((r.error?.body as Error)?.message)).toContain('validator exploded')
   })
 
   it('changes nothing when no schema is given', async () => {
@@ -159,5 +182,13 @@ describe('GraphQL — schema validation', () => {
     const r = await gqlWith().thing()
     expect(r.error).toBeNull()
     expect(r.data).toEqual({ anything: true })
+  })
+
+  it('does not validate a non-2xx body — reports kind: http with the body untouched', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ message: 'boom' }), { status: 500, headers: { 'content-type': 'application/json' } })))
+    const r = await gqlWith(evenNumber()).thing()
+    expect(r.error?.kind).toBe('http')
+    expect(r.error?.body).toEqual({ message: 'boom' })
   })
 })
