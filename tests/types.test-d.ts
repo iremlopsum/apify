@@ -5,6 +5,7 @@ import type { MiddlewareContext, CallOptions, RequestConfig } from '../src/types
 import type { ApiErrorKind } from '../src/types.js'
 import { successResult, errorResult } from '../src/testing.js'
 import type { ApiError } from '../src/types.js'
+import type { StandardSchemaV1 } from '../src/types.js'
 import type { PathParams } from '../src/define-request.js'
 import { defineRequest } from '../src/define-request.js'
 
@@ -295,5 +296,66 @@ describe('defineRequest — the responseType: none guard', () => {
 
   it("accepts an ordinary responseType alongside a real response type", () => {
     defineRequest<User>()({ method: 'GET', path: '/u/:id', responseType: 'json' })
+  })
+})
+
+describe('defineRequest — schema-inferred response types', () => {
+  const evenSchema: StandardSchemaV1<number> = {
+    '~standard': { version: 1, vendor: 'test', validate: (v: unknown) => ({ value: v as number }) },
+  }
+  const userSchema: StandardSchemaV1<User> = {
+    '~standard': { version: 1, vendor: 'test', validate: (v: unknown) => ({ value: v as User }) },
+  }
+
+  const schemaApi = createApi({
+    baseUrl: '/api',
+    requests: {
+      fromSchema: defineRequest()({ method: 'GET', path: '/users/:id', schema: userSchema }),
+      explicit:   defineRequest<User>()({ method: 'GET', path: '/users/:id' }),
+      neither:    defineRequest()({ method: 'GET', path: '/x' }),
+    },
+  })
+
+  it('takes the response type from the schema', async () => {
+    const r = await schemaApi.fromSchema({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+
+  it('still infers path params alongside a schema', () => {
+    expectTypeOf(schemaApi.fromSchema).toBeCallableWith({ id: '42' })
+    // @ts-expect-error  the path says :id
+    void schemaApi.fromSchema({ userId: '42' })
+  })
+
+  it('honours an explicit response type when there is no schema', async () => {
+    const r = await schemaApi.explicit({ id: '1' })
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<User>()
+  })
+
+  it('is unknown when neither is given, exactly as 4.1.1 behaved', async () => {
+    const r = await schemaApi.neither()
+    if (r.error) return
+    expectTypeOf(r.data).toEqualTypeOf<unknown>()
+  })
+
+  it('refuses a schema alongside an explicit response type, even when they agree', () => {
+    // Two sources of truth that can drift apart. The failure this prevents is
+    // temporal: the schema changes, the explicit type is now wrong, and nothing
+    // says so because it was never being read.
+    // @ts-expect-error  they disagree
+    defineRequest<User>()({ method: 'GET', path: '/u', schema: evenSchema })
+    // @ts-expect-error  ...and they agree
+    defineRequest<User>()({ method: 'GET', path: '/u', schema: userSchema })
+  })
+
+  it('leaves the empty-body guard and widened configs alone', () => {
+    defineRequest<undefined>()({ method: 'POST', path: '/p', responseType: 'none' })
+    const loose: RequestConfig = { method: 'GET', path: '/x' }
+    defineRequest<User>()(loose)
+    defineRequest<User>()({ ...loose, path: '/users/:id' })
+    // @ts-expect-error  the empty-body guard still fires
+    defineRequest<User>()({ method: 'DELETE', path: '/u', responseType: 'none' })
   })
 })

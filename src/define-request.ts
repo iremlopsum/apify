@@ -14,7 +14,7 @@
 // =============================================================================
 
 import { Request } from './request.js'
-import type { RequestConfig, ResponseType } from './types.js'
+import type { RequestConfig, ResponseType, StandardSchemaV1, InferOutput } from './types.js'
 
 /**
  * The characters a path token name may contain.
@@ -134,6 +134,49 @@ type EmptyBodyGuard<TRT, TResponse> =
     : unknown
 
 /**
+ * Refuses a schema and an explicit response type together.
+ *
+ * Two sources of truth that can disagree is a mistake, and this project makes a
+ * contradiction unrepresentable rather than picking a winner silently — the same
+ * reasoning as the `share` + `dedupe` throw and the empty-body guard.
+ *
+ * It fires even when the two AGREE, because the failure it prevents is temporal:
+ * the schema changes, the explicit type is now wrong, and nothing reports it
+ * because it was never being read.
+ *
+ * `unknown extends TResponse` is true only when no explicit argument was given,
+ * which is what makes "was one supplied?" answerable at all. `any` satisfies it
+ * too and counts as "not given" — acceptable, since `defineRequest<any>()` is
+ * already opting out of everything.
+ *
+ * The "was a schema given?" side reads `TSchema`'s OUTPUT
+ * (`unknown extends InferOutput<TSchema>`), not `TSchema` itself
+ * (`[TSchema] extends [undefined]`), and the config field feeding it is
+ * `Omit<RequestConfig, 'schema'> & { schema?: TSchema }` rather than
+ * `RequestConfig & { schema?: TSchema }`. Both changes exist for the same
+ * reason: `RequestConfig` already declares `schema?: StandardSchemaV1<unknown>`
+ * (for `new Request`), so a config typed as plain `RequestConfig` — or a
+ * spread of one — structurally carries that field whether or not a schema was
+ * actually written. Left in the intersection, that field becomes a second,
+ * competing inference source for `TSchema`, and — only when `TSchema` also
+ * appears inside a conditional in the SAME parameter, which is what a
+ * "was one given?" guard requires — TypeScript stops decomposing a
+ * non-literal argument (a bare `RequestConfig`-typed variable) property by
+ * property and falls back to `TSchema`'s default instead, which then
+ * disagrees with the very shape it just failed to read. `Omit` removes the
+ * competing source; reading `InferOutput<TSchema>` instead of `TSchema`
+ * survives whatever that source infers anyway, because an unknown-output
+ * schema (a widened `StandardSchemaV1<unknown>`, same as a plain `undefined`)
+ * reads as "not given" right alongside the real absence.
+ */
+type SchemaConflictGuard<TSchema, TResponse> =
+  unknown extends ([TSchema] extends [undefined] ? unknown : InferOutput<TSchema>)
+    ? unknown
+    : unknown extends TResponse
+      ? unknown
+      : { __schemaSuppliesTheType: 'omit the explicit response type when passing a schema' }
+
+/**
  * Declares an endpoint, inferring its path parameters from the `path` literal.
  *
  * Curried because TypeScript has no partial type-argument inference: supplying
@@ -163,9 +206,12 @@ type EmptyBodyGuard<TRT, TResponse> =
  * api.listRepos({ org: 'acme', page: 2 }) // ✓
  * ```
  */
-export function defineRequest<TResponse, TExtra extends object = {}>() {
-  return <TPath extends string, TRT extends ResponseType | undefined>(
-    config: RequestConfig & { path: TPath; responseType?: TRT } & EmptyBodyGuard<TRT, TResponse>
-  ): Request<Id<PathParams<TPath> & TExtra>, TResponse> =>
-    new Request<Id<PathParams<TPath> & TExtra>, TResponse>(config)
+export function defineRequest<TResponse = unknown, TExtra extends object = {}>() {
+  return <TPath extends string, TRT extends ResponseType | undefined,
+          TSchema extends StandardSchemaV1<any> | undefined = undefined>(
+    config: Omit<RequestConfig, 'schema'> & { path: TPath; responseType?: TRT; schema?: TSchema }
+      & EmptyBodyGuard<TRT, TResponse>
+      & SchemaConflictGuard<TSchema, TResponse>
+  ): Request<Id<PathParams<TPath> & TExtra>, [TSchema] extends [undefined] ? TResponse : InferOutput<TSchema>> =>
+    new Request<Id<PathParams<TPath> & TExtra>, [TSchema] extends [undefined] ? TResponse : InferOutput<TSchema>>(config)
 }
