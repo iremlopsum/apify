@@ -40,7 +40,9 @@ export type {
   Middleware,
   MiddlewareContext,
   MiddlewareNext,
-  ApiErrorKind
+  ApiErrorKind,
+  StandardSchemaV1,
+  InferOutput
 } from './types.js'
 
 // ---------------------------------------------------------------------------
