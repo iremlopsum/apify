@@ -134,6 +134,24 @@ type EmptyBodyGuard<TRT, TResponse> =
     : unknown
 
 /**
+ * The response type a schema supplies, or `unknown` when it supplies none.
+ *
+ * "Supplies none" covers two cases that must be treated identically: `TSchema`
+ * is literally `undefined` (no `schema` was written), and `TSchema` is present
+ * but its OUTPUT is `unknown` or `any` (a widened `StandardSchemaV1<unknown>`,
+ * which is what a bare `RequestConfig`-typed variable's `schema` field infers
+ * as — see `SchemaConflictGuard`). Both collapse to `unknown` here, which is
+ * what lets `SchemaConflictGuard` and `defineRequest`'s return type ask the
+ * SAME question ("did a schema meaningfully narrow the response?") and get the
+ * same answer. They used to ask it separately and disagreed: the guard read
+ * `TSchema`'s presence while the return type read `InferOutput<TSchema>`
+ * directly, so a widened config passed the guard (no schema "given") but the
+ * return type still took the `InferOutput` branch and produced `unknown` —
+ * silently discarding an explicit `TResponse`. One shared rule, asked once.
+ */
+type SchemaOut<TSchema> = [TSchema] extends [undefined] ? unknown : InferOutput<TSchema>
+
+/**
  * Refuses a schema and an explicit response type together.
  *
  * Two sources of truth that can disagree is a mistake, and this project makes a
@@ -149,28 +167,38 @@ type EmptyBodyGuard<TRT, TResponse> =
  * too and counts as "not given" — acceptable, since `defineRequest<any>()` is
  * already opting out of everything.
  *
- * The "was a schema given?" side reads `TSchema`'s OUTPUT
- * (`unknown extends InferOutput<TSchema>`), not `TSchema` itself
- * (`[TSchema] extends [undefined]`), and the config field feeding it is
- * `Omit<RequestConfig, 'schema'> & { schema?: TSchema }` rather than
- * `RequestConfig & { schema?: TSchema }`. Both changes exist for the same
- * reason: `RequestConfig` already declares `schema?: StandardSchemaV1<unknown>`
- * (for `new Request`), so a config typed as plain `RequestConfig` — or a
- * spread of one — structurally carries that field whether or not a schema was
- * actually written. Left in the intersection, that field becomes a second,
- * competing inference source for `TSchema`, and — only when `TSchema` also
- * appears inside a conditional in the SAME parameter, which is what a
- * "was one given?" guard requires — TypeScript stops decomposing a
- * non-literal argument (a bare `RequestConfig`-typed variable) property by
- * property and falls back to `TSchema`'s default instead, which then
- * disagrees with the very shape it just failed to read. `Omit` removes the
- * competing source; reading `InferOutput<TSchema>` instead of `TSchema`
+ * The "was a schema given?" side reads `SchemaOut<TSchema>` — the schema's
+ * OUTPUT — rather than asking whether `TSchema` itself is `undefined`, and the
+ * config field feeding it is `Omit<RequestConfig, 'schema'> & { schema?:
+ * TSchema }` rather than `RequestConfig & { schema?: TSchema }`. Both changes
+ * exist for the same reason: `RequestConfig` already declares `schema?:
+ * StandardSchemaV1<unknown>` (for `new Request`), so a config typed as plain
+ * `RequestConfig` — or a spread of one — structurally carries that field
+ * whether or not a schema was actually written. Left in the intersection, that
+ * field becomes a second, competing inference source for `TSchema`, and —
+ * only when `TSchema` also appears inside a conditional in the SAME parameter,
+ * which is what a "was one given?" guard requires — TypeScript stops
+ * decomposing a non-literal argument (a bare `RequestConfig`-typed variable)
+ * property by property and falls back to `TSchema`'s default instead, which
+ * then disagrees with the very shape it just failed to read. `Omit` removes
+ * the competing source; reading the OUTPUT instead of `TSchema` itself
  * survives whatever that source infers anyway, because an unknown-output
- * schema (a widened `StandardSchemaV1<unknown>`, same as a plain `undefined`)
- * reads as "not given" right alongside the real absence.
+ * schema (the widened `StandardSchemaV1<unknown>`, same as a plain
+ * `undefined`) reads as "not given" right alongside the real absence.
+ *
+ * The cost of that permissiveness: an explicit response type alongside a
+ * schema whose output is `unknown` (or `any`) is silently DISCARDED, not
+ * rejected — `defineRequest<User>()(someRequestConfigVariable)` compiles, but
+ * if that variable's `schema` were ever populated, `data` would be `unknown`,
+ * not `User`, with no error anywhere. This is deliberately the same shape as
+ * `EmptyBodyGuard`'s permissiveness for a widened `responseType`, and for the
+ * same reason: rejecting it would also reject the two legitimate widened-
+ * config forms. Do not "fix" this without re-verifying, via
+ * `tests/types.test-d.ts`, that a bare `RequestConfig`-typed variable and a
+ * spread of one both still compile through `defineRequest`.
  */
 type SchemaConflictGuard<TSchema, TResponse> =
-  unknown extends ([TSchema] extends [undefined] ? unknown : InferOutput<TSchema>)
+  unknown extends SchemaOut<TSchema>
     ? unknown
     : unknown extends TResponse
       ? unknown
@@ -212,6 +240,6 @@ export function defineRequest<TResponse = unknown, TExtra extends object = {}>()
     config: Omit<RequestConfig, 'schema'> & { path: TPath; responseType?: TRT; schema?: TSchema }
       & EmptyBodyGuard<TRT, TResponse>
       & SchemaConflictGuard<TSchema, TResponse>
-  ): Request<Id<PathParams<TPath> & TExtra>, [TSchema] extends [undefined] ? TResponse : InferOutput<TSchema>> =>
-    new Request<Id<PathParams<TPath> & TExtra>, [TSchema] extends [undefined] ? TResponse : InferOutput<TSchema>>(config)
+  ): Request<Id<PathParams<TPath> & TExtra>, unknown extends SchemaOut<TSchema> ? TResponse : SchemaOut<TSchema>> =>
+    new Request<Id<PathParams<TPath> & TExtra>, unknown extends SchemaOut<TSchema> ? TResponse : SchemaOut<TSchema>>(config)
 }

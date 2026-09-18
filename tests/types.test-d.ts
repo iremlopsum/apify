@@ -284,14 +284,34 @@ describe('defineRequest — the responseType: none guard', () => {
     defineRequest<User>()({ method: 'DELETE', path: '/u/:id', responseType: 'none' })
   })
 
-  it('still accepts a RequestConfig-typed variable and a spread of one', () => {
+  it('still accepts a RequestConfig-typed variable and a spread of one, and keeps TResponse', async () => {
     // The naive guard — constraining the config whenever TResponse is not
     // undefined — rejects BOTH of these, and both must keep compiling. They
     // are the forms src/types.ts's ResponseType JSDoc names as the reason the
     // original guard had to stay permissive.
+    //
+    // Compiling is not enough. The schema-conflict guard's first cut asked
+    // "was a schema given?" one way for the guard and a different way for the
+    // return type, so both of these compiled while silently discarding the
+    // explicit TResponse — `data` came back `unknown`, not `User`, with no
+    // error anywhere. Route through createApi and assert on `data` so a
+    // regression like that fails loudly instead of merely failing to compile.
     const loose: RequestConfig = { method: 'GET', path: '/x' }
-    defineRequest<User>()(loose)
-    defineRequest<User>()({ ...loose, path: '/users/:id' })
+    const wideApi = createApi({
+      baseUrl: '/api',
+      requests: {
+        bare: defineRequest<User>()(loose),
+        spread: defineRequest<User>()({ ...loose, path: '/users/:id' }),
+      },
+    })
+
+    const bareResult = await wideApi.bare()
+    if (bareResult.error) return
+    expectTypeOf(bareResult.data).toEqualTypeOf<User>()
+
+    const spreadResult = await wideApi.spread({ id: '1' })
+    if (spreadResult.error) return
+    expectTypeOf(spreadResult.data).toEqualTypeOf<User>()
   })
 
   it("accepts an ordinary responseType alongside a real response type", () => {
@@ -350,11 +370,30 @@ describe('defineRequest — schema-inferred response types', () => {
     defineRequest<User>()({ method: 'GET', path: '/u', schema: userSchema })
   })
 
-  it('leaves the empty-body guard and widened configs alone', () => {
+  it('leaves the empty-body guard and widened configs alone', async () => {
     defineRequest<undefined>()({ method: 'POST', path: '/p', responseType: 'none' })
+
+    // Compiling alone doesn't prove TResponse survived — see the identical
+    // regression note on "still accepts a RequestConfig-typed variable and a
+    // spread of one" in the responseType: 'none' guard block above. Assert on
+    // `data` here too.
     const loose: RequestConfig = { method: 'GET', path: '/x' }
-    defineRequest<User>()(loose)
-    defineRequest<User>()({ ...loose, path: '/users/:id' })
+    const wideApi = createApi({
+      baseUrl: '/api',
+      requests: {
+        bare: defineRequest<User>()(loose),
+        spread: defineRequest<User>()({ ...loose, path: '/users/:id' }),
+      },
+    })
+
+    const bareResult = await wideApi.bare()
+    if (bareResult.error) return
+    expectTypeOf(bareResult.data).toEqualTypeOf<User>()
+
+    const spreadResult = await wideApi.spread({ id: '1' })
+    if (spreadResult.error) return
+    expectTypeOf(spreadResult.data).toEqualTypeOf<User>()
+
     // @ts-expect-error  the empty-body guard still fires
     defineRequest<User>()({ method: 'DELETE', path: '/u', responseType: 'none' })
   })
