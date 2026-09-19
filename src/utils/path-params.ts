@@ -47,9 +47,49 @@ interface BuildUrlResult {
  */
 export function joinUrl(baseUrl: string, path: string): string {
   if (!baseUrl) return path
-  const base = baseUrl.replace(/\/+$/, '')
-  const tail = path.startsWith('/') ? path : `/${path}`
-  return `${base}${tail}`
+
+  // Both sides may carry a query string — a baseUrl with a fixed API key, a
+  // path template with a fixed filter — and a query must sit after the whole
+  // path, not in the middle of it. Concatenating instead (as this did before
+  // 4.2.1) put the path inside the base's query VALUE:
+  // 'https://api.test/v1?key=abc' + '/items' became '.../v1?key=abc/items',
+  // which resolves to path '/v1'. The request went to a different endpoint,
+  // and nothing said so.
+  const [basePath, baseQuery] = splitQuery(baseUrl)
+  const [pathOnly, pathQuery] = splitQuery(path)
+
+  const base = basePath.replace(/\/+$/, '')
+  const tail = pathOnly.startsWith('/') ? pathOnly : `/${pathOnly}`
+
+  // Base params first, then the path template's; buildUrl's Phase 3 appends the
+  // call's after both, so the wire order reads base -> template -> call.
+  //
+  // This ACCUMULATES rather than overriding, which is the one way it differs
+  // from `mergeHeaders` — that uses `set()`, so a per-call header replaces a
+  // global one. Here a call param with a key the base already used produces
+  // BOTH: `?key=abc&key=xyz`, and which one a server honours is its own
+  // business (`searchParams.get` takes the first; PHP takes the last).
+  //
+  // Accumulating is deliberate: array params already serialize as repeated
+  // keys, so `tags=a&tags=b` is a shape this function must preserve, and
+  // de-duplicating by key would silently collapse it. The consequence is that
+  // a base-level param cannot be overridden per call — put it in middleware
+  // instead if it needs to vary.
+  const query = [baseQuery, pathQuery].filter(Boolean).join('&')
+
+  return `${base}${tail}${query ? `?${query}` : ''}`
+}
+
+/**
+ * Splits a URL fragment into its path part and its query part, without the `?`.
+ *
+ * Returns `['', '']`-shaped pairs rather than using `URL`, because both
+ * arguments here are routinely relative (`baseUrl` may be `/api`, a `path`
+ * always is) and `new URL` requires an absolute base it does not have.
+ */
+function splitQuery(value: string): [path: string, query: string] {
+  const at = value.indexOf('?')
+  return at === -1 ? [value, ''] : [value.slice(0, at), value.slice(at + 1)]
 }
 
 /**
@@ -89,6 +129,29 @@ export function joinUrl(baseUrl: string, path: string): string {
  * ```
  */
 export function buildUrl(baseUrl: string, path: string, params: Record<string, unknown>, asQuery = false): BuildUrlResult {
+  // -------------------------------------------------------------------------
+  // Phase 0: Reject a fragment
+  // -------------------------------------------------------------------------
+  // A fragment is a client-side anchor — `fetch` never transmits it — so one
+  // in a request URL cannot do anything the caller intended. Worse, before
+  // 4.2.1 it silently ate the query string: '/docs#section' with { page: 2 }
+  // produced '/docs#section?page=2', which the network layer reads as path
+  // '/docs' with NO search at all. The param vanished and nothing reported it.
+  //
+  // Refused rather than stripped, because stripping hides the mistake and the
+  // caller keeps a line of code that does nothing. Throwing here reaches the
+  // caller as a Result, via execute()'s setup catch — the "never throws"
+  // contract is unaffected.
+  // -------------------------------------------------------------------------
+  const fragmentIn = path.includes('#') ? { where: 'path', value: path } : baseUrl.includes('#') ? { where: 'baseUrl', value: baseUrl } : null
+  if (fragmentIn) {
+    const fragment = fragmentIn.value.slice(fragmentIn.value.indexOf('#'))
+    throw new TypeError(
+      `A URL fragment is never sent to the server, so it cannot appear in a ${fragmentIn.where}. ` +
+      `Remove "${fragment}" from "${fragmentIn.value}".`
+    )
+  }
+
   let resolvedPath = path
   const remaining: Record<string, unknown> = {}
 

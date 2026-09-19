@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.1] — 2026-09-19
+
+Two URL-composition fixes. Both produced strings that looked plausible and
+resolved to the wrong request, so neither was visible without inspecting what
+the network layer actually parsed.
+
+### Fixed
+
+- **A `baseUrl` carrying a query string no longer swallows the path.**
+  `baseUrl: 'https://api.test/v1?key=abc'` with `path: '/items'` built
+  `https://api.test/v1?key=abc/items` — which resolves to path `/v1`, so the
+  request went to a different endpoint entirely, silently. The path is now
+  joined onto the base path and the query strings are merged, base params first:
+  `https://api.test/v1/items?key=abc&page=2`.
+
+- **A URL fragment in a `path` or `baseUrl` is now refused.** A fragment is
+  never transmitted, so one in a request URL could not do what it appeared to —
+  and it silently discarded the query string: `'/docs#section'` with
+  `{ page: 2 }` built `'/docs#section?page=2'`, which the network layer reads as
+  path `/docs` with no query at all. `page=2` never left the client.
+
+  It is refused rather than stripped, because stripping hides the mistake and
+  leaves a line of code that does nothing. The failure is a `Result`, not a
+  throw. See [MIGRATION.md](./MIGRATION.md) — this is the one change that needs
+  action, and only if a `#` appears in one of your templates.
+
 ## [4.2.0] — 2026-09-18
 
 ### Added
@@ -681,6 +707,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.2.1]: https://github.com/iremlopsum/apify/compare/v4.2.0...v4.2.1
 [4.2.0]: https://github.com/iremlopsum/apify/compare/v4.1.1...v4.2.0
 [4.1.1]: https://github.com/iremlopsum/apify/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/iremlopsum/apify/compare/v4.0.2...v4.1.0

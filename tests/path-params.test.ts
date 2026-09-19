@@ -17,8 +17,10 @@
 // - Partial param name matching prevention (:id vs :idExtra)
 // =============================================================================
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { buildUrl } from '../src/utils/path-params.js'
+import { createApi } from '../src/create-api.js'
+import { Request } from '../src/request.js'
 
 describe('buildUrl', () => {
   it('returns base + path with no params', () => {
@@ -205,5 +207,109 @@ describe('query append when the URL already carries a query string', () => {
   it('appends nothing when the path consumed every param', () => {
     const { url } = buildUrl('', '/search/:q?x=1', { q: 'hi' }, true)
     expect(url).toBe('/search/hi?x=1')
+  })
+})
+
+describe('a baseUrl carrying its own query string', () => {
+  // Before 4.2.1 joinUrl concatenated, so the path landed inside the base's
+  // query VALUE: 'https://api.test/v1?key=abc' + '/items' produced
+  // '.../v1?key=abc/items', which resolves to path '/v1' — the request went to
+  // a different endpoint, silently. These assert the network's view, not just
+  // the string, because the old output looked plausible and resolved wrongly.
+  const netView = (url: string) => {
+    const u = new URL(url, 'https://fallback.test')
+    return { path: u.pathname, search: u.search }
+  }
+
+  it('joins the path onto the base path, not into its query', () => {
+    const { url } = buildUrl('https://api.test/v1?key=abc', '/items', {}, true)
+    expect(url).toBe('https://api.test/v1/items?key=abc')
+    expect(netView(url)).toEqual({ path: '/v1/items', search: '?key=abc' })
+  })
+
+  it('merges call params after the base query', () => {
+    const { url } = buildUrl('https://api.test/v1?key=abc', '/items', { page: 2 }, true)
+    expect(url).toBe('https://api.test/v1/items?key=abc&page=2')
+    expect(netView(url)).toEqual({ path: '/v1/items', search: '?key=abc&page=2' })
+  })
+
+  it('merges a base query, a path query and call params in that order', () => {
+    const { url } = buildUrl('https://api.test/v1?key=abc', '/search?x=1', { page: 2 }, true)
+    expect(url).toBe('https://api.test/v1/search?key=abc&x=1&page=2')
+    expect(netView(url)).toEqual({ path: '/v1/search', search: '?key=abc&x=1&page=2' })
+  })
+
+  it('keeps every param when the base carries several', () => {
+    const { url } = buildUrl('https://api.test/v1?a=1&b=2', '/items', { c: 3 }, true)
+    expect(url).toBe('https://api.test/v1/items?a=1&b=2&c=3')
+  })
+
+  it('leaves a base without a query exactly as it was', () => {
+    // The regression guard: every shape that worked before must still work.
+    expect(buildUrl('https://api.test', '/items', { page: 2 }, true).url).toBe('https://api.test/items?page=2')
+    expect(buildUrl('https://api.test/', '/items', {}, true).url).toBe('https://api.test/items')
+    expect(buildUrl('https://api.test', 'items', {}, true).url).toBe('https://api.test/items')
+    expect(buildUrl('', '/search?x=1', { page: 2 }, true).url).toBe('/search?x=1&page=2')
+  })
+})
+
+describe('a URL fragment is refused', () => {
+  // A fragment is never transmitted. Before 4.2.1 a path fragment silently ate
+  // the query string: '/docs#section' + { page: 2 } produced
+  // '/docs#section?page=2', which the network layer reads as path '/docs' with
+  // NO search at all — page=2 was dropped and nothing said so.
+  it('throws for a fragment in the path', () => {
+    expect(() => buildUrl('https://api.test', '/docs#section', { page: 2 }, true))
+      .toThrow(/fragment/i)
+  })
+
+  it('throws for a fragment in the baseUrl', () => {
+    expect(() => buildUrl('https://api.test/v1#frag', '/items', {}, true))
+      .toThrow(/fragment/i)
+  })
+
+  it('names the offending value so the fix is obvious', () => {
+    expect(() => buildUrl('https://api.test', '/docs#section', {}, true))
+      .toThrow(/#section/)
+  })
+})
+
+describe('the URL that actually reaches fetch', () => {
+  // Lives here rather than in create-api.test.ts because it is the same bug as
+  // the two blocks above, and the whole point is that asserting the STRING was
+  // not enough: both defects produced strings that looked plausible and
+  // resolved wrongly. This pins what the network layer parses out of them.
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('sends the merged query on the joined path, not a mangled string', async () => {
+    const seen: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (u: string) => { seen.push(u); return new Response('{}', { status: 200 }) }))
+    const api = createApi({
+      baseUrl: 'https://api.test/v1?key=abc',
+      requests: { search: new Request<{ q: string; page: number }, unknown>({ method: 'GET', path: '/search' }) },
+    })
+    await api.search({ q: 'hi', page: 2 })
+
+    const url = new URL(seen[0])
+    expect(url.pathname).toBe('/v1/search')
+    expect(url.searchParams.get('key')).toBe('abc')
+    expect(url.searchParams.get('q')).toBe('hi')
+    expect(url.searchParams.get('page')).toBe('2')
+  })
+
+  it('reports a fragment as a Result error rather than throwing', async () => {
+    // The mock returns a real Response on purpose. With a bare `vi.fn()` the
+    // call resolves to undefined, the pipeline crashes reading `.ok`, and this
+    // test passes even when the guard is removed — for the wrong reason.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const api = createApi({
+      baseUrl: 'https://api.test',
+      requests: { docs: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/docs#section' }) },
+    })
+    const r = await api.docs()
+    expect(r.error).not.toBeNull()
+    expect(r.error?.kind).toBe('network')
+    expect(String(r.error?.body)).toMatch(/fragment/i)
+    expect(globalThis.fetch).not.toHaveBeenCalled()
   })
 })
