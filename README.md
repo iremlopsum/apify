@@ -324,6 +324,32 @@ There the response type stays explicit — only `defineRequest` infers it.
 
 For GET and DELETE requests (or any request with `bodyAs: 'query'`), params that are not consumed by path substitution are serialized as a query string using `URLSearchParams`.
 
+A `baseUrl` may carry its own query string — a fixed API key, say. Its params
+are merged ahead of the call's:
+
+```ts
+const api = createApi({
+  baseUrl: 'https://api.example.com/v1?key=abc',
+  requests: { search: new Request<{ q: string }, Hit[]>({ method: 'GET', path: '/search' }) },
+})
+
+await api.search({ q: 'hello' })
+// GET https://api.example.com/v1/search?key=abc&q=hello
+```
+
+Merging **accumulates**, it does not override: a call param whose key the base
+already used produces both, `?key=abc&key=xyz`, and which one wins is the
+server's decision. This differs from headers, where a per-call value replaces a
+global one — because array params already serialize as repeated keys
+(`tags=a&tags=b`), so collapsing duplicates would break them. If a base-level
+param needs to vary per call, set it from middleware rather than the `baseUrl`.
+
+**A `#fragment` is refused.** A fragment is never sent to the server, so one in
+a `path` or `baseUrl` cannot do what it appears to — and before 4.2.1 it
+silently discarded the query string. It is now an error naming the offending
+value, rather than being stripped, so the dead code does not stay in your
+template.
+
 | Input                          | Output                      |
 | ------------------------------ | --------------------------- |
 | `{ page: 1, limit: 20 }`      | `?page=1&limit=20`          |

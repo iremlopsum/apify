@@ -7,6 +7,46 @@ For the full record of what changed in each release, see [CHANGELOG.md](./CHANGE
 
 ---
 
+## Upgrading to 4.2.1
+
+One change needs action, and only if a `path` or `baseUrl` of yours contains a
+`#`.
+
+### A URL fragment is now refused
+
+A fragment is never transmitted — `fetch` strips it — so one in a request URL
+could never do what it looked like it did. Worse, it silently swallowed the
+query string:
+
+```ts
+new Request({ method: 'GET', path: '/docs#section' })
+
+// 4.2.0 and earlier
+await api.docs({ page: 2 })
+// URL built:     '/docs#section?page=2'
+// what was sent: path '/docs', NO query at all -- page=2 was dropped, silently
+
+// 4.2.1
+await api.docs({ page: 2 })
+// error.kind === 'network'
+// "A URL fragment is never sent to the server, so it cannot appear in a path.
+//  Remove "#section" from "/docs#section"."
+```
+
+**What to do:** delete the fragment from the template. Nothing else changes —
+the params that were being dropped now reach the server.
+
+If neither your `baseUrl` nor any `path` contains a `#`, this release is a
+no-op for you, and the `baseUrl` fix below needs nothing from you either.
+
+### A `baseUrl` with a query string now works
+
+No action required — this only replaces broken output with correct output. If
+your `baseUrl` carried a query string (`https://api.example.com/v1?key=abc`),
+the path was previously appended *inside* the query value, so requests resolved
+to the base path and went to the wrong endpoint. They now go where they should,
+with the base's params merged ahead of the call's.
+
 ## Upgrading to 4.0.0
 
 One rule changes: **a success must carry data.** If you declared
