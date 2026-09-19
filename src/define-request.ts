@@ -134,6 +134,39 @@ type EmptyBodyGuard<TRT, TResponse> =
     : unknown
 
 /**
+ * Rejects a `path` literal containing a URL fragment.
+ *
+ * `fetch` never transmits a fragment, so one in a request path cannot do
+ * anything the caller intended — and before 4.2.1 it silently ate the query
+ * string as well. 4.2.1 made `buildUrl` refuse it at runtime, which left the
+ * type accepting what the runtime rejects: `defineRequest()({ path:
+ * '/docs#section' })` compiled, and then failed on every call. That divergence
+ * is the defect this library exists to prevent (§2.4 closed the same gap in the
+ * other direction), so the guard closes it at the call site.
+ *
+ * **Fires only on a literal.** `string extends `${string}#${string}`` is false,
+ * so a `RequestConfig`-typed variable, a spread of one, or any path computed at
+ * runtime still compiles. That permissiveness is not an oversight — it is the
+ * constraint that sank the 3.1.0 guard attempt, and `EmptyBodyGuard` carries it
+ * for the same reason. A config assembled at runtime cannot be checked at
+ * compile time, and refusing it would make the factory unusable for that shape.
+ *
+ * `new Request` gets no equivalent: it takes no path literal, so there is
+ * nothing for a guard to read. That is the asymmetry §3.4 already accepted, and
+ * it is why the factory exists at all.
+ *
+ * The marker property follows `EmptyBodyGuard`'s reasoning exactly — reusing
+ * `path` would intersect to `never` and make TypeScript report a mismatch on
+ * unrelated fields, never showing the sentence. `__fragmentInPath` collides
+ * with nothing a real config has, so it is reported as a missing required
+ * property and the message rides along.
+ */
+type FragmentGuard<TPath> =
+  TPath extends `${string}#${string}`
+    ? { __fragmentInPath: 'a URL fragment is never sent to the server — remove the # and everything after it' }
+    : unknown
+
+/**
  * The response type a schema supplies, or `unknown` when it supplies none.
  *
  * "Supplies none" covers two cases that must be treated identically: `TSchema`
@@ -258,6 +291,7 @@ export function defineRequest<TResponse = unknown, TExtra extends object = {}>()
     config: Omit<RequestConfig, 'schema'> & { path: TPath; responseType?: TRT; schema?: TSchema }
       & EmptyBodyGuard<TRT, TResponse>
       & SchemaConflictGuard<TSchema, TResponse>
+      & FragmentGuard<TPath>
   ): Request<Id<PathParams<TPath> & TExtra>, unknown extends SchemaOut<TSchema> ? TResponse : SchemaOut<TSchema>> =>
     new Request<Id<PathParams<TPath> & TExtra>, unknown extends SchemaOut<TSchema> ? TResponse : SchemaOut<TSchema>>(config)
 }

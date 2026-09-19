@@ -7,6 +7,67 @@ For the full record of what changed in each release, see [CHANGELOG.md](./CHANGE
 
 ---
 
+## Upgrading to 4.4.0
+
+One change needs action, and only if you use `defineRequest` with a `path`
+containing a `#`.
+
+### A fragment in a `defineRequest` path literal is now a compile error
+
+If your build goes red on a line like this, that is this change:
+
+```ts
+defineRequest<Doc>()({ method: 'GET', path: '/docs#section' })
+//                                          ^ Property '__fragmentInPath' is missing:
+//                                            a URL fragment is never sent to the server
+```
+
+**Your code was already broken.** A URL fragment is never transmitted — `fetch`
+strips it — so this endpoint could never reach `/docs#section`. Since 4.2.1 it
+has been returning an error `Result` on **every call**. The only thing that
+changed in 4.4.0 is *when* you find out: at compile time, where you declared it,
+instead of at runtime on every request.
+
+**The fix is to delete the fragment:**
+
+```ts
+// before
+defineRequest<Doc>()({ method: 'GET', path: '/docs#section' })
+
+// after
+defineRequest<Doc>()({ method: 'GET', path: '/docs' })
+```
+
+If the fragment was carrying information you need on the server, it has to move
+into the path or the query string, because the server never received it:
+
+```ts
+defineRequest<Doc>()({ method: 'GET', path: '/docs/:section' })
+// or
+defineRequest<Doc>()({ method: 'GET', path: '/docs' })  // then pass { section } as a param
+```
+
+### What is not affected
+
+The check reads the **path literal**, so these all still compile and behave
+exactly as before — they are caught by the runtime error instead:
+
+```ts
+const path: string = loadFromConfig()
+defineRequest<Doc>()({ method: 'GET', path })          // not a literal
+
+const cfg: RequestConfig = { method: 'GET', path: '/docs#section' }
+defineRequest<Doc>()({ ...cfg, path: cfg.path })       // widened to string
+
+new Request<P, Doc>({ method: 'GET', path: '/docs#section' })  // no path literal to read
+```
+
+`new Request` has no equivalent check because its constructor takes no path type
+parameter to read a literal from. That asymmetry is the reason `defineRequest`
+exists.
+
+---
+
 ## Upgrading to 4.2.1
 
 One change needs action, and only if a `path` or `baseUrl` of yours contains a

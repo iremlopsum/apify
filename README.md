@@ -405,6 +405,21 @@ silently discarded the query string. It is now an error naming the offending
 value, rather than being stripped, so the dead code does not stay in your
 template.
 
+Since 4.4.0 a fragment in a [`defineRequest`](#definerequest) `path` **literal**
+is also a compile error, so the endpoint is rejected where it is declared rather
+than on every call:
+
+```ts
+defineRequest<Doc>()({ method: 'GET', path: '/docs#section' })
+//                                          ^ Property '__fragmentInPath' is missing:
+//                                            a URL fragment is never sent to the server
+```
+
+The check reads the literal, so a path assembled at runtime — or a
+`RequestConfig`-typed variable — still compiles and is caught by the runtime
+error instead. `new Request` takes no path literal, so it has no equivalent
+check; this is one of the things `defineRequest` buys you.
+
 | Input                          | Output                      |
 | ------------------------------ | --------------------------- |
 | `{ page: 1, limit: 20 }`      | `?page=1&limit=20`          |
