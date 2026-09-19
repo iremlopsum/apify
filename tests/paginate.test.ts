@@ -93,6 +93,32 @@ describe('paginate', () => {
     expect(calls).toHaveLength(2)
   })
 
+  it('stops on an error page even when next never reads the page', async () => {
+    // The test above stops for two reasons at once, and only one of them is
+    // the library's: its `next` reads `page.data`, so removing the error-stop
+    // crashes it with a TypeError instead of failing an assertion. A walk
+    // driven by an offset never touches the page, so the error-stop is the
+    // ONLY thing that ends this one -- which is what makes `next`'s
+    // SuccessResult parameter type honest rather than aspirational.
+    //
+    // `maxPages` bounds the damage: without it a regression here hangs the
+    // suite instead of failing it.
+    const calls: Params[] = []
+    const endpoint = async (params: Params): Promise<Result<Page>> => {
+      calls.push(params)
+      return calls.length === 2
+        ? errorResult<Page>(500)
+        : successResult<Page>({ items: [1], cursor: '1' })
+    }
+    const byOffset = (_page: { data: Page }, prev: Params): Params =>
+      ({ ...prev, cursor: String(calls.length) })
+
+    const pages = await collect(paginate(endpoint, { limit: 1 }, { next: byOffset, maxPages: 5 }))
+
+    expect(pages).toHaveLength(2)
+    expect(calls).toHaveLength(2)
+  })
+
   it('lets a throwing next propagate rather than swallowing it', async () => {
     // D6: `next` is the caller's own function, running in their own loop. A
     // Result here would need a `kind` that fits nothing and would hide the
