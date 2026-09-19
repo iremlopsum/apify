@@ -319,6 +319,51 @@ describe('defineRequest — the responseType: none guard', () => {
   })
 })
 
+describe('defineRequest — the fragment guard', () => {
+  it('rejects a fragment in the path literal', () => {
+    // BACKLOG §2.5. 4.2.1 made the RUNTIME refuse a fragment, because fetch
+    // never transmits one -- so this endpoint compiled happily and then failed
+    // on every single call. A type that accepts what the runtime refuses is
+    // the same divergence §2.4 closed in the other direction, and this library
+    // exists to not have it.
+    // @ts-expect-error  a fragment is never sent, so it cannot be in a path
+    defineRequest<User>()({ method: 'GET', path: '/docs#section' })
+  })
+
+  it('rejects a fragment anywhere in the path, not just at the end', () => {
+    // @ts-expect-error  the guard keys on the '#', wherever it sits
+    defineRequest<User>()({ method: 'GET', path: '/a#b/c' })
+  })
+
+  it('accepts a path containing no fragment', () => {
+    // The positive half. A guard that rejects everything passes its own
+    // negative test while making the feature unusable.
+    defineRequest<User>()({ method: 'GET', path: '/docs/section' })
+  })
+
+  it('keeps inferring path params on a fragment-free path', () => {
+    // The guard intersects into the same config parameter that carries the
+    // inference, so a mistake there would take TPath down with it.
+    const getDoc = defineRequest<User>()({ method: 'GET', path: '/docs/:id' })
+    const docApi = createApi({ baseUrl: '/api', requests: { getDoc } })
+    docApi.getDoc({ id: '1' })
+    // @ts-expect-error  :id is still required, and still named id
+    docApi.getDoc({ docId: '1' })
+  })
+
+  it('stays quiet for a path that is not a literal', () => {
+    // The permissiveness constraint that sank the 3.1.0 guard, applied here:
+    // `string extends \`${string}#${string}\`` is false, so a widened path is
+    // never rejected. A config loaded at runtime cannot be checked at compile
+    // time, and refusing it would make the factory unusable for that shape.
+    const path: string = '/docs#section'
+    defineRequest<User>()({ method: 'GET', path })
+
+    const loose: RequestConfig = { method: 'GET', path: '/docs#section' }
+    defineRequest<User>()({ ...loose, path: loose.path })
+  })
+})
+
 describe('defineRequest — schema-inferred response types', () => {
   const evenSchema: StandardSchemaV1<number> = {
     '~standard': { version: 1, vendor: 'test', validate: (v: unknown) => ({ value: v as number }) },
