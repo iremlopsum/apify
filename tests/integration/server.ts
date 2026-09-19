@@ -48,6 +48,16 @@ export function startServer(): Promise<TestServer> {
             sendJson(res, 200, { id, name: `User ${id}` })
           }
 
+        } else if (method === 'GET' && pathname === '/pages') {
+          // Three pages of two items. `cursor` is the page index; its absence
+          // means page 0, and the last page reports `cursor: null`.
+          const cursor = Number(url.searchParams.get('cursor') ?? '0')
+          const last = 2
+          sendJson(res, 200, {
+            items: [cursor * 2, cursor * 2 + 1],
+            cursor: cursor < last ? String(cursor + 1) : null,
+          })
+
         } else if (method === 'GET' && pathname === '/search') {
           const params: Record<string, string> = {}
           url.searchParams.forEach((v, k) => { params[k] = v })

@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0] — 2026-09-19
+
+### Added
+
+- **`paginate()` — walk a paginated endpoint as an async iterator.** Yields one
+  `Result` per page, so the shape is the same one every other entry point
+  returns.
+
+  ```ts
+  for await (const page of paginate(api.listItems, { limit: 50 }, {
+    next: (p, prev) => p.data.cursor ? { ...prev, cursor: p.data.cursor } : undefined,
+  })) {
+    if (page.error) break
+    render(page.data.items)
+  }
+  ```
+
+  `next` returns the **next params**, not a cursor. Returning a cursor would
+  leave this library deciding where to put it — `cursor`, `page_token`,
+  `after` — and a config option per API in existence is the outcome
+  `buildUrl`'s refusal to guess a nested-query-string format already rejected.
+  The previous params arrive as the second argument, so cursor, offset and
+  `Link`-header paging are all the same spread.
+
+  An error page is yielded and ends the walk: there is no data to read the next
+  cursor from. `maxPages` is available and has no default, because a silent
+  truncation at an invented ceiling is indistinguishable from reaching the last
+  page. Any `CallOptions` apply to every request, so one signal cancels the
+  crawl.
+
+  A `next` that throws propagates to the caller rather than becoming a
+  `Result` — it runs inside their own `for await`, and a `Result` would need an
+  error kind that fits nothing while hiding the stack that identifies the bug.
+
+  Standalone, not a method on generated endpoints: `createApi` and its types are
+  unchanged, and the import costs nothing to anyone who does not use it.
+
 ## [4.2.1] — 2026-09-19
 
 Two URL-composition fixes. Both produced strings that looked plausible and
@@ -707,6 +744,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.3.0]: https://github.com/iremlopsum/apify/compare/v4.2.1...v4.3.0
 [4.2.1]: https://github.com/iremlopsum/apify/compare/v4.2.0...v4.2.1
 [4.2.0]: https://github.com/iremlopsum/apify/compare/v4.1.1...v4.2.0
 [4.1.1]: https://github.com/iremlopsum/apify/compare/v4.1.0...v4.1.1
