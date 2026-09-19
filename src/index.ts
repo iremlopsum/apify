@@ -19,6 +19,12 @@ export { Request } from './request.js'
 /** Typed factory — infers path params from the `path` literal. */
 export { defineRequest } from './define-request.js'
 
+/** Walks a paginated endpoint, yielding one Result per page. */
+export { paginate } from './paginate.js'
+
+/** Options for `paginate` — `next`, `maxPages`, and any CallOptions. */
+export type { PaginateOptions } from './paginate.js'
+
 // ---------------------------------------------------------------------------
 // Error class — exported as a value so consumers can use `instanceof`
 // ---------------------------------------------------------------------------
