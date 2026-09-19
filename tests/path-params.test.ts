@@ -274,6 +274,27 @@ describe('a URL fragment is refused', () => {
   })
 })
 
+describe("a '#' in a param value is data, not a fragment", () => {
+  // Both halves of a README claim. encodeURIComponent and URLSearchParams each
+  // escape '#' to '%23', so the value survives intact and is never mistaken for
+  // a fragment. This is the question 4.2.1 left open; refusing such a value
+  // would break working params, which is why 4.4.1 answered it this way.
+  it('escapes it in a path segment', () => {
+    const { url } = buildUrl('https://api.test', '/docs/:id', { id: 'a#b' })
+    expect(url).toBe('https://api.test/docs/a%23b')
+    expect(new URL(url).pathname).toBe('/docs/a%23b')
+    expect(new URL(url).hash).toBe('')
+  })
+
+  it('escapes it in a query string', () => {
+    const { url } = buildUrl('https://api.test', '/search', { tag: 'a#b' }, true)
+    expect(url).toBe('https://api.test/search?tag=a%23b')
+    // What the server actually receives is the original value, undamaged.
+    expect(new URL(url).searchParams.get('tag')).toBe('a#b')
+    expect(new URL(url).hash).toBe('')
+  })
+})
+
 describe('joinUrl composes a fragment structurally', () => {
   // buildUrl refuses a fragment, so joinUrl only ever sees one on the error
   // path -- `urlForError` falls back to it when buildUrl has thrown. That

@@ -420,6 +420,17 @@ The check reads the literal, so a path assembled at runtime — or a
 error instead. `new Request` takes no path literal, so it has no equivalent
 check; this is one of the things `defineRequest` buys you.
 
+**A `#` inside a param *value* is not a fragment** and is never refused — it is
+escaped to `%23` and sent as ordinary data:
+
+```ts
+await api.getDoc({ id: 'a#b' })   // → GET /docs/a%23b
+await api.search({ tag: 'a#b' })  // → GET /search?tag=a%23b
+```
+
+Only a `#` written into a `path` or `baseUrl` is refused, because that one was
+never going to reach the server.
+
 | Input                          | Output                      |
 | ------------------------------ | --------------------------- |
 | `{ page: 1, limit: 20 }`      | `?page=1&limit=20`          |

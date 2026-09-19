@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.4.1] — 2026-09-19
+
+### Fixed
+
+- **`error.request.url` now reports the substituted URL when a fragment is
+  refused.** It used to report the raw path template — `'/users/:id#f'` rather
+  than `'/users/42#f'` — because `buildUrl` refused the fragment before
+  substitution ran. This was 4.4.0's documented "Known gap"; it is the same
+  `:id`-reaching-telemetry defect 4.0.2 removed from the middleware path,
+  surviving on the one error path that could still produce it.
+
+  The fragment is now detected where it always was and thrown after
+  substitution. Detecting early preserves precedence — a fragment is wrong for
+  every call, an unfilled `:token` only for this one — so a config broken both
+  ways still reports the fragment first, exactly as before.
+
+  The error *message* is unchanged and still names the original `path` or
+  `baseUrl`. The two fields answer different questions: the message says what to
+  edit, the URL says what was called.
+
+### Unchanged, now pinned
+
+- **A `#` inside a param value is data, not a fragment.** `encodeURIComponent`
+  escapes it to `%23`, so `{ id: 'a#b' }` sends `/users/a%23b` and is not
+  refused. This was the question 4.2.1 left open; refusing it would have broken
+  legitimate params. Now covered by a test.
+
 ## [4.4.0] — 2026-09-19
 
 ### Added
@@ -57,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure still reports the raw `:id` template rather than the substituted
   value, because `buildUrl` throws before substitution runs. Pinned by a test.
   Closing it means letting the fragment check run after substitution, which
-  changes `buildUrl`'s shape rather than `joinUrl`'s.
+  changes `buildUrl`'s shape rather than `joinUrl`'s. **Closed in 4.4.1.**
 
 ## [4.3.0] — 2026-09-19
 
@@ -798,6 +825,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.4.1]: https://github.com/iremlopsum/apify/compare/v4.4.0...v4.4.1
 [4.4.0]: https://github.com/iremlopsum/apify/compare/v4.3.0...v4.4.0
 [4.3.0]: https://github.com/iremlopsum/apify/compare/v4.2.1...v4.3.0
 [4.2.1]: https://github.com/iremlopsum/apify/compare/v4.2.0...v4.2.1
