@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.4.0] — 2026-09-19
+
+### Added
+
+- **A fragment in a `defineRequest` path literal is now a compile error.**
+  4.2.1 made the runtime refuse a `#` in a `path` or `baseUrl`, because `fetch`
+  never transmits a fragment. That left the type accepting what the runtime
+  rejects — `defineRequest()({ path: '/docs#section' })` compiled, and the
+  endpoint then failed on every call.
+
+  ```ts
+  defineRequest<Doc>()({ method: 'GET', path: '/docs#section' })
+  //                                          ^ Property '__fragmentInPath' is missing:
+  //                                            a URL fragment is never sent to the server
+  ```
+
+  The guard **fires only on a literal**. A path assembled at runtime, a
+  `RequestConfig`-typed variable, and a spread of one all still compile and are
+  caught by the runtime error instead — the same permissiveness constraint that
+  sank the 3.1.0 `responseType: 'none'` guard attempt. `new Request` has no
+  equivalent check because it takes no path literal.
+
+  **This can turn a previously-compiling build red.** See
+  [MIGRATION.md](./MIGRATION.md#upgrading-to-440) — the rejected code was
+  already failing at runtime on every call.
+
+### Fixed
+
+- **`joinUrl` composes a URL fragment structurally, like it already does the
+  query string.** `buildUrl` refuses a fragment, which sends `urlForError` down
+  its `joinUrl` fallback — and that fallback still concatenated, leaving the
+  base's fragment mid-string. `'https://api.test/v1#f'` joined to `'/items'`
+  produced `'.../v1#f/items'`, which parses to pathname `/v1`: the reported URL
+  named an endpoint the call was never for. It now produces
+  `'https://api.test/v1/items#f'`.
+
+  Diagnostic only — `error.request.url`, never a URL that reaches the network,
+  since the request is refused either way. But it is the same class of mangled
+  output 4.2.1 removed from the request path, and a report that resolves
+  somewhere else is worse than no report.
+
+  The fragment splits **before** the query, and the two are not interchangeable:
+  RFC 3986 orders a URL `path?query#fragment`, so a `?` after a `#` belongs to
+  the fragment. Splitting the query first read `#f?x=1` as a query string that
+  is not one and re-emitted it as a real one.
+
+### Known gap
+
+- For a path template **with params**, `error.request.url` on the fragment
+  failure still reports the raw `:id` template rather than the substituted
+  value, because `buildUrl` throws before substitution runs. Pinned by a test.
+  Closing it means letting the fragment check run after substitution, which
+  changes `buildUrl`'s shape rather than `joinUrl`'s.
+
 ## [4.3.0] — 2026-09-19
 
 ### Added
@@ -744,6 +798,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.4.0]: https://github.com/iremlopsum/apify/compare/v4.3.0...v4.4.0
 [4.3.0]: https://github.com/iremlopsum/apify/compare/v4.2.1...v4.3.0
 [4.2.1]: https://github.com/iremlopsum/apify/compare/v4.2.0...v4.2.1
 [4.2.0]: https://github.com/iremlopsum/apify/compare/v4.1.1...v4.2.0
