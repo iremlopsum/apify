@@ -49,6 +49,19 @@ export interface PaginateOptions<TParams extends object, TResponse> extends Call
    * identifies it.
    */
   next: (page: SuccessResult<TResponse>, params: TParams) => TParams | undefined | null
+
+  /**
+   * The most pages to fetch. Omitted means unbounded.
+   *
+   * There is no default, deliberately: this library cannot justify a number —
+   * why 1000 and not 100? — and a silent truncation at an invented ceiling is
+   * indistinguishable from "no more pages", which is a worse failure than the
+   * runaway it would prevent.
+   *
+   * `0` means zero pages, not "unset". A caller who needs to know they hit the
+   * cap counts pages themselves; they are already writing the loop body.
+   */
+  maxPages?: number
 }
 
 /**
@@ -77,11 +90,17 @@ export async function* paginate<TParams extends object, TResponse>(
   params: TParams,
   options: PaginateOptions<TParams, TResponse>
 ): AsyncGenerator<Result<TResponse>, void, undefined> {
-  const { next, ...callOptions } = options
+  const { next, maxPages, ...callOptions } = options
   let current: TParams | undefined | null = params
+  let fetched = 0
 
   while (current !== undefined && current !== null) {
+    // `maxPages !== undefined`, not `maxPages &&` — 0 is a value, and reading
+    // it as "unset" would make `maxPages: 0` fetch every page.
+    if (maxPages !== undefined && fetched >= maxPages) return
+
     const page: Result<TResponse> = await endpoint(current, callOptions)
+    fetched++
     yield page
 
     // An error page ends the walk. Not a policy choice — `next` is typed to

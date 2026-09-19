@@ -103,4 +103,66 @@ describe('paginate', () => {
     })
     await expect(collect(gen)).rejects.toThrow('next exploded')
   })
+
+  it('stops at maxPages', async () => {
+    const { endpoint, calls } = fakeEndpoint([
+      { items: [1], cursor: '1' },
+      { items: [2], cursor: '2' },
+      { items: [3], cursor: null },
+    ])
+    const pages = await collect(paginate(endpoint, { limit: 1 }, { next: byCursor, maxPages: 2 }))
+    expect(pages).toHaveLength(2)
+    expect(calls).toHaveLength(2)
+  })
+
+  it('treats maxPages 0 as zero pages, not as unset', async () => {
+    // `!maxPages` reads 0 as absent, which is the bug the obvious
+    // implementation ships. 0 is present and means zero.
+    const { endpoint, calls } = fakeEndpoint([{ items: [1], cursor: '1' }])
+    const pages = await collect(paginate(endpoint, { limit: 1 }, { next: byCursor, maxPages: 0 }))
+    expect(pages).toHaveLength(0)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('yields exactly one page at maxPages 1', async () => {
+    const { endpoint, calls } = fakeEndpoint([
+      { items: [1], cursor: '1' },
+      { items: [2], cursor: null },
+    ])
+    const pages = await collect(paginate(endpoint, { limit: 1 }, { next: byCursor, maxPages: 1 }))
+    expect(pages).toHaveLength(1)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('is unbounded when maxPages is omitted', async () => {
+    const { endpoint, calls } = fakeEndpoint(
+      Array.from({ length: 12 }, (_, i) => ({ items: [i], cursor: i === 11 ? null : String(i + 1) }))
+    )
+    const pages = await collect(paginate(endpoint, { limit: 1 }, { next: byCursor }))
+    expect(pages).toHaveLength(12)
+    expect(calls).toHaveLength(12)
+  })
+
+  it('passes CallOptions to every request, not just the first', async () => {
+    const { endpoint, calls } = fakeEndpoint([
+      { items: [1], cursor: '1' },
+      { items: [2], cursor: null },
+    ])
+    const controller = new AbortController()
+    await collect(paginate(endpoint, { limit: 1 }, { next: byCursor, signal: controller.signal, timeout: 5000 }))
+    expect(calls).toHaveLength(2)
+    for (const call of calls) {
+      expect(call.options?.signal).toBe(controller.signal)
+      expect(call.options?.timeout).toBe(5000)
+    }
+  })
+
+  it('does not leak its own options into the ones handed to the endpoint', async () => {
+    // `next` and `maxPages` are this helper's, not the endpoint's. They must be
+    // destructured out, or they ride along into every CallOptions.
+    const { endpoint, calls } = fakeEndpoint([{ items: [1], cursor: null }])
+    await collect(paginate(endpoint, { limit: 1 }, { next: byCursor, maxPages: 3 }))
+    expect(calls[0].options).not.toHaveProperty('next')
+    expect(calls[0].options).not.toHaveProperty('maxPages')
+  })
 })
