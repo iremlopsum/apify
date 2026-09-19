@@ -48,6 +48,14 @@ interface BuildUrlResult {
 export function joinUrl(baseUrl: string, path: string): string {
   if (!baseUrl) return path
 
+  // Fragment first, then query. RFC 3986 orders a URL path?query#fragment, so
+  // everything after the first '#' is fragment -- INCLUDING a '?'. Splitting
+  // the query first would read '#f?x=1' as a query string 'x=1' that is not
+  // one, and then re-emit it as a real query. These two splits are not
+  // interchangeable, and this is the order that makes them correct.
+  const [baseRest, baseFragment] = splitFragment(baseUrl)
+  const [pathRest, pathFragment] = splitFragment(path)
+
   // Both sides may carry a query string — a baseUrl with a fixed API key, a
   // path template with a fixed filter — and a query must sit after the whole
   // path, not in the middle of it. Concatenating instead (as this did before
@@ -55,8 +63,8 @@ export function joinUrl(baseUrl: string, path: string): string {
   // 'https://api.test/v1?key=abc' + '/items' became '.../v1?key=abc/items',
   // which resolves to path '/v1'. The request went to a different endpoint,
   // and nothing said so.
-  const [basePath, baseQuery] = splitQuery(baseUrl)
-  const [pathOnly, pathQuery] = splitQuery(path)
+  const [basePath, baseQuery] = splitQuery(baseRest)
+  const [pathOnly, pathQuery] = splitQuery(pathRest)
 
   const base = basePath.replace(/\/+$/, '')
   const tail = pathOnly.startsWith('/') ? pathOnly : `/${pathOnly}`
@@ -77,18 +85,47 @@ export function joinUrl(baseUrl: string, path: string): string {
   // instead if it needs to vary.
   const query = [baseQuery, pathQuery].filter(Boolean).join('&')
 
-  return `${base}${tail}${query ? `?${query}` : ''}`
+  // A fragment belongs after the whole URL, for the same reason a query does.
+  // buildUrl REFUSES a fragment, so this only runs on the error path, where
+  // `urlForError` falls back to joinUrl after buildUrl has thrown. That report
+  // still has to name an address: before 4.4.0 it left the base's fragment
+  // mid-string -- 'https://api.test/v1#f' + '/items' gave '.../v1#f/items',
+  // which parses to pathname '/v1'. Diagnostic output that resolves to the
+  // wrong endpoint is the same defect 4.2.1 removed from the request path.
+  //
+  // Two fragments join with '#' rather than picking one, which is what a URL
+  // parser already does with the remainder: it keeps both strings visible in a
+  // report whose only job is to show what was written.
+  const fragment = [baseFragment, pathFragment].filter(Boolean).join('#')
+
+  return `${base}${tail}${query ? `?${query}` : ''}${fragment ? `#${fragment}` : ''}`
 }
 
 /**
- * Splits a URL fragment into its path part and its query part, without the `?`.
+ * Splits a URL piece into its path part and its query part, without the `?`.
  *
  * Returns `['', '']`-shaped pairs rather than using `URL`, because both
  * arguments here are routinely relative (`baseUrl` may be `/api`, a `path`
  * always is) and `new URL` requires an absolute base it does not have.
+ *
+ * Run this AFTER `splitFragment` — a '?' after a '#' is part of the fragment,
+ * not a query string.
  */
 function splitQuery(value: string): [path: string, query: string] {
   const at = value.indexOf('?')
+  return at === -1 ? [value, ''] : [value.slice(0, at), value.slice(at + 1)]
+}
+
+/**
+ * Splits a URL piece at the first `#`, returning the part before it and the
+ * fragment without its leading `#`.
+ *
+ * Same reason as `splitQuery` for not using `URL`: both arguments are routinely
+ * relative. The first `#` wins because everything after it is fragment, so a
+ * second one needs no special handling here.
+ */
+function splitFragment(value: string): [rest: string, fragment: string] {
+  const at = value.indexOf('#')
   return at === -1 ? [value, ''] : [value.slice(0, at), value.slice(at + 1)]
 }
 

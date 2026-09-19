@@ -18,7 +18,7 @@
 // =============================================================================
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { buildUrl } from '../src/utils/path-params.js'
+import { buildUrl, joinUrl } from '../src/utils/path-params.js'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
 
@@ -271,6 +271,52 @@ describe('a URL fragment is refused', () => {
   it('names the offending value so the fix is obvious', () => {
     expect(() => buildUrl('https://api.test', '/docs#section', {}, true))
       .toThrow(/#section/)
+  })
+})
+
+describe('joinUrl composes a fragment structurally', () => {
+  // buildUrl refuses a fragment, so joinUrl only ever sees one on the error
+  // path -- `urlForError` falls back to it when buildUrl has thrown. That
+  // fallback still has to name an address, and before 4.4.0 it named the wrong
+  // one: concatenating left the base's fragment MID-STRING, so
+  // 'https://api.test/v1#f' + '/items' gave 'https://api.test/v1#f/items',
+  // which parses to pathname '/v1'. That is the same class of mangled output
+  // 4.2.1 removed from the request path; it just survived on the diagnostic
+  // one.
+  it('moves a baseUrl fragment to the end instead of leaving it mid-string', () => {
+    expect(joinUrl('https://api.test/v1#f', '/items')).toBe('https://api.test/v1/items#f')
+  })
+
+  it('produces a string whose pathname is the joined path', () => {
+    // The assertion that matters: not the spelling, but what a URL parser
+    // reads out of it. The old output parsed to '/v1'.
+    expect(new URL(joinUrl('https://api.test/v1#f', '/items')).pathname).toBe('/v1/items')
+  })
+
+  it('keeps a path fragment at the end too', () => {
+    expect(joinUrl('https://api.test/v1', '/docs#section')).toBe('https://api.test/v1/docs#section')
+  })
+
+  it('splits the fragment before the query, so a ? inside a fragment stays in it', () => {
+    // RFC 3986 order is path?query#fragment, so everything after the first '#'
+    // is fragment -- including a '?'. Splitting query first would read 'x=1' as
+    // a query string it is not.
+    expect(joinUrl('https://api.test/v1#f?x=1', '/items')).toBe('https://api.test/v1/items#f?x=1')
+    expect(new URL(joinUrl('https://api.test/v1#f?x=1', '/items')).search).toBe('')
+  })
+
+  it('still puts a real query before the fragment', () => {
+    expect(joinUrl('https://api.test/v1?key=abc#f', '/items')).toBe('https://api.test/v1/items?key=abc#f')
+    const u = new URL(joinUrl('https://api.test/v1?key=abc#f', '/items'))
+    expect(u.pathname).toBe('/v1/items')
+    expect(u.searchParams.get('key')).toBe('abc')
+    expect(u.hash).toBe('#f')
+  })
+
+  it('leaves a fragment-free join exactly as it was', () => {
+    // 4.2.1's behaviour is load-bearing and must not move.
+    expect(joinUrl('https://api.test/v1?key=abc', '/items')).toBe('https://api.test/v1/items?key=abc')
+    expect(joinUrl('https://api.test/v1/', 'items')).toBe('https://api.test/v1/items')
   })
 })
 

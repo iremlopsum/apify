@@ -93,6 +93,66 @@ describe('error.request.url when the URL could never be built', () => {
   })
 })
 
+describe('error.request.url for a fragment-bearing baseUrl', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  const fragged = () => createApi({
+    baseUrl: 'https://api.test/v1#f',
+    requests: {
+      listItems: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/items' }),
+      getUser: new Request<{ id: string }, unknown>({ method: 'GET', path: '/users/:id' }),
+    },
+  })
+
+  // 4.2.1 made buildUrl refuse a fragment, which sends urlForError down its
+  // joinUrl fallback. Until 4.4.0 that fallback concatenated, leaving the
+  // fragment mid-string: 'https://api.test/v1#f' + '/items' gave
+  // '.../v1#f/items', which parses to pathname '/v1' -- naming an endpoint the
+  // call was never for. Diagnostic only, but it is the same class of mangled
+  // output 4.2.1 removed from the request path, and a report that resolves
+  // somewhere else is worse than no report.
+  it('reports a URL whose pathname is the endpoint that was asked for', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const r = await fragged().listItems({})
+
+    expect(r.error).not.toBeNull()
+    // Asserting the PARSE, not the spelling: the old string looked plausible
+    // and resolved wrongly, which is exactly how this survived review once.
+    expect(new URL(r.error!.request.url).pathname).toBe('/v1/items')
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+
+  it('keeps the offending fragment visible, in the place a URL puts one', async () => {
+    // Not stripped: the error message names the fragment, and the URL shows it
+    // where a URL carries one, so the two agree instead of contradicting.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const r = await fragged().listItems({})
+
+    expect(r.error?.request.url).toBe('https://api.test/v1/items#f')
+    // The thrown TypeError rides in `body` -- ApiError does not extend Error,
+    // so there is no `.message` to read it from.
+    expect(String(r.error?.body)).toMatch(/#f/)
+  })
+
+  it('still reports the raw path template when the path has params -- known gap', async () => {
+    // NOT what this release fixes, and pinned so the gap is visible rather than
+    // discovered again. urlForError falls back to joinUrl(baseUrl, config.path)
+    // -- the RAW template -- because buildUrl threw in Phase 0, before any
+    // substitution ran. For a nested-query-object failure that is the only
+    // honest answer (see the block above), but a fragment does not prevent
+    // substitution, so ':id' here is lossier than it needs to be. Fixing it
+    // means letting Phase 0 run after substitution, which is a change to
+    // buildUrl's shape, not to joinUrl's. See BACKLOG 2.7.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const r = await fragged().getUser({ id: '42' })
+
+    expect(r.error?.request.url).toBe('https://api.test/v1/users/:id#f')
+    // The part 4.4.0 DOES guarantee, even here: it parses to the right prefix
+    // and the fragment is at the end.
+    expect(new URL(r.error!.request.url).hash).toBe('#f')
+  })
+})
+
 describe('share: true callers agree with each other', () => {
   afterEach(() => { vi.restoreAllMocks() })
 
