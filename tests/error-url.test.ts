@@ -134,22 +134,63 @@ describe('error.request.url for a fragment-bearing baseUrl', () => {
     expect(String(r.error?.body)).toMatch(/#f/)
   })
 
-  it('still reports the raw path template when the path has params -- known gap', async () => {
-    // NOT what this release fixes, and pinned so the gap is visible rather than
-    // discovered again. urlForError falls back to joinUrl(baseUrl, config.path)
-    // -- the RAW template -- because buildUrl threw in Phase 0, before any
-    // substitution ran. For a nested-query-object failure that is the only
-    // honest answer (see the block above), but a fragment does not prevent
-    // substitution, so ':id' here is lossier than it needs to be. Fixing it
-    // means letting Phase 0 run after substitution, which is a change to
-    // buildUrl's shape, not to joinUrl's. See BACKLOG 2.7.
+  it('substitutes path params in the reported URL', async () => {
+    // BACKLOG §2.7, fixed in 4.4.1. buildUrl used to refuse the fragment in
+    // Phase 0, BEFORE substitution ran, so urlForError's fallback had only the
+    // raw template to report: '/users/:id#f'. That is the same defect 4.0.2
+    // removed from the middleware path -- ':id' reaching a consumer's
+    // telemetry -- surviving on one remaining error path.
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
     const r = await fragged().getUser({ id: '42' })
 
-    expect(r.error?.request.url).toBe('https://api.test/v1/users/:id#f')
-    // The part 4.4.0 DOES guarantee, even here: it parses to the right prefix
-    // and the fragment is at the end.
-    expect(new URL(r.error!.request.url).hash).toBe('#f')
+    expect(r.error?.request.url).toBe('https://api.test/v1/users/42#f')
+    expect(r.error?.request.url).not.toContain(':id')
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+
+  it('still names the original template in the message, not the resolved URL', async () => {
+    // The two fields answer different questions and must not collapse into
+    // one. The message says what to EDIT (the baseUrl you wrote); the URL says
+    // what was CALLED. Reporting the resolved URL in the message would name a
+    // string that appears nowhere in the consumer's source.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const r = await fragged().getUser({ id: '42' })
+
+    expect(String(r.error?.body)).toContain('https://api.test/v1#f')
+    expect(String(r.error?.body)).not.toContain('/users/42')
+  })
+
+  it('reports a fragment before an unfilled path token, as it always has', async () => {
+    // Precedence: a fragment is wrong for EVERY call; an unfilled token is
+    // wrong for this one. 4.4.1 moved where the fragment error is THROWN
+    // (after substitution, so it can name a resolved URL) but not where it is
+    // DETECTED, so this ordering is unchanged. Pinned because moving the throw
+    // past Phase 1b would silently flip it.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const both = createApi({
+      baseUrl: 'https://api.test/v1#f',
+      requests: { getUser: new Request<Record<string, unknown>, unknown>({ method: 'GET', path: '/users/:id' }) },
+    })
+    const r = await both.getUser({})
+
+    expect(String(r.error?.body)).toMatch(/fragment/i)
+    expect(String(r.error?.body)).not.toMatch(/never filled|:id/)
+  })
+
+  it('leaves a # inside a param VALUE alone -- it is data, not a fragment', async () => {
+    // encodeURIComponent escapes it to %23, so it is transmitted correctly as
+    // literal data. A fix that refused it would break legitimate params.
+    const seen: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (u: string) => { seen.push(u); return new Response('{}', { status: 200 }) }))
+    const clean = createApi({
+      baseUrl: 'https://api.test/v1',
+      requests: { getUser: new Request<{ id: string }, unknown>({ method: 'GET', path: '/users/:id' }) },
+    })
+    const r = await clean.getUser({ id: 'a#b' })
+
+    expect(r.error).toBeNull()
+    expect(new URL(seen[0]).pathname).toBe('/v1/users/a%23b')
+    expect(new URL(seen[0]).hash).toBe('')
   })
 })
 

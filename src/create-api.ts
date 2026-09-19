@@ -38,7 +38,7 @@
 import { Request } from './request.js'
 import { ApiError, createSuccessResult, createErrorResult, createNetworkErrorResult } from './result.js'
 import { composeMiddleware } from './middleware.js'
-import { buildUrl, joinUrl } from './utils/path-params.js'
+import { buildUrl, joinUrl, FragmentError } from './utils/path-params.js'
 import { serializeBody } from './utils/serialize.js'
 import { DedupeTracker } from './utils/dedupe.js'
 import { ShareTracker, isAbandoned } from './utils/share.js'
@@ -266,7 +266,13 @@ function resolveRequestUrl(
 function urlForError(baseUrl: string, request: Request<any, any>, params: object): string {
   try {
     return resolveRequestUrl(baseUrl, request, params).url
-  } catch {
+  } catch (err) {
+    // A fragment failure knows the URL the call was for: substitution ran
+    // before it threw, so the report names '/users/42#f' rather than the raw
+    // '/users/:id#f' template (BACKLOG §2.7). Every other setup failure — the
+    // nested query object — genuinely has no resolved URL to offer, and the
+    // template is the only honest answer there.
+    if (err instanceof FragmentError) return err.resolvedUrl
     return joinUrl(baseUrl, request.config.path)
   }
 }
