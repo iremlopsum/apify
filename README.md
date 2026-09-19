@@ -18,6 +18,9 @@ npm install @iremlopsum/apify
 - [Getting Started](#getting-started)
 - [REST API](#rest-api)
   - [Request](#request)
+  - [`defineRequest`](#definerequest)
+  - [Response validation](#response-validation)
+  - [Pagination](#pagination)
   - [Query strings](#query-strings)
   - [Result](#result)
   - [Error handling with `onError`](#error-handling-with-onerror)
@@ -319,6 +322,58 @@ const me = new Operation<{}, User>({
 ```
 
 There the response type stays explicit — only `defineRequest` infers it.
+
+### Pagination
+
+`paginate` walks a paginated endpoint, yielding one `Result` per page:
+
+```ts
+import { paginate } from '@iremlopsum/apify'
+
+for await (const page of paginate(api.listItems, { limit: 50 }, {
+  next: (p, prev) => p.data.cursor ? { ...prev, cursor: p.data.cursor } : undefined,
+})) {
+  if (page.error) break
+  render(page.data.items)
+}
+```
+
+**`next` returns the next params, not a cursor.** That is what keeps this
+library out of the business of guessing where a cursor goes — `cursor`?
+`page_token`? `after`? The previous params arrive as the second argument, so
+the common case is a spread, and the same shape covers every scheme:
+
+```ts
+// offset
+next: (p, prev) => p.data.items.length === prev.limit
+  ? { ...prev, offset: prev.offset + prev.limit }
+  : undefined
+
+// page number, driven by a Link header
+next: (p, prev) => p.response.headers.get('link')?.includes('rel="next"')
+  ? { ...prev, page: prev.page + 1 }
+  : undefined
+```
+
+Return `undefined` or `null` to stop.
+
+**An error page is yielded, then the walk ends.** There is no data to read the
+next cursor from, so there is nothing to continue with — and you see what
+failed rather than a loop that quietly stopped.
+
+**`maxPages` is optional and has no default.** A ceiling exists if you want one;
+the library will not invent a number, because a silent truncation at an
+arbitrary limit looks exactly like reaching the last page.
+
+```ts
+paginate(api.listItems, { limit: 50 }, { next, maxPages: 100 })
+```
+
+Any other [`CallOptions`](#calloptions) — `signal`, `timeout`, `headers` — apply
+to every request, so one signal cancels the whole crawl.
+
+`paginate` yields pages, not items. Flattening would mean deciding which field
+holds the array, which is the convention-guessing `next` exists to avoid.
 
 ### Query strings
 
@@ -1235,6 +1290,8 @@ No assumptions about Node.js, browsers, or any specific runtime. If your environ
 | `createApi`     | function | Creates a typed API client from a config of Request definitions    |
 | `Request`       | class    | Typed endpoint definition -- one instance per endpoint             |
 | `defineRequest` | function | Typed factory — infers path params from the `path` literal, and enforces `responseType: 'none'`. |
+| `paginate` | function | Walks a paginated endpoint, yielding one `Result` per page. |
+| `PaginateOptions` | type | `next`, `maxPages`, and any `CallOptions`. |
 | `StandardSchemaV1` | type | The Standard Schema contract — for typing a helper that takes a validator. |
 | `InferOutput`      | type | The type a schema produces on success. |
 | `StandardIssue`    | type | One validation failure -- the shape of each entry in `error.body` when a schema refuses. |
