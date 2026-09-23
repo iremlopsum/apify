@@ -7,6 +7,49 @@ For the full record of what changed in each release, see [CHANGELOG.md](./CHANGE
 
 ---
 
+## Upgrading to 4.4.2
+
+No action is needed for almost everyone. This release makes `timeout` and
+`CallOptions.signal` do what they were documented to do: settle a call even
+when a middleware is stuck awaiting work that ignores the signal. The only
+calls whose outcome changes are ones that previously **never settled at all**,
+plus one narrow case below.
+
+### If you wrapped calls in your own `Promise.race` against a timer
+
+You can delete the wrapper and use `timeout` (or pass your `AbortSignal`)
+instead. A call whose middleware stalls now settles with `kind: 'timeout'` (or
+`'abort'`), `status: 0`.
+
+### If a middleware answers an abort slowly
+
+Once the signal aborts, the chain gets one macrotask to answer by itself. A
+middleware that responds to a timeout by doing *more* I/O before returning its
+own `Result` — reading a fallback from IndexedDB, say — used to have that
+`Result` delivered, however long it took. Now, if it has not answered within
+that macrotask, the caller gets the timeout `Result` and the middleware's later
+answer is discarded.
+
+A fallback that answers from memory, or from anything already in hand, is
+unaffected — it settles within microtasks. If yours needs real I/O after the
+deadline, give it a deadline of its own that fires earlier than the call's:
+
+```ts
+const withFallback: Middleware = async (ctx, next) => {
+  ctx.request.signal = AbortSignal.timeout(4_000)   // inside the call's 5_000
+  const result = await next()
+  return result.error?.kind === 'timeout' ? await readFallback(ctx) : result
+}
+```
+
+### If a middleware calls `next()` long after the call timed out
+
+It no longer sends a request. `next()` returns the `Result` the caller already
+received. Before, a middleware that installed a fresh signal of its own could
+still send one nobody was waiting for.
+
+---
+
 ## Upgrading to 4.4.0
 
 One change needs action, and only if you use `defineRequest` with a `path`

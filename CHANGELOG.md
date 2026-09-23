@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.4.2] — 2026-09-23
+
+### Fixed
+
+- **`timeout` and a caller's `signal` now settle a call whose middleware hangs.**
+  `timeout` is documented as covering the entire middleware chain, but it only
+  took effect once a middleware called `next()` and the request reached `fetch`.
+  A middleware awaiting something that never settled — a stalled auth-token
+  refresh is the realistic case — left the call pending forever: no `Result`, no
+  `onError`, no timeout. Aborting `CallOptions.signal` did not help either. Both
+  clients were affected, and every entry point: unshared, `dedupe: true`, and
+  `share: true` — where a hung shared chain also kept its slot forever, and a
+  sharer's longer per-call `timeout` outlasted the shorter `RequestConfig.timeout`
+  it is documented to be bounded by.
+
+  Now, once the operation's own signal aborts, the chain gets one macrotask to
+  answer by itself; if it has not, the call settles with the same `Result` an
+  aborted `fetch` produces — `kind: 'timeout'` (reported to `onError` once) or
+  `kind: 'abort'` (not reported), `status: 0`, classified by provenance as
+  before. The grace period is what keeps every chain that *does* respond to the
+  abort — `fetch` rejecting, a middleware rethrowing the reason, a fallback
+  middleware serving a cached response — on exactly the `Result` it produced
+  before.
+
+  The stalled middleware keeps running, since a promise cannot be cancelled. What
+  it later returns or throws is discarded, and a `next()` it calls after the call
+  has settled sends no request and registers nothing with `dedupe` — it returns
+  the `Result` the caller already has. Under `dedupe: true`, a newer call
+  superseding one parked in response-side middleware settles it as `'abort'`.
+
+  No timer is armed for a call whose signal never aborts, and no listener
+  outlives the call.
+
+### Documentation
+
+- **`ctx.request.signal` is described accurately.** The README said it holds
+  "whatever the caller passed as `options.signal`"; it holds the caller's signal
+  merged with any `timeout`, and under `share` with the refcount.
+
 ## [4.4.1] — 2026-09-19
 
 ### Fixed
@@ -825,6 +864,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.4.2]: https://github.com/iremlopsum/apify/compare/v4.4.1...v4.4.2
 [4.4.1]: https://github.com/iremlopsum/apify/compare/v4.4.0...v4.4.1
 [4.4.0]: https://github.com/iremlopsum/apify/compare/v4.3.0...v4.4.0
 [4.3.0]: https://github.com/iremlopsum/apify/compare/v4.2.1...v4.3.0
