@@ -47,6 +47,7 @@ import { abortKind, propagatesReason } from './utils/abort-kind.js'
 import { anySignal } from './utils/any-signal.js'
 import { operationBudget, perCallerBudget } from './utils/budget.js'
 import { stableStringify } from './utils/cache.js'
+import { createBackstop } from './utils/backstop.js'
 import { isSpecialBody, isOpaqueParams } from './utils/special-body.js'
 import { runSchema } from './utils/validate.js'
 import type { SchemaOutcome } from './utils/validate.js'
@@ -740,6 +741,10 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 const tracked = dedupeTracker.track(name, ctx.request.signal ?? callerSignal)
                 dedupeController = tracked.controller
                 ctx.request.signal = tracked.signal
+                // A supersede is this operation's own cancellation too, so a
+                // call parked in response-side middleware still settles as
+                // 'abort' when a newer call replaces it.
+                backstop.watch(tracked.controller.signal)
               }
 
               // Build the RequestInit object for the native fetch call.
@@ -1094,8 +1099,23 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // composeMiddleware creates the onion chain: each middleware wraps
           // the next, with the core fetch function at the center.
           // skipMiddleware filters out specific middleware by reference (===).
+          //
+          // The backstop is what makes `timeout` and `options.signal` bound
+          // the whole chain, not only the part that reaches fetch: a
+          // middleware awaiting something the signal does not reach (a
+          // stalled token refresh) can no longer hold the call past its own
+          // deadline. It watches the operation's own signal — the deadline,
+          // the caller's signal and, under share, the refcount — and, once
+          // it aborts, gives the chain one macrotask to answer before
+          // settling with the abort Result itself. See utils/backstop.ts for
+          // why the grace period exists. `guard` stops a middleware that
+          // resumes after that from sending a request nobody is waiting on.
           // -----------------------------------------------------------------
-          const composed = composeMiddleware(allMiddleware, core, options.skipMiddleware ?? [])
+          const backstop = createBackstop<Result<unknown>>(signal =>
+            buildFailedResult(signal.reason, signal, 'abort', context.request.url)
+          )
+          backstop.watch(callerSignal)
+          const composed = composeMiddleware(allMiddleware, backstop.guard(core), options.skipMiddleware ?? [])
           // composeMiddleware has no guard of its own, and execute()'s try/catch
           // only covers the synchronous setup above — so an async middleware
           // that throws escapes as a rejection and breaks the library's one
@@ -1125,13 +1145,14 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // -----------------------------------------------------------------
           // Step 9: Post-execution hooks (dedupe cleanup + onError)
           // -----------------------------------------------------------------
-          // After the middleware chain completes (with any result), we:
+          // After the middleware chain completes (with any result) — or the
+          // backstop settles on its behalf — we run this exactly once:
           // a. Clear the dedupe tracker for this endpoint (if dedupe is enabled)
           //    so the next call starts fresh without aborting a completed request
           // b. Fire the onError callback if the final result has an error
           //    (only fires on final error — if retry middleware recovered, no fire)
           // -----------------------------------------------------------------
-          return resultPromise.then(result => {
+          return backstop.follow(resultPromise).then(result => {
             // This operation now has a Result. Announce it before reporting
             // anything: a sharer whose own signal is aborted from inside the
             // `onError` below must be able to tell, synchronously, that it was

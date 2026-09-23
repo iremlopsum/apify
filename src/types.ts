@@ -333,6 +333,15 @@ export interface RequestConfig {
    * `result.retry()` starts a fresh budget. Non-positive or omitted means no
    * timeout.
    *
+   * This also bounds a middleware that never looks at the signal: one stuck
+   * awaiting work of its own (a stalled token refresh) cannot hold the call
+   * past the deadline. Once it passes, the chain gets one macrotask to answer
+   * by itself; if it has not, the call settles with the timeout Result. The
+   * stalled middleware keeps running — a promise cannot be cancelled — but
+   * its eventual return value or throw is discarded, and a `next()` it calls
+   * afterwards sends nothing. Pass `ctx.request.signal` into such work to
+   * actually stop it.
+   *
    * Under {@link RequestConfig.share} this deadline belongs to the *operation*:
    * it bounds the single shared request, measured from when that request
    * started rather than from when each caller joined, so every sharer is
@@ -462,7 +471,12 @@ export interface CallOptions {
 
   /**
    * An `AbortSignal` to cancel this request. When the signal fires,
-   * the fetch is aborted and the result contains an error with `status: 0`.
+   * the fetch is aborted and the result contains an error with `status: 0`
+   * and `kind: 'abort'`.
+   *
+   * It settles the call even while a middleware is still awaiting work that
+   * ignores the signal — the same backstop as `RequestConfig.timeout`, which
+   * describes it.
    */
   signal?: AbortSignal
 
@@ -778,7 +792,8 @@ export interface OperationConfig {
    *
    * **This is a whole-operation deadline, not a per-attempt budget** — see
    * {@link RequestConfig.timeout} for the full rationale, which applies
-   * identically here. A timeout produces an error with `kind: 'timeout'` and
+   * identically here — including that it bounds a middleware which never
+   * looks at the signal. A timeout produces an error with `kind: 'timeout'` and
    * `status: 0`. `result.retry()` starts a fresh budget. Non-positive or
    * omitted means no timeout.
    */

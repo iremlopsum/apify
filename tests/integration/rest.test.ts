@@ -498,3 +498,74 @@ describe("responseType 'none'", () => {
     expect(r.response?.status).toBe(204)
   })
 })
+
+// A middleware that never settles must not hold a call past its deadline, and
+// must not send a request once it resumes. Only a real server can show the
+// second half: `callCounts` counts what actually arrived over the socket.
+describe('REST — a hung middleware against a real server', () => {
+  const parkedMiddleware = () => {
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    let late: Promise<unknown> | undefined
+    const mw = async (_ctx: unknown, next: () => Promise<unknown>) => {
+      await gate
+      late = next()
+      return late as never
+    }
+    return { mw, release: () => release(), late: () => late }
+  }
+
+  it('settles with kind "timeout", and the resumed middleware sends nothing', async () => {
+    // `[auth, perAttempt]` is the shape that proves this: once auth resumes,
+    // the per-attempt middleware installs a fresh, live signal, so `fetch`
+    // itself would happily send. Only the library's guard stops it.
+    const perAttempt = async (ctx: { request: { signal?: AbortSignal } }, next: () => Promise<unknown>) => {
+      ctx.request.signal = AbortSignal.timeout(5000)
+      return next() as never
+    }
+    const hello = new Request<Record<string, never>, { message: string }>({ method: 'GET', path: '/hello', timeout: 50 })
+    const parked = parkedMiddleware()
+    const kinds: string[] = []
+    const api = createApi({ baseUrl: server.baseUrl, middleware: [parked.mw, perAttempt], onError: e => { kinds.push(e.kind) }, requests: { hello } })
+
+    const started = Date.now()
+    const r = await api.hello()
+    expect(r.error?.kind).toBe('timeout')
+    expect(r.error?.status).toBe(0)
+    expect(Date.now() - started).toBeLessThan(1000)
+
+    parked.release()
+    await parked.late()
+    await new Promise(res => setTimeout(res, 50))
+    expect(server.callCounts.get('GET /hello')).toBeUndefined()
+    expect(kinds).toEqual(['timeout'])
+  })
+
+  it('settles with kind "abort" when the caller aborts', async () => {
+    const hello = new Request<Record<string, never>, { message: string }>({ method: 'GET', path: '/hello' })
+    const parked = parkedMiddleware()
+    const api = createApi({ baseUrl: server.baseUrl, middleware: [parked.mw], requests: { hello } })
+
+    const ac = new AbortController()
+    const p = api.hello({}, { signal: ac.signal })
+    setTimeout(() => ac.abort(), 20)
+    const r = await p
+    expect(r.error?.kind).toBe('abort')
+
+    parked.release()
+    await parked.late()
+    expect(server.callCounts.get('GET /hello')).toBeUndefined()
+  })
+
+  it('still reaches the server when the middleware settles within the budget', async () => {
+    const hello = new Request<Record<string, never>, { message: string }>({ method: 'GET', path: '/hello', timeout: 2000 })
+    const slowAuth = async (_ctx: unknown, next: () => Promise<unknown>) => {
+      await new Promise(res => setTimeout(res, 20))
+      return next() as never
+    }
+    const api = createApi({ baseUrl: server.baseUrl, middleware: [slowAuth], requests: { hello } })
+    const r = await api.hello()
+    expect(r.data).toEqual({ message: 'hello' })
+    expect(server.callCounts.get('GET /hello')).toBe(1)
+  })
+})

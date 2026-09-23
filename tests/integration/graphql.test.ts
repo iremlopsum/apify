@@ -133,3 +133,51 @@ describe('GraphQL — split client (queries + mutations)', () => {
     expect(server.callCounts.get('POST /graphql')).toBe(2)
   })
 })
+
+describe('GraphQL — a hung middleware against a real server', () => {
+  it('settles with kind "timeout", and the resumed middleware sends nothing', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    let late: Promise<unknown> | undefined
+    const kinds: string[] = []
+    const client = createGraphQL({
+      endpoint: `${server.baseUrl}/graphql`,
+      // The second middleware installs a fresh, live signal once the first
+      // resumes, so `fetch` itself would send — only the guard stops it.
+      middleware: [
+        async (_ctx, next) => { await gate; late = next(); return late as never },
+        (ctx, next) => { ctx.request.signal = AbortSignal.timeout(5000); return next() },
+      ],
+      onError: e => { kinds.push(e.kind) },
+      operations: {
+        hello: new Operation<Record<string, never>, { hello: string }>({ operation: gql`query { gqlHello }`, timeout: 50 }),
+      },
+    })
+
+    const started = Date.now()
+    const r = await client.hello()
+    expect(r.error?.kind).toBe('timeout')
+    expect(Date.now() - started).toBeLessThan(1000)
+
+    release()
+    await late
+    await new Promise(res => setTimeout(res, 50))
+    expect(server.callCounts.get('POST /graphql')).toBeUndefined()
+    expect(kinds).toEqual(['timeout'])
+  })
+
+  it('settles with kind "abort" when the caller aborts', async () => {
+    const client = createGraphQL({
+      endpoint: `${server.baseUrl}/graphql`,
+      middleware: [() => new Promise(() => {})],
+      operations: {
+        hello: new Operation<Record<string, never>, { hello: string }>({ operation: gql`query { gqlHello }` }),
+      },
+    })
+    const ac = new AbortController()
+    const p = client.hello({}, { signal: ac.signal })
+    setTimeout(() => ac.abort(), 20)
+    expect((await p).error?.kind).toBe('abort')
+    expect(server.callCounts.get('POST /graphql')).toBeUndefined()
+  })
+})

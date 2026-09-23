@@ -666,7 +666,7 @@ The context object passed to each middleware:
 | `request.signal`      | `AbortSignal \| undefined` | The signal handed to `fetch` -- replace it to impose your own cancellation policy |
 | `requestName`         | `string`  | Key name in the requests object (e.g., 'getUser')        |
 
-`request.signal` holds whatever the caller passed as `options.signal`, so it is `undefined` when they passed none. The core fetch reads the field at call time, so replacing it takes effect -- that is all a timeout middleware needs:
+`request.signal` holds the call's own signal: the caller's `options.signal` merged with any `timeout` (and, under `share: true`, with the refcount that aborts the shared request once every sharer has given up). It is `undefined` only when there is none of those. The core fetch reads the field at call time, so replacing it takes effect -- that is all a timeout middleware needs:
 
 ```ts
 const timeout = (ms: number): Middleware => async (ctx, next) => {
@@ -682,6 +682,8 @@ const api = createApi({
 ```
 
 Under `dedupe: true` your signal is merged rather than discarded: the request is cancelled by whichever fires first -- your signal, or a newer call superseding this one. The dedupe signal is installed by the core fetch, so middleware reading `ctx.request.signal` before `next()` sees the caller's signal, not the dedupe one.
+
+**Pass `ctx.request.signal` on to any async work your middleware does itself** -- a token refresh, a lookup, a queue. The library will not wait for that work past the call's deadline or the caller's abort either way (see [Timeout](#timeout)), but a promise cannot be cancelled from outside: handing it the signal is the only thing that actually *stops* the work, instead of leaving it running in the background with its result discarded.
 
 #### Writing custom middleware
 
@@ -956,6 +958,8 @@ const { error } = await promise
 
 A cancellation you caused yourself is not reported to `onError` (`kind: 'abort'` is the one kind that's suppressed there) -- see [Error handling with `onError`](#error-handling-with-onerror). It is classified by **provenance**, not by sniffing the thrown value's shape: whatever a middleware or `fetch` actually throws, if it happened because *this request's own signal* aborted, the `Result` is `kind: 'abort'` (or `'timeout'` for a deadline) regardless of the reason's name or type -- a caller-supplied custom abort reason (`controller.abort(new Error('unmounted'))`, or a plain string) still classifies as `'abort'`, not `'network'`.
 
+Aborting settles the call even while a middleware is still awaiting work of its own that ignores the signal -- the same backstop that bounds `timeout`, described under [Timeout](#timeout).
+
 #### Auto-cancel via `dedupe`
 
 When a `Request` has `dedupe: true`, each new call automatically aborts the previous in-flight call for that endpoint. Identity is per `Request` instance -- different endpoints do not interfere with each other.
@@ -1022,6 +1026,21 @@ A few more details:
 - Non-positive or omitted `timeout` disables it entirely (the default).
 - `timeout` composes with `dedupe: true` — the deadline is merged with the dedupe signal rather than discarded by it.
 - Under `share: true` the two timeouts have different owners. `RequestConfig.timeout` belongs to the *operation*: it bounds the one shared request for every caller, measured from when that request started, so a single caller can neither extend it nor disable it with a per-call `timeout: 0`. `CallOptions.timeout` bounds only the caller that passed it — see [Sharing](#sharing).
+
+**The deadline bounds middleware that never looks at the signal, too.** A middleware that awaits something of its own before calling `next()` — a token refresh, say — cannot hold the call past its `timeout`, even if that work never settles:
+
+```ts
+const auth: Middleware = async (ctx, next) => {
+  const token = await user.getIdToken()   // stalls on a bad network
+  ctx.request.headers.set('Authorization', `Bearer ${token}`)
+  return next()
+}
+// With timeout: 45_000, the call still settles at ~45s: kind 'timeout', status 0.
+```
+
+When the deadline passes, the chain gets one macrotask to answer by itself. That is enough for everything that already responds to the abort — `fetch` rejecting, a middleware rethrowing the reason, a fallback middleware that turns a timeout into a cached response — so all of those keep their own `Result` exactly as before. A chain still pending after that is waiting on something the signal does not reach, and the call settles with the same `Result` an aborted `fetch` would have produced: `kind: 'timeout'`, `status: 0`, reported to `onError` once. A caller's own `signal` works the same way, with `kind: 'abort'`, which is not reported.
+
+A promise cannot be cancelled, so the stalled middleware keeps running. Whatever it eventually returns or throws is discarded — no second `Result`, no second `onError` — and if it calls `next()` after the call has settled, no request is sent: `next()` hands back the `Result` the caller already has. To stop the work itself, pass `ctx.request.signal` into it (see [`MiddlewareContext`](#middlewarecontext)).
 
 ### Sharing
 
