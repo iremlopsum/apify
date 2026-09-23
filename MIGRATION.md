@@ -7,6 +7,87 @@ For the full record of what changed in each release, see [CHANGELOG.md](./CHANGE
 
 ---
 
+## Upgrading to 4.4.2
+
+No action is needed for almost everyone. This release makes `timeout` and
+`CallOptions.signal` do what they were documented to do: settle a call even
+when a middleware is stuck awaiting work that ignores the signal.
+
+**The rule that changed:** a call is now bounded by its deadline no matter what
+it is waiting on. Before, the deadline only reached `fetch` and whatever read
+`ctx.request.signal`; anything else could run past it, and the call waited.
+So the outcome changes for any call that was still running **after** its
+`timeout` fired (or its signal aborted) on work the signal does not reach:
+
+- a middleware awaiting something that never settles — before: the call never
+  settled; now: `kind: 'timeout'` / `'abort'`.
+- response-side work that crosses the deadline — a middleware post-processing
+  a success, an async Standard Schema validator — or a `fetch` implementation
+  (a hand-rolled mock, a polyfill) that ignores its signal. Before: the late
+  result was delivered; now: `kind: 'timeout'` / `'abort'`, the same as if the
+  work had finished one moment later than it did.
+
+A call that finishes within its deadline is unaffected, and so is any work that
+already responds to the abort. If you have a test mock that ignores
+`init.signal` and resolves *after* a `timeout` you set, that test now sees a
+timeout — which is what the configuration asked for.
+
+### If you use `mockFetch` from `./testing`
+
+`mock.fetch` now honours `init.signal`. A mocked call whose signal is aborted —
+already, or while its route handler is still pending — rejects with
+`signal.reason` instead of resolving, exactly as real `fetch` does. A test that
+aborted a call and still expected the mocked response is the only thing this
+changes; it now sees the abort.
+
+### If you wrapped calls in your own `Promise.race` against a timer
+
+You can delete the wrapper and use `timeout` (or pass your `AbortSignal`)
+instead. A call whose middleware stalls now settles with `kind: 'timeout'` (or
+`'abort'`), `status: 0`.
+
+### If a middleware answers an abort slowly
+
+This is the one case above where a middleware's own handling of the deadline
+is overruled, so it gets its own section.
+
+Once the signal aborts, the chain gets one macrotask to answer by itself. A
+middleware that responds to a timeout by doing *more* I/O before returning its
+own `Result` — reading a fallback from IndexedDB, say — used to have that
+`Result` delivered, however long it took. Now, if it has not answered within
+that macrotask, the caller gets the timeout `Result` and the middleware's later
+answer is discarded.
+
+A fallback that answers from memory, or from anything already in hand, is
+unaffected — it settles within microtasks. If yours needs real I/O after the
+deadline, give it a deadline of its own that fires earlier than the call's:
+
+```ts
+const withFallback: Middleware = async (ctx, next) => {
+  ctx.request.signal = AbortSignal.timeout(4_000)   // inside the call's 5_000
+  const result = await next()
+  return result.error?.kind === 'timeout' ? await readFallback(ctx) : result
+}
+```
+
+Like the per-attempt example in the README, this *replaces* the signal, so the
+caller's own `AbortSignal` no longer reaches `fetch` — aborting it still settles
+the call (the backstop watches it), but the socket stays open until the 4-second
+signal fires. If that matters, merge the two instead of replacing, with
+`AbortSignal.any([ctx.request.signal, own])` where your runtimes support it.
+
+### If a middleware calls `next()` long after the call timed out
+
+It no longer sends a request. `next()` returns the `Result` the caller already
+received. Before, a middleware that installed a fresh signal of its own could
+still send one nobody was waiting for.
+
+Under `dedupe: true`, a request still in flight when the call is settled this
+way is aborted, not left running: nothing else can cancel it once the call has
+given up its dedupe slot.
+
+---
+
 ## Upgrading to 4.4.0
 
 One change needs action, and only if you use `defineRequest` with a `path`

@@ -666,7 +666,7 @@ The context object passed to each middleware:
 | `request.signal`      | `AbortSignal \| undefined` | The signal handed to `fetch` -- replace it to impose your own cancellation policy |
 | `requestName`         | `string`  | Key name in the requests object (e.g., 'getUser')        |
 
-`request.signal` holds whatever the caller passed as `options.signal`, so it is `undefined` when they passed none. The core fetch reads the field at call time, so replacing it takes effect -- that is all a timeout middleware needs:
+`request.signal` holds the call's own signal: the caller's `options.signal` merged with any `timeout` (and, under `share: true`, with the refcount that aborts the shared request once every sharer has given up). It is `undefined` only when there is none of those. The core fetch reads the field at call time, so replacing it takes effect -- that is all a timeout middleware needs:
 
 ```ts
 const timeout = (ms: number): Middleware => async (ctx, next) => {
@@ -682,6 +682,8 @@ const api = createApi({
 ```
 
 Under `dedupe: true` your signal is merged rather than discarded: the request is cancelled by whichever fires first -- your signal, or a newer call superseding this one. The dedupe signal is installed by the core fetch, so middleware reading `ctx.request.signal` before `next()` sees the caller's signal, not the dedupe one.
+
+**Pass `ctx.request.signal` on to any async work your middleware does itself** -- a token refresh, a lookup, a queue. The library will not wait for that work past the call's deadline or the caller's abort either way (see [Timeout](#timeout)), but a promise cannot be cancelled from outside: handing it the signal is the only thing that actually *stops* the work, instead of leaving it running in the background with its result discarded.
 
 #### Writing custom middleware
 
@@ -956,6 +958,8 @@ const { error } = await promise
 
 A cancellation you caused yourself is not reported to `onError` (`kind: 'abort'` is the one kind that's suppressed there) -- see [Error handling with `onError`](#error-handling-with-onerror). It is classified by **provenance**, not by sniffing the thrown value's shape: whatever a middleware or `fetch` actually throws, if it happened because *this request's own signal* aborted, the `Result` is `kind: 'abort'` (or `'timeout'` for a deadline) regardless of the reason's name or type -- a caller-supplied custom abort reason (`controller.abort(new Error('unmounted'))`, or a plain string) still classifies as `'abort'`, not `'network'`.
 
+Aborting settles the call even while a middleware is still awaiting work of its own that ignores the signal -- the same backstop that bounds `timeout`, described under [Timeout](#timeout).
+
 #### Auto-cancel via `dedupe`
 
 When a `Request` has `dedupe: true`, each new call automatically aborts the previous in-flight call for that endpoint. Identity is per `Request` instance -- different endpoints do not interfere with each other.
@@ -1023,6 +1027,21 @@ A few more details:
 - `timeout` composes with `dedupe: true` — the deadline is merged with the dedupe signal rather than discarded by it.
 - Under `share: true` the two timeouts have different owners. `RequestConfig.timeout` belongs to the *operation*: it bounds the one shared request for every caller, measured from when that request started, so a single caller can neither extend it nor disable it with a per-call `timeout: 0`. `CallOptions.timeout` bounds only the caller that passed it — see [Sharing](#sharing).
 
+**The deadline bounds middleware that never looks at the signal, too.** A middleware that awaits something of its own before calling `next()` — a token refresh, say — cannot hold the call past its `timeout`, even if that work never settles:
+
+```ts
+const auth: Middleware = async (ctx, next) => {
+  const token = await user.getIdToken()   // stalls on a bad network
+  ctx.request.headers.set('Authorization', `Bearer ${token}`)
+  return next()
+}
+// With timeout: 45_000, the call still settles at ~45s: kind 'timeout', status 0.
+```
+
+When the deadline passes, the chain gets one macrotask to answer by itself. That is enough for everything that already responds to the abort — `fetch` rejecting, a middleware rethrowing the reason, a fallback middleware that turns a timeout into a cached response — so all of those keep their own `Result` exactly as before. A chain still pending after that is waiting on something the signal does not reach, and the call settles with the same `Result` an aborted `fetch` would have produced: `kind: 'timeout'`, `status: 0`, reported to `onError` once. A caller's own `signal` works the same way, with `kind: 'abort'`, which is not reported.
+
+A promise cannot be cancelled, so the stalled middleware keeps running. Whatever it eventually returns or throws is discarded — no second `Result`, no second `onError` — and if it calls `next()` after the call has settled, no request is sent: `next()` hands back the `Result` the caller already has. To stop the work itself, pass `ctx.request.signal` into it (see [`MiddlewareContext`](#middlewarecontext)).
+
 ### Sharing
 
 Set `share: true` on a `Request` to coalesce identical concurrent calls onto a single in-flight request, instead of each caller firing its own:
@@ -1064,7 +1083,7 @@ const patient = api.getProduct({ id: '42' })                      // keeps waiti
 
 **`result.retry()` on a shared result** re-runs the pipeline using the *acquiring caller's* own per-call options (headers, signal, timeout) — that is, whichever call first started the shared request, not whichever caller happens to invoke `retry()`. This falls out of every non-aborting sharer receiving the literal same `Result` object; it's unavoidable given that design, but worth knowing before relying on it.
 
-**Known limitation:** middleware (global or per-request) that replaces `ctx.request.signal` is re-merged with the *dedupe* signal under `dedupe: true`, but is **not** currently re-merged with the *share* refcount controller. Combining `share` with a signal-replacing middleware means that middleware's signal — not the refcount — ends up controlling the shared request: one sharer's middleware-installed signal could cancel the request for every other sharer. Avoid combining `share: true` with signal-replacing middleware until this is addressed.
+**Signal-replacing middleware is safe under `share: true`.** A middleware that installs its own `ctx.request.signal` (a per-attempt timeout, say) does not detach the shared request from the refcount: the refcount signal is merged back in before `fetch`, so the request is still aborted once every sharer has given up.
 
 ### TypeScript
 
@@ -1278,8 +1297,9 @@ vi.spyOn(api, 'getUser').mockResolvedValue(successResult({ id: '42', name: 'Ada'
 vi.spyOn(api, 'getUser').mockResolvedValue(errorResult(404, { message: 'not found' }))
 ```
 
-Three behaviors worth knowing:
+A few behaviors worth knowing:
 
+- **`mock.fetch` honours `init.signal`, like real `fetch`.** An already-aborted signal rejects with its `reason`, and so does one that aborts while a route handler is still pending — so a stalled route (`() => new Promise(() => {})`) lets you test your own `timeout` and cancellation handling through the stub. An aborted call is still recorded in `calls` and counted by `callCount`, but does not use up a response from a sequence.
 - **`restore()` assumes `globalThis.fetch` was defined when `install()` ran** — true on Node 20+ (and in every browser), since `fetch` is a global there. If you somehow call `install()` in an environment where `globalThis.fetch` is `undefined` beforehand, `restore()` puts back that `undefined` rather than inventing a real `fetch`.
 - **A route key must be `"METHOD /path"`.** A key with no space (`'/users'`) throws at `mockFetch(...)` time, naming the offending key, rather than silently registering a route that can never match.
 - **Declaration order decides when two same-length routes could both match.** Routes are matched in the order they appear in the object you pass to `mockFetch`, and the first structural match wins — put more specific routes first if two patterns could both match the same path.

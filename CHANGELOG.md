@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.4.2] — 2026-09-23
+
+### Fixed
+
+- **`timeout` and a caller's `signal` now settle a call whose middleware hangs.**
+  `timeout` is documented as covering the entire middleware chain, but it only
+  took effect once a middleware called `next()` and the request reached `fetch`.
+  A middleware awaiting something that never settled — a stalled auth-token
+  refresh is the realistic case — left the call pending forever: no `Result`, no
+  `onError`, no timeout. Aborting `CallOptions.signal` did not help either. Both
+  clients were affected, and every entry point: unshared, `dedupe: true`, and
+  `share: true` — where a hung shared chain also kept its slot forever, and a
+  sharer's longer per-call `timeout` outlasted the shorter `RequestConfig.timeout`
+  it is documented to be bounded by.
+
+  Now, once the operation's own signal aborts, the chain gets one macrotask to
+  answer by itself; if it has not, the call settles with the same `Result` an
+  aborted `fetch` produces — `kind: 'timeout'` (reported to `onError` once) or
+  `kind: 'abort'` (not reported), `status: 0`, classified by provenance as
+  before. The grace period is what keeps every chain that *does* respond to the
+  abort — `fetch` rejecting, a middleware rethrowing the reason, a fallback
+  middleware serving a cached response — on exactly the `Result` it produced
+  before.
+
+  The stalled middleware keeps running, since a promise cannot be cancelled. What
+  it later returns or throws is discarded, and a `next()` it calls after the call
+  has settled sends no request and registers nothing with `dedupe` — it returns
+  the `Result` the caller already has. Under `dedupe: true`, a newer call
+  superseding one parked in response-side middleware settles it as `'abort'`,
+  and a request still in flight when the backstop settles the call is aborted
+  rather than left running with nothing able to cancel it.
+
+  The same rule applies to anything else the signal does not reach: slow
+  response-side middleware, an async schema validator, or a `fetch` that
+  ignores its signal can no longer deliver a result after the deadline. See
+  MIGRATION.md.
+
+  No timer is armed for a call whose signal never aborts, no listener outlives
+  the call, and the post-execution hook runs at the same microtask as before —
+  share-site reporting depends on that ordering.
+
+- **`result.retry()` called with arguments no longer drops the caller's own
+  `signal` and `timeout`.** `retry` was the internal `execute` function itself,
+  so `[r].map(r.retry)` or `retry({})` delivered the argument into a parameter
+  reserved for the share tracker's signal — which marks the run as shared, and a
+  shared run's budget deliberately excludes the caller's own signal and per-call
+  timeout. `retry` now takes no arguments and ignores any it is given.
+
+- **`mockFetch` (`./testing`) honours `init.signal`.** It never looked at the
+  signal, so a stalled route could not be aborted and a consumer could not test
+  their own timeout or cancellation handling through the stub. It now rejects
+  with `signal.reason`, as real `fetch` does — for a signal already aborted and
+  for one that aborts while a handler is pending. An aborted call is still
+  recorded and counted, and does not use up a response from a sequence.
+
+### Documentation
+
+- **The README's "Sharing → Known limitation" paragraph is gone.** It said a
+  signal-replacing middleware was not re-merged with the share refcount; it has
+  been, and a test pins it. The paragraph now says so.
+
+- **`ctx.request.signal` is described accurately.** The README said it holds
+  "whatever the caller passed as `options.signal`"; it holds the caller's signal
+  merged with any `timeout`, and under `share` with the refcount.
+
 ## [4.4.1] — 2026-09-19
 
 ### Fixed
@@ -825,6 +890,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.4.2]: https://github.com/iremlopsum/apify/compare/v4.4.1...v4.4.2
 [4.4.1]: https://github.com/iremlopsum/apify/compare/v4.4.0...v4.4.1
 [4.4.0]: https://github.com/iremlopsum/apify/compare/v4.3.0...v4.4.0
 [4.3.0]: https://github.com/iremlopsum/apify/compare/v4.2.1...v4.3.0

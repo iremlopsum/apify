@@ -4,6 +4,7 @@ import { DedupeTracker } from './utils/dedupe.js'
 import { mergeHeaders } from './utils/headers.js'
 import { abortKind, propagatesReason } from './utils/abort-kind.js'
 import { resolveBudget } from './utils/budget.js'
+import { createBackstop } from './utils/backstop.js'
 import { runSchema } from './utils/validate.js'
 import type { SchemaOutcome } from './utils/validate.js'
 import type { CallOptions, ErrorResult, Middleware, MiddlewareContext, Result, GraphQLBaseConfig, OperationConfig, GraphQLError } from './types.js'
@@ -119,12 +120,13 @@ export function createGraphQL(config: any): any {
          * see `syntheticResult`'s doc in `create-api.ts` for the full
          * rationale. In short: if `signal` — the AbortSignal that actually
          * governs this operation — is the one that aborted, this failure IS
-         * that cancellation, whatever shape `reason` takes. The only fallback
-         * this function is ever called with is `'middleware'`, so the
-         * propagation check (`propagatesReason` — identity, or one level of
-         * `.cause`) always applies here: a middleware throwing its own
-         * `AbortError`-named failure, unrelated to this operation's own
-         * signal, must stay `'middleware'`.
+         * that cancellation, whatever shape `reason` takes. Two fallbacks
+         * reach it. `'middleware'`, for a rejection escaping the chain, gets
+         * the propagation check (`propagatesReason` — identity, or one level
+         * of `.cause`): a middleware throwing its own `AbortError`-named
+         * failure, unrelated to this operation's own signal, must stay
+         * `'middleware'`. `'abort'`, from the backstop, is always called with
+         * the signal that aborted, so it classifies by that signal's reason.
          */
         function buildFailedResult(
           reason: unknown,
@@ -199,6 +201,9 @@ export function createGraphQL(config: any): any {
                 const tracked = dedupeTracker.track(name, ctx.request.signal ?? callerSignal)
                 dedupeController = tracked.controller
                 ctx.request.signal = tracked.signal
+                // A supersede is this operation's own cancellation too — see
+                // the backstop below.
+                backstop.watch(tracked.controller.signal)
               }
 
               const response = await fetch(ctx.request.url, {
@@ -422,7 +427,17 @@ export function createGraphQL(config: any): any {
             requestName: name,
           }
 
-          const composed = composeMiddleware(allMiddleware, core, options.skipMiddleware ?? [])
+          // The backstop bounds the whole chain by the operation's own signal,
+          // not only the part that reaches fetch — the same one create-api.ts
+          // uses, and for the same reason: a middleware awaiting something
+          // the signal does not reach (a stalled token refresh) must not hold
+          // the call past its deadline. See utils/backstop.ts, and the
+          // matching block in create-api.ts's execute().
+          const backstop = createBackstop<Result<unknown>>(signal =>
+            buildFailedResult(signal.reason, signal, 'abort')
+          )
+          backstop.watch(callerSignal)
+          const composed = composeMiddleware(allMiddleware, backstop.guard(core), options.skipMiddleware ?? [])
           // Same guard as create-api.ts's execute(), and for the same reason:
           // composeMiddleware has no guard of its own, so an async middleware
           // that throws would otherwise escape as a rejection. A middleware
@@ -439,7 +454,7 @@ export function createGraphQL(config: any): any {
           } catch (err) {
             resultPromise = Promise.resolve(buildFailedResult(err, context.request.signal, 'middleware'))
           }
-          return resultPromise.then(result => {
+          return backstop.follow(resultPromise, (result, preempted) => {
             // dedupeController is only assigned inside core() — if every
             // middleware short-circuited and core() never ran, it stays
             // undefined here. clear() with no controller deletes the map
@@ -447,8 +462,20 @@ export function createGraphQL(config: any): any {
             // could delete the entry belonging to a genuinely in-flight
             // request registered by someone else under the same name. So
             // only clear when this execute() actually registered.
-            if (operation.config.dedupe && dedupeController) dedupeTracker.clear(name, dedupeController)
+            //
+            // When the backstop won, the request may still be in flight under
+            // a middleware-installed signal; abort it before dropping the
+            // entry, or nothing can cancel it — see create-api.ts.
+            if (operation.config.dedupe && dedupeController) {
+              if (preempted) dedupeController.abort()
+              dedupeTracker.clear(name, dedupeController)
+            }
             if (result.error) fireOnError(result.error as ApiError)
+            return result
+          }, (err: unknown) => {
+            // A signal-shaped value whose `reason` throws — see create-api.ts.
+            const result = buildFailedResult(err, undefined, 'abort')
+            fireOnError(result.error as ApiError)
             return result
           })
         } catch (err) {

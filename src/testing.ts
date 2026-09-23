@@ -72,6 +72,24 @@ function matchPath(routeSegments: string[], pathname: string): Record<string, st
 }
 
 /**
+ * Settles with `pending`, unless `signal` aborts first — then rejects with
+ * `signal.reason`, which is exactly what real `fetch` rejects with. The
+ * listener is removed either way, so a long-lived signal reused across many
+ * calls does not collect one per call.
+ */
+function abortable<T>(pending: Promise<T>, signal: AbortSignal | null | undefined): Promise<T> {
+  if (!signal) return pending
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    pending.then(
+      value => { signal.removeEventListener('abort', onAbort); resolve(value) },
+      (err: unknown) => { signal.removeEventListener('abort', onAbort); reject(err) }
+    )
+  })
+}
+
+/**
  * A `fetch` stub that routes by `"METHOD /path"`, with `:token` capture.
  *
  * Stubs at the fetch boundary rather than the api boundary on purpose: URL
@@ -81,6 +99,13 @@ function matchPath(routeSegments: string[], pathname: string): Record<string, st
  *
  * Framework-agnostic — `fetch` is a plain function, so install it whichever
  * way your runner prefers.
+ *
+ * Honours `init.signal` as real `fetch` does: an already-aborted signal
+ * rejects with its `reason`, and so does one that aborts while a handler is
+ * still pending. That is what lets a consumer test their own timeout and
+ * cancellation handling through the stub. An aborted call is still recorded
+ * in `calls` and counted by `callCount`, but does not advance a response
+ * sequence.
  */
 export function mockFetch(routes: Record<string, RouteValue>) {
   const parsed: ParsedRoute[] = Object.entries(routes).map(([key, value]) => {
@@ -136,12 +161,20 @@ export function mockFetch(routes: Record<string, RouteValue>) {
       body: init.body ?? null,
     })
 
+    const signal = init.signal
+
     for (const route of parsed) {
       if (route.method !== method) continue
       const params = matchPath(route.segments, pathname)
       if (!params) continue
 
       matchedKeys.push(route.key)
+      // Real fetch refuses an already-aborted signal without sending. Checked
+      // here, not before matching: `calls` and `matchedKeys` are parallel
+      // arrays that `lastCall` indexes together, so both must get an entry.
+      // Checked before `resolveValue` so it does not consume a response from a
+      // sequence — no server would have seen this call.
+      if (signal?.aborted) throw signal.reason
       const value = resolveValue(route)
       if (typeof value !== 'function') return value.clone()
 
@@ -157,7 +190,9 @@ export function mockFetch(routes: Record<string, RouteValue>) {
       // `calls[]` records — otherwise an assertion on request.url silently
       // checks a fabricated host.
       Object.defineProperty(request, 'url', { get: () => url })
-      return value({ params, request })
+      // Handlers may return a promise that stays pending (a stalled route);
+      // only an abortable one lets the caller's deadline actually reach it.
+      return abortable(Promise.resolve(value({ params, request })), signal)
     }
 
     // Fail loudly. Returning a 404 would look like a server behaviour rather

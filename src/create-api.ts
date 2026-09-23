@@ -47,6 +47,7 @@ import { abortKind, propagatesReason } from './utils/abort-kind.js'
 import { anySignal } from './utils/any-signal.js'
 import { operationBudget, perCallerBudget } from './utils/budget.js'
 import { stableStringify } from './utils/cache.js'
+import { createBackstop } from './utils/backstop.js'
 import { isSpecialBody, isOpaqueParams } from './utils/special-body.js'
 import { runSchema } from './utils/validate.js'
 import type { SchemaOutcome } from './utils/validate.js'
@@ -551,7 +552,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           request.config.method,
           url ?? urlForError(baseUrl, request, params),
           params,
-          execute
+          retry
         )
       }
 
@@ -593,9 +594,10 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * the ShareTracker's own refcounted signal, so the real network request
        * is governed by "has every sharer given up?" rather than by any single
        * caller's personal signal or timeout.
-       * `result.retry()` calls `execute` with no argument, so a retry (shared
-       * or not) always falls back to this caller's own `options.signal` /
-       * timeout — a retry is a fresh, unshared request.
+       * `result.retry()` calls `execute` with no argument — through `retry`,
+       * below, never directly — so a retry (shared or not) always falls back
+       * to this caller's own `options.signal` / timeout: a retry is a fresh,
+       * unshared request.
        *
        * `onSettled`, when given, is invoked the instant this operation has a
        * `Result` and BEFORE that Result is reported to `onError`. The share
@@ -740,6 +742,10 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 const tracked = dedupeTracker.track(name, ctx.request.signal ?? callerSignal)
                 dedupeController = tracked.controller
                 ctx.request.signal = tracked.signal
+                // A supersede is this operation's own cancellation too, so a
+                // call parked in response-side middleware still settles as
+                // 'abort' when a newer call replaces it.
+                backstop.watch(tracked.controller.signal)
               }
 
               // Build the RequestInit object for the native fetch call.
@@ -820,7 +826,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                       headers: new Headers(),
                       request: { method: ctx.request.method, url: ctx.request.url, params }
                     })
-                    return createNetworkErrorResult(error, execute)
+                    return createNetworkErrorResult(error, retry)
                   }
                   body = null
                 }
@@ -835,7 +841,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 })
 
                 // retry points to execute() — re-enters the full pipeline
-                return createErrorResult(error, response, execute)
+                return createErrorResult(error, response, retry)
               }
 
               // ---------------------------------------------------------------
@@ -880,7 +886,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                     headers: new Headers(),
                     request: { method: ctx.request.method, url: ctx.request.url, params }
                   })
-                  return createNetworkErrorResult(error, execute)
+                  return createNetworkErrorResult(error, retry)
                 }
                 const error = new ApiError({
                   kind: 'parse',
@@ -890,7 +896,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                   headers: response.headers,
                   request: { method: ctx.request.method, url: ctx.request.url, params }
                 })
-                return createErrorResult(error, response, execute)
+                return createErrorResult(error, response, retry)
               }
 
               // An empty body under responseType 'json' is a contradiction:
@@ -920,7 +926,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                   headers: response.headers,
                   request: { method: ctx.request.method, url: ctx.request.url, params }
                 })
-                return createErrorResult(error, response, execute)
+                return createErrorResult(error, response, retry)
               }
 
               // -------------------------------------------------------------
@@ -951,7 +957,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                     headers: response.headers,
                     request: { method: ctx.request.method, url: ctx.request.url, params }
                   })
-                  return createErrorResult(error, response, execute)
+                  return createErrorResult(error, response, retry)
                 }
 
                 if (!outcome.ok) {
@@ -963,7 +969,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                     headers: response.headers,
                     request: { method: ctx.request.method, url: ctx.request.url, params }
                   })
-                  return createErrorResult(error, response, execute)
+                  return createErrorResult(error, response, retry)
                 }
 
                 // `data` becomes the schema's OUTPUT — transforms, coercions and
@@ -971,7 +977,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 data = outcome.value
               }
 
-              return createSuccessResult(data, response, execute)
+              return createSuccessResult(data, response, retry)
             } catch (err) {
               // ---------------------------------------------------------------
               // Handle network errors (fetch threw)
@@ -1005,7 +1011,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 request: { method: ctx.request.method, url: ctx.request.url, params }
               })
 
-              return createNetworkErrorResult(error, execute)
+              return createNetworkErrorResult(error, retry)
             }
           }
 
@@ -1094,8 +1100,23 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // composeMiddleware creates the onion chain: each middleware wraps
           // the next, with the core fetch function at the center.
           // skipMiddleware filters out specific middleware by reference (===).
+          //
+          // The backstop is what makes `timeout` and `options.signal` bound
+          // the whole chain, not only the part that reaches fetch: a
+          // middleware awaiting something the signal does not reach (a
+          // stalled token refresh) can no longer hold the call past its own
+          // deadline. It watches the operation's own signal — the deadline,
+          // the caller's signal and, under share, the refcount — and, once
+          // it aborts, gives the chain one macrotask to answer before
+          // settling with the abort Result itself. See utils/backstop.ts for
+          // why the grace period exists. `guard` stops a middleware that
+          // resumes after that from sending a request nobody is waiting on.
           // -----------------------------------------------------------------
-          const composed = composeMiddleware(allMiddleware, core, options.skipMiddleware ?? [])
+          const backstop = createBackstop<Result<unknown>>(signal =>
+            buildFailedResult(signal.reason, signal, 'abort', context.request.url)
+          )
+          backstop.watch(callerSignal)
+          const composed = composeMiddleware(allMiddleware, backstop.guard(core), options.skipMiddleware ?? [])
           // composeMiddleware has no guard of its own, and execute()'s try/catch
           // only covers the synchronous setup above — so an async middleware
           // that throws escapes as a rejection and breaks the library's one
@@ -1125,23 +1146,24 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // -----------------------------------------------------------------
           // Step 9: Post-execution hooks (dedupe cleanup + onError)
           // -----------------------------------------------------------------
-          // After the middleware chain completes (with any result), we:
+          // After the middleware chain completes (with any result) — or the
+          // backstop settles on its behalf — we run this exactly once:
           // a. Clear the dedupe tracker for this endpoint (if dedupe is enabled)
           //    so the next call starts fresh without aborting a completed request
           // b. Fire the onError callback if the final result has an error
           //    (only fires on final error — if retry middleware recovered, no fire)
           // -----------------------------------------------------------------
-          return resultPromise.then(result => {
+          return backstop.follow(resultPromise, (result, preempted) => {
             // This operation now has a Result. Announce it before reporting
             // anything: a sharer whose own signal is aborted from inside the
             // `onError` below must be able to tell, synchronously, that it was
             // never left waiting. Every later hop is too late — see the share
             // site's `onAbort`.
-            // `retry` hands this very function to consumers, so the second
-            // parameter can receive anything a caller's call shape supplies —
-            // `arr.map(result.retry)` passes the index. Guard on the type
-            // rather than trusting the shape: a non-function here would throw
-            // from inside the one path that must always produce a Result.
+            // `retry` no longer hands this function to consumers (see
+            // `retry` below), but the guard stays: "only the share site passes
+            // a second argument" is a property of this file, not of the
+            // types, and a non-function here would throw from inside the one
+            // path that must always produce a Result.
             // A function that itself throws is guarded too, for the same
             // reason: this hook must never fail a request that already has a
             // perfectly good Result, and a throw here is exactly the kind of
@@ -1163,7 +1185,16 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // that case: it could delete the entry belonging to a genuinely
             // in-flight request registered by someone else under the same
             // name. So only clear when this execute() actually registered.
-            if (request.config.dedupe && dedupeController) dedupeTracker.clear(name, dedupeController)
+            //
+            // When the backstop won, this call's request may still be in
+            // flight under a signal some middleware installed. Dropping the
+            // entry without aborting would leave nothing able to cancel it —
+            // a newer call's track() finds no entry to supersede — so abort
+            // it first: nobody is waiting on it.
+            if (request.config.dedupe && dedupeController) {
+              if (preempted) dedupeController.abort()
+              dedupeTracker.clear(name, dedupeController)
+            }
 
             // Fire the global error handler if the final result has an error.
             // This is the "last chance" error hook — middleware has already had
@@ -1216,7 +1247,13 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             if (result.error && !abandoned) fireOnError(result.error as ApiError)
 
             return result
-          })
+          }, (err: unknown) =>
+            // Only reachable with a signal-shaped value whose `reason` throws —
+            // `retry` called with arbitrary arguments, or a fake signal from
+            // plain JS — so the backstop could not build its Result. Never
+            // throws holds regardless.
+            failedResult(err, undefined, 'abort')
+          )
         } catch (err) {
           // -----------------------------------------------------------------
           // Catch synchronous errors
@@ -1243,6 +1280,19 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // signal happens to be aborted would hide it from onError.
           return Promise.resolve(failedResult(err, undefined, 'network'))
         }
+      }
+
+      /**
+       * What every Result hands consumers as `retry`. Not `execute` itself:
+       * `execute`'s parameters are internal, and `retry` is passed around as
+       * a bare function — `[r].map(r.retry)` supplies `(value, index)`,
+       * `retry({})` supplies an object. Landing in `sharedSignal`, any value
+       * marks the run as shared, whose budget deliberately excludes the
+       * caller's own `signal` and per-call `timeout` — so a retry called that
+       * way silently dropped both. Zero parameters makes that unreachable.
+       */
+      function retry(): Promise<Result<unknown>> {
+        return execute()
       }
 
       // -----------------------------------------------------------------------

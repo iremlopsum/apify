@@ -115,6 +115,32 @@ describe('retry survives being called with extra arguments', () => {
   })
 })
 
+// A value that lands in execute()'s internal first parameter used to be read
+// as the share tracker's signal, which marks the run as shared — and a shared
+// run's budget deliberately excludes the caller's own signal and per-call
+// timeout. So `retry({})` silently dropped both. `retry` is now a
+// zero-argument wrapper, and extra arguments never reach execute().
+describe('retry called with arguments keeps the caller\'s own signal', () => {
+  it('honours the original options.signal', async () => {
+    mockFetch.mockImplementation((_u: string, init: RequestInit) => {
+      const s = init.signal as AbortSignal | undefined
+      if (s?.aborted) return Promise.reject(s.reason)
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+    })
+    const getItem = new Request<Record<string, never>, { ok: boolean }>({ method: 'GET', path: '/item' })
+    const api = createApi({ baseUrl: '/api', requests: { getItem } })
+
+    const ac = new AbortController()
+    const r = await api.getItem({}, { signal: ac.signal })
+    expect(r.error).toBeNull()
+    ac.abort()
+
+    const retry = r.retry as (...args: unknown[]) => Promise<Result<unknown>>
+    expect((await retry({})).error?.kind).toBe('abort')
+    expect((await [r].map(r.retry)[0]).error?.kind).toBe('abort')
+  })
+})
+
 // =============================================================================
 // Dedupe integration tests
 // =============================================================================
