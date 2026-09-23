@@ -1152,7 +1152,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // b. Fire the onError callback if the final result has an error
           //    (only fires on final error — if retry middleware recovered, no fire)
           // -----------------------------------------------------------------
-          return backstop.follow(resultPromise).then(result => {
+          return backstop.follow(resultPromise, (result, preempted) => {
             // This operation now has a Result. Announce it before reporting
             // anything: a sharer whose own signal is aborted from inside the
             // `onError` below must be able to tell, synchronously, that it was
@@ -1184,7 +1184,16 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // that case: it could delete the entry belonging to a genuinely
             // in-flight request registered by someone else under the same
             // name. So only clear when this execute() actually registered.
-            if (request.config.dedupe && dedupeController) dedupeTracker.clear(name, dedupeController)
+            //
+            // When the backstop won, this call's request may still be in
+            // flight under a signal some middleware installed. Dropping the
+            // entry without aborting would leave nothing able to cancel it —
+            // a newer call's track() finds no entry to supersede — so abort
+            // it first: nobody is waiting on it.
+            if (request.config.dedupe && dedupeController) {
+              if (preempted) dedupeController.abort()
+              dedupeTracker.clear(name, dedupeController)
+            }
 
             // Fire the global error handler if the final result has an error.
             // This is the "last chance" error hook — middleware has already had
@@ -1237,7 +1246,13 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             if (result.error && !abandoned) fireOnError(result.error as ApiError)
 
             return result
-          })
+          }, (err: unknown) =>
+            // Only reachable with a signal-shaped value whose `reason` throws —
+            // `retry` called with arbitrary arguments, or a fake signal from
+            // plain JS — so the backstop could not build its Result. Never
+            // throws holds regardless.
+            failedResult(err, undefined, 'abort')
+          )
         } catch (err) {
           // -----------------------------------------------------------------
           // Catch synchronous errors

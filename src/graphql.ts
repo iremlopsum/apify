@@ -454,7 +454,7 @@ export function createGraphQL(config: any): any {
           } catch (err) {
             resultPromise = Promise.resolve(buildFailedResult(err, context.request.signal, 'middleware'))
           }
-          return backstop.follow(resultPromise).then(result => {
+          return backstop.follow(resultPromise, (result, preempted) => {
             // dedupeController is only assigned inside core() — if every
             // middleware short-circuited and core() never ran, it stays
             // undefined here. clear() with no controller deletes the map
@@ -462,8 +462,20 @@ export function createGraphQL(config: any): any {
             // could delete the entry belonging to a genuinely in-flight
             // request registered by someone else under the same name. So
             // only clear when this execute() actually registered.
-            if (operation.config.dedupe && dedupeController) dedupeTracker.clear(name, dedupeController)
+            //
+            // When the backstop won, the request may still be in flight under
+            // a middleware-installed signal; abort it before dropping the
+            // entry, or nothing can cancel it — see create-api.ts.
+            if (operation.config.dedupe && dedupeController) {
+              if (preempted) dedupeController.abort()
+              dedupeTracker.clear(name, dedupeController)
+            }
             if (result.error) fireOnError(result.error as ApiError)
+            return result
+          }, (err: unknown) => {
+            // A signal-shaped value whose `reason` throws — see create-api.ts.
+            const result = buildFailedResult(err, undefined, 'abort')
+            fireOnError(result.error as ApiError)
             return result
           })
         } catch (err) {

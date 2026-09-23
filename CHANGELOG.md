@@ -33,10 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it later returns or throws is discarded, and a `next()` it calls after the call
   has settled sends no request and registers nothing with `dedupe` — it returns
   the `Result` the caller already has. Under `dedupe: true`, a newer call
-  superseding one parked in response-side middleware settles it as `'abort'`.
+  superseding one parked in response-side middleware settles it as `'abort'`,
+  and a request still in flight when the backstop settles the call is aborted
+  rather than left running with nothing able to cancel it.
 
-  No timer is armed for a call whose signal never aborts, and no listener
-  outlives the call.
+  The same rule applies to anything else the signal does not reach: slow
+  response-side middleware, an async schema validator, or a `fetch` that
+  ignores its signal can no longer deliver a result after the deadline. See
+  MIGRATION.md.
+
+  No timer is armed for a call whose signal never aborts, no listener outlives
+  the call, and the post-execution hook runs at the same microtask as before —
+  share-site reporting depends on that ordering.
 
 ### Documentation
 

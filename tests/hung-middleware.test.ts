@@ -586,3 +586,182 @@ describe('what ctx.request.signal holds (README, MiddlewareContext)', () => {
     expect(seen[1]).toBeUndefined()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Review findings on the 4.4.2 branch
+// ---------------------------------------------------------------------------
+
+describe('when the backstop wins with a request still in flight under dedupe', () => {
+  // A middleware-installed live signal is merged with the dedupe controller,
+  // so the controller is the one thing left that can cancel the fetch. The
+  // settled call must abort it, not merely drop its entry.
+  const liveSignal: Middleware = (ctx, next) => { ctx.request.signal = new AbortController().signal; return next() }
+  const recordingFetch = (signals: AbortSignal[], body: string) => vi.fn((_u: string, init: RequestInit) => {
+    const s = init.signal as AbortSignal
+    signals.push(s)
+    return new Promise<Response>((res, rej) => {
+      s.addEventListener('abort', () => rej(s.reason))
+      setTimeout(() => res(new Response(body, { status: 200 })), 200)
+    })
+  })
+
+  it('createApi aborts the orphaned fetch', async () => {
+    const signals: AbortSignal[] = []
+    vi.stubGlobal('fetch', recordingFetch(signals, '{"ok":true}'))
+    const parkAfter: Middleware = async (_ctx, next) => { await next(); return new Promise(() => {}) }
+    const api = createApi({
+      baseUrl: '', middleware: [parkAfter, liveSignal],
+      requests: { x: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/x', dedupe: true, timeout: 20 }) },
+    })
+    const r = (await within(api.x())) as Result<unknown>
+    expect(r.error?.kind).toBe('timeout')
+    expect(signals).toHaveLength(1)
+    expect(signals[0].aborted).toBe(true)
+  })
+
+  it('createGraphQL aborts the orphaned fetch', async () => {
+    const signals: AbortSignal[] = []
+    vi.stubGlobal('fetch', recordingFetch(signals, '{"data":{"ok":true}}'))
+    const parkAfter: Middleware = async (_ctx, next) => { await next(); return new Promise(() => {}) }
+    const client = createGraphQL({
+      endpoint: 'https://api.test/graphql',
+      middleware: [parkAfter, liveSignal],
+      operations: { op: new Operation<Record<string, never>, { ok: boolean }>({ operation: gql`query { ok }`, dedupe: true, timeout: 20 }) },
+    })
+    const r = (await within(client.op())) as Result<unknown>
+    expect(r.error?.kind).toBe('timeout')
+    expect(signals).toHaveLength(1)
+    expect(signals[0].aborted).toBe(true)
+  })
+})
+
+describe('a signal-shaped value whose reason throws still yields a Result', () => {
+  const hostile = () => ({
+    aborted: true,
+    addEventListener() {},
+    removeEventListener() {},
+    get reason(): unknown { throw new Error('reason-boom') },
+  })
+
+  it('createApi, via retry() called with arguments', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })))
+    // No timeout: with one, anySignal merges and reads `.reason` during
+    // setup, which the setup catch already handles. Alone, the fake passes
+    // through anySignal's single-signal fast path and reaches the backstop.
+    let calls = 0
+    const hangAfterFirst: Middleware = (_ctx, next) => (++calls === 1 ? next() : new Promise(() => {}))
+    const api = createApi({ baseUrl: '', middleware: [hangAfterFirst], requests: { x: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/x' }) } })
+    const first = (await within(api.x())) as Result<unknown>
+    expect(first.error).toBeNull()
+    const retry = first.retry as (...args: unknown[]) => Promise<Result<unknown>>
+    const r = await within(retry(hostile())).catch((e: unknown) => ({ rejected: e }))
+    expect(r).not.toHaveProperty('rejected')
+    expect(r).not.toBe(HUNG)
+    expect((r as Result<unknown>).error).not.toBeNull()
+  })
+
+  it('createGraphQL, via a fake CallOptions.signal', async () => {
+    vi.stubGlobal('fetch', okFetch())
+    const client = createGraphQL({
+      endpoint: 'https://api.test/graphql', middleware: [never],
+      operations: { op: new Operation<Record<string, never>, { ok: boolean }>({ operation: gql`query { ok }` }) },
+    })
+    const r = await within(client.op({}, { signal: hostile() as unknown as AbortSignal })).catch((e: unknown) => ({ rejected: e }))
+    expect(r).not.toHaveProperty('rejected')
+    expect(r).not.toBe(HUNG)
+    expect((r as Result<unknown>).error).not.toBeNull()
+  })
+})
+
+describe('the backstop adds no microtask hop to a chain that settles normally', () => {
+  // Share-site reporting is decided by microtask ordering (see `hasSettled`
+  // in create-api.ts). These pin the exact boundaries measured on 4.4.1: a
+  // sharer's give-up landing k microtasks after the chain returns.
+  const run = async (k: number) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 500 })))
+    const kinds: string[] = []
+    const b = new AbortController()
+    const abortLater: Middleware = async (_ctx, next) => {
+      const r = await next()
+      let p: Promise<unknown> = Promise.resolve()
+      for (let i = 0; i < k; i++) p = p.then(() => {})
+      void p.then(() => b.abort(new DOMException('late', 'TimeoutError')))
+      return r
+    }
+    const api = createApi({
+      baseUrl: '', middleware: [abortLater], onError: e => { kinds.push(e.kind) },
+      requests: { x: new Request<{ id: string }, unknown>({ method: 'GET', path: '/x/:id', share: true }) },
+    })
+    const [, rb] = await Promise.all([api.x({ id: '1' }), api.x({ id: '1' }, { signal: b.signal })])
+    await flush()
+    return { b: rb.error?.kind, kinds }
+  }
+
+  it('reports once when the give-up lands two microtasks later (the hook ran first)', async () => {
+    expect((await run(2)).kinds).toEqual(['http'])
+  })
+
+  it('delivers the shared Result when the give-up lands six microtasks later', async () => {
+    expect(await run(6)).toEqual({ b: 'http', kinds: ['http'] })
+  })
+})
+
+describe('createGraphQL parity', () => {
+  const op = (config: { timeout?: number; dedupe?: boolean } = {}) =>
+    new Operation<Record<string, never>, unknown>({ operation: gql`query { ok }`, ...config })
+
+  it('settles on a per-call timeout', async () => {
+    vi.stubGlobal('fetch', okFetch())
+    const client = createGraphQL({ endpoint: 'https://api.test/graphql', middleware: [never], operations: { op: op() } })
+    expect(((await within(client.op({}, { timeout: 30 }))) as Result<unknown>).error?.kind).toBe('timeout')
+  })
+
+  it('settles when the caller signal was already aborted', async () => {
+    vi.stubGlobal('fetch', okFetch())
+    const client = createGraphQL({ endpoint: 'https://api.test/graphql', middleware: [never], operations: { op: op() } })
+    expect(((await within(client.op({}, { signal: AbortSignal.abort() }))) as Result<unknown>).error?.kind).toBe('abort')
+  })
+
+  it('a dedupe supersede settles a call parked after next() with kind "abort"', async () => {
+    let n = 0
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(`{"data":{"n":${++n}}}`, { status: 200 })))
+    let parkFirst = true
+    const parkAfter: Middleware = async (_ctx, next) => {
+      const r = await next()
+      if (parkFirst) { parkFirst = false; return new Promise(() => {}) }
+      return r
+    }
+    const client = createGraphQL({ endpoint: 'https://api.test/graphql', middleware: [parkAfter], operations: { op: op({ dedupe: true }) } })
+    const a = client.op()
+    await flush()
+    const b = client.op()
+    expect(((await within(a)) as Result<unknown>).error?.kind).toBe('abort')
+    expect(((await within(b)) as Result<unknown>).data).toEqual({ n: 2 })
+  })
+})
+
+describe('anything else the signal does not reach is bounded too (MIGRATION.md, 4.4.2)', () => {
+  const slow = () => new Promise(res => setTimeout(res, 80))
+  const req = (extra: object = {}) =>
+    new Request<Record<string, never>, unknown>({ method: 'GET', path: '/x', timeout: 15, ...extra })
+
+  it('a fetch that ignores its signal', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { await slow(); return new Response('{"ok":true}', { status: 200 }) }))
+    const api = createApi({ baseUrl: '', requests: { x: req() } })
+    expect(((await within(api.x())) as Result<unknown>).error?.kind).toBe('timeout')
+  })
+
+  it('an async schema validator that crosses the deadline', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })))
+    const schema = { '~standard': { version: 1 as const, vendor: 'test', validate: async (value: unknown) => { await slow(); return { value } } } }
+    const api = createApi({ baseUrl: '', requests: { x: req({ schema }) } })
+    expect(((await within(api.x())) as Result<unknown>).error?.kind).toBe('timeout')
+  })
+
+  it('response-side middleware post-processing a success past the deadline', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })))
+    const slowAfter: Middleware = async (_ctx, next) => { const r = await next(); await slow(); return r }
+    const api = createApi({ baseUrl: '', middleware: [slowAfter], requests: { x: req() } })
+    expect(((await within(api.x())) as Result<unknown>).error?.kind).toBe('timeout')
+  })
+})

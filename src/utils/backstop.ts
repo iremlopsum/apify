@@ -45,13 +45,28 @@ export interface Backstop<T> {
   guard<C>(core: (ctx: C) => Promise<T>): (ctx: C) => Promise<T>
 
   /**
-   * Settles with the chain's own result unless the backstop already has.
-   * The returned promise settles exactly once. Callers convert the chain's
-   * rejections into Results before following it; should one slip through
-   * anyway it is passed on rather than swallowed, so the callers' own
-   * defence-in-depth still sees it instead of a promise that never settles.
+   * Settles with the chain's own result unless the backstop already has, and
+   * runs `hook` exactly once on whichever side won. `preempted` is true when
+   * the backstop won — the chain may still have a request in flight.
+   *
+   * `hook` runs synchronously inside the settlement rather than in a `.then`
+   * on the returned promise, so it fires at the same microtask a plain
+   * `chain.then(hook)` would. Share-site reporting is sensitive to that
+   * ordering (see `hasSettled` in create-api.ts); an extra hop widened an
+   * existing window.
+   *
+   * `onFailure` turns the three things that could otherwise reject it — the
+   * chain rejecting (callers convert rejections before following, so this is
+   * defence-in-depth), `abortResult` throwing, or `hook` throwing — into a
+   * value. It is a parameter rather than a `.catch` on the returned promise
+   * for the same ordering reason as `hook`: a trailing `.catch` is one more
+   * hop before a sharer receives the Result.
    */
-  follow(chain: Promise<T>): Promise<T>
+  follow(
+    chain: Promise<T>,
+    hook: (value: T, preempted: boolean) => T,
+    onFailure: (err: unknown) => T
+  ): Promise<T>
 }
 
 /**
@@ -65,6 +80,11 @@ export function createBackstop<T>(abortResult: (signal: AbortSignal) => T): Back
   let resolve!: (value: T) => void
   let reject!: (reason: unknown) => void
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  let hook: (value: T, preempted: boolean) => T = value => value
+  let onFailure: (err: unknown) => T = err => { throw err }
+  const fail = (err: unknown): void => {
+    try { resolve(onFailure(err)) } catch (e) { reject(e) }
+  }
 
   let timer: ReturnType<typeof setTimeout> | undefined
   const watched: Array<{ signal: AbortSignal; listener: () => void }> = []
@@ -81,10 +101,10 @@ export function createBackstop<T>(abortResult: (signal: AbortSignal) => T): Back
     return true
   }
 
-  const settle = (value: T): void => {
+  const settle = (value: T, preempted: boolean): void => {
     if (!finish()) return
     outcome = value
-    resolve(value)
+    try { resolve(hook(value, preempted)) } catch (err) { fail(err) }
   }
 
   // Why a grace period instead of settling on the abort itself: a chain that
@@ -101,8 +121,8 @@ export function createBackstop<T>(abortResult: (signal: AbortSignal) => T): Back
       // A throw inside a timer callback is an uncaught exception, not a
       // rejection anyone can handle, so it is routed onto the promise.
       let value: T
-      try { value = abortResult(signal) } catch (err) { if (finish()) reject(err); return }
-      settle(value)
+      try { value = abortResult(signal) } catch (err) { if (finish()) fail(err); return }
+      settle(value, true)
     }, 0)
   }
 
@@ -126,8 +146,10 @@ export function createBackstop<T>(abortResult: (signal: AbortSignal) => T): Back
       return ctx => (settled ? Promise.resolve(outcome) : core(ctx))
     },
 
-    follow(chain) {
-      chain.then(settle, (err: unknown) => { if (finish()) reject(err) })
+    follow(chain, onSettle, onFail) {
+      hook = onSettle
+      onFailure = onFail
+      chain.then(value => settle(value, false), (err: unknown) => { if (finish()) fail(err) })
       return promise
     },
   }
