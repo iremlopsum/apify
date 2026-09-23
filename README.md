@@ -1083,7 +1083,7 @@ const patient = api.getProduct({ id: '42' })                      // keeps waiti
 
 **`result.retry()` on a shared result** re-runs the pipeline using the *acquiring caller's* own per-call options (headers, signal, timeout) — that is, whichever call first started the shared request, not whichever caller happens to invoke `retry()`. This falls out of every non-aborting sharer receiving the literal same `Result` object; it's unavoidable given that design, but worth knowing before relying on it.
 
-**Known limitation:** middleware (global or per-request) that replaces `ctx.request.signal` is re-merged with the *dedupe* signal under `dedupe: true`, but is **not** currently re-merged with the *share* refcount controller. Combining `share` with a signal-replacing middleware means that middleware's signal — not the refcount — ends up controlling the shared request: one sharer's middleware-installed signal could cancel the request for every other sharer. Avoid combining `share: true` with signal-replacing middleware until this is addressed.
+**Signal-replacing middleware is safe under `share: true`.** A middleware that installs its own `ctx.request.signal` (a per-attempt timeout, say) does not detach the shared request from the refcount: the refcount signal is merged back in before `fetch`, so the request is still aborted once every sharer has given up.
 
 ### TypeScript
 
@@ -1297,8 +1297,9 @@ vi.spyOn(api, 'getUser').mockResolvedValue(successResult({ id: '42', name: 'Ada'
 vi.spyOn(api, 'getUser').mockResolvedValue(errorResult(404, { message: 'not found' }))
 ```
 
-Three behaviors worth knowing:
+A few behaviors worth knowing:
 
+- **`mock.fetch` honours `init.signal`, like real `fetch`.** An already-aborted signal rejects with its `reason`, and so does one that aborts while a route handler is still pending — so a stalled route (`() => new Promise(() => {})`) lets you test your own `timeout` and cancellation handling through the stub. An aborted call is still recorded in `calls` and counted by `callCount`, but does not use up a response from a sequence.
 - **`restore()` assumes `globalThis.fetch` was defined when `install()` ran** — true on Node 20+ (and in every browser), since `fetch` is a global there. If you somehow call `install()` in an environment where `globalThis.fetch` is `undefined` beforehand, `restore()` puts back that `undefined` rather than inventing a real `fetch`.
 - **A route key must be `"METHOD /path"`.** A key with no space (`'/users'`) throws at `mockFetch(...)` time, naming the offending key, rather than silently registering a route that can never match.
 - **Declaration order decides when two same-length routes could both match.** Routes are matched in the order they appear in the object you pass to `mockFetch`, and the first structural match wins — put more specific routes first if two patterns could both match the same path.

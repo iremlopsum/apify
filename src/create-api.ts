@@ -552,7 +552,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           request.config.method,
           url ?? urlForError(baseUrl, request, params),
           params,
-          execute
+          retry
         )
       }
 
@@ -594,9 +594,10 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * the ShareTracker's own refcounted signal, so the real network request
        * is governed by "has every sharer given up?" rather than by any single
        * caller's personal signal or timeout.
-       * `result.retry()` calls `execute` with no argument, so a retry (shared
-       * or not) always falls back to this caller's own `options.signal` /
-       * timeout — a retry is a fresh, unshared request.
+       * `result.retry()` calls `execute` with no argument — through `retry`,
+       * below, never directly — so a retry (shared or not) always falls back
+       * to this caller's own `options.signal` / timeout: a retry is a fresh,
+       * unshared request.
        *
        * `onSettled`, when given, is invoked the instant this operation has a
        * `Result` and BEFORE that Result is reported to `onError`. The share
@@ -825,7 +826,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                       headers: new Headers(),
                       request: { method: ctx.request.method, url: ctx.request.url, params }
                     })
-                    return createNetworkErrorResult(error, execute)
+                    return createNetworkErrorResult(error, retry)
                   }
                   body = null
                 }
@@ -840,7 +841,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 })
 
                 // retry points to execute() — re-enters the full pipeline
-                return createErrorResult(error, response, execute)
+                return createErrorResult(error, response, retry)
               }
 
               // ---------------------------------------------------------------
@@ -885,7 +886,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                     headers: new Headers(),
                     request: { method: ctx.request.method, url: ctx.request.url, params }
                   })
-                  return createNetworkErrorResult(error, execute)
+                  return createNetworkErrorResult(error, retry)
                 }
                 const error = new ApiError({
                   kind: 'parse',
@@ -895,7 +896,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                   headers: response.headers,
                   request: { method: ctx.request.method, url: ctx.request.url, params }
                 })
-                return createErrorResult(error, response, execute)
+                return createErrorResult(error, response, retry)
               }
 
               // An empty body under responseType 'json' is a contradiction:
@@ -925,7 +926,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                   headers: response.headers,
                   request: { method: ctx.request.method, url: ctx.request.url, params }
                 })
-                return createErrorResult(error, response, execute)
+                return createErrorResult(error, response, retry)
               }
 
               // -------------------------------------------------------------
@@ -956,7 +957,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                     headers: response.headers,
                     request: { method: ctx.request.method, url: ctx.request.url, params }
                   })
-                  return createErrorResult(error, response, execute)
+                  return createErrorResult(error, response, retry)
                 }
 
                 if (!outcome.ok) {
@@ -968,7 +969,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                     headers: response.headers,
                     request: { method: ctx.request.method, url: ctx.request.url, params }
                   })
-                  return createErrorResult(error, response, execute)
+                  return createErrorResult(error, response, retry)
                 }
 
                 // `data` becomes the schema's OUTPUT — transforms, coercions and
@@ -976,7 +977,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 data = outcome.value
               }
 
-              return createSuccessResult(data, response, execute)
+              return createSuccessResult(data, response, retry)
             } catch (err) {
               // ---------------------------------------------------------------
               // Handle network errors (fetch threw)
@@ -1010,7 +1011,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
                 request: { method: ctx.request.method, url: ctx.request.url, params }
               })
 
-              return createNetworkErrorResult(error, execute)
+              return createNetworkErrorResult(error, retry)
             }
           }
 
@@ -1158,11 +1159,11 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
             // `onError` below must be able to tell, synchronously, that it was
             // never left waiting. Every later hop is too late — see the share
             // site's `onAbort`.
-            // `retry` hands this very function to consumers, so the second
-            // parameter can receive anything a caller's call shape supplies —
-            // `arr.map(result.retry)` passes the index. Guard on the type
-            // rather than trusting the shape: a non-function here would throw
-            // from inside the one path that must always produce a Result.
+            // `retry` no longer hands this function to consumers (see
+            // `retry` below), but the guard stays: "only the share site passes
+            // a second argument" is a property of this file, not of the
+            // types, and a non-function here would throw from inside the one
+            // path that must always produce a Result.
             // A function that itself throws is guarded too, for the same
             // reason: this hook must never fail a request that already has a
             // perfectly good Result, and a throw here is exactly the kind of
@@ -1279,6 +1280,19 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
           // signal happens to be aborted would hide it from onError.
           return Promise.resolve(failedResult(err, undefined, 'network'))
         }
+      }
+
+      /**
+       * What every Result hands consumers as `retry`. Not `execute` itself:
+       * `execute`'s parameters are internal, and `retry` is passed around as
+       * a bare function — `[r].map(r.retry)` supplies `(value, index)`,
+       * `retry({})` supplies an object. Landing in `sharedSignal`, any value
+       * marks the run as shared, whose budget deliberately excludes the
+       * caller's own `signal` and per-call `timeout` — so a retry called that
+       * way silently dropped both. Zero parameters makes that unreachable.
+       */
+      function retry(): Promise<Result<unknown>> {
+        return execute()
       }
 
       // -----------------------------------------------------------------------

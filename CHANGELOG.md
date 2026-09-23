@@ -46,7 +46,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the call, and the post-execution hook runs at the same microtask as before —
   share-site reporting depends on that ordering.
 
+- **`result.retry()` called with arguments no longer drops the caller's own
+  `signal` and `timeout`.** `retry` was the internal `execute` function itself,
+  so `[r].map(r.retry)` or `retry({})` delivered the argument into a parameter
+  reserved for the share tracker's signal — which marks the run as shared, and a
+  shared run's budget deliberately excludes the caller's own signal and per-call
+  timeout. `retry` now takes no arguments and ignores any it is given.
+
+- **`mockFetch` (`./testing`) honours `init.signal`.** It never looked at the
+  signal, so a stalled route could not be aborted and a consumer could not test
+  their own timeout or cancellation handling through the stub. It now rejects
+  with `signal.reason`, as real `fetch` does — for a signal already aborted and
+  for one that aborts while a handler is pending. An aborted call is still
+  recorded and counted, and does not use up a response from a sequence.
+
 ### Documentation
+
+- **The README's "Sharing → Known limitation" paragraph is gone.** It said a
+  signal-replacing middleware was not re-merged with the share refcount; it has
+  been, and a test pins it. The paragraph now says so.
 
 - **`ctx.request.signal` is described accurately.** The README said it holds
   "whatever the caller passed as `options.signal`"; it holds the caller's signal

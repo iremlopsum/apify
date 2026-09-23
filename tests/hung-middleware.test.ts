@@ -643,18 +643,15 @@ describe('a signal-shaped value whose reason throws still yields a Result', () =
     get reason(): unknown { throw new Error('reason-boom') },
   })
 
-  it('createApi, via retry() called with arguments', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })))
+  it('createApi, via a fake CallOptions.signal', async () => {
     // No timeout: with one, anySignal merges and reads `.reason` during
     // setup, which the setup catch already handles. Alone, the fake passes
     // through anySignal's single-signal fast path and reaches the backstop.
-    let calls = 0
-    const hangAfterFirst: Middleware = (_ctx, next) => (++calls === 1 ? next() : new Promise(() => {}))
-    const api = createApi({ baseUrl: '', middleware: [hangAfterFirst], requests: { x: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/x' }) } })
-    const first = (await within(api.x())) as Result<unknown>
-    expect(first.error).toBeNull()
-    const retry = first.retry as (...args: unknown[]) => Promise<Result<unknown>>
-    const r = await within(retry(hostile())).catch((e: unknown) => ({ rejected: e }))
+    // (retry() with arguments used to be a second route here; since 4.4.2
+    // `retry` takes none, so it can no longer inject a signal at all.)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })))
+    const api = createApi({ baseUrl: '', middleware: [never], requests: { x: new Request<Record<string, never>, unknown>({ method: 'GET', path: '/x' }) } })
+    const r = await within(api.x({}, { signal: hostile() as unknown as AbortSignal })).catch((e: unknown) => ({ rejected: e }))
     expect(r).not.toHaveProperty('rejected')
     expect(r).not.toBe(HUNG)
     expect((r as Result<unknown>).error).not.toBeNull()

@@ -32,6 +32,14 @@ already responds to the abort. If you have a test mock that ignores
 `init.signal` and resolves *after* a `timeout` you set, that test now sees a
 timeout — which is what the configuration asked for.
 
+### If you use `mockFetch` from `./testing`
+
+`mock.fetch` now honours `init.signal`. A mocked call whose signal is aborted —
+already, or while its route handler is still pending — rejects with
+`signal.reason` instead of resolving, exactly as real `fetch` does. A test that
+aborted a call and still expected the mocked response is the only thing this
+changes; it now sees the abort.
+
 ### If you wrapped calls in your own `Promise.race` against a timer
 
 You can delete the wrapper and use `timeout` (or pass your `AbortSignal`)
