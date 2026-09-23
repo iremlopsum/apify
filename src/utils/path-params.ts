@@ -130,6 +130,29 @@ function splitFragment(value: string): [rest: string, fragment: string] {
 }
 
 /**
+ * The `TypeError` `buildUrl` throws for a URL fragment, carrying the URL the
+ * request would have used.
+ *
+ * A thrown error cannot return a value, and the fragment refusal is the one
+ * failure where a useful URL still exists: substitution would have worked
+ * perfectly: only the fragment is wrong. Without this, `urlForError` had
+ * nothing to report but the raw template, so `error.request.url` came back as
+ * `/users/:id#f` — the same `:id`-in-telemetry defect 4.0.2 removed from the
+ * middleware path (BACKLOG §2.7, fixed 4.4.1).
+ *
+ * It extends `TypeError` rather than replacing it so nothing else has to
+ * change: `name` stays `'TypeError'`, `String(err)` is byte-identical, and
+ * `execute()`'s setup catch still classifies it as a `'network'` Result.
+ * Deliberately NOT exported from `src/index.ts` — consumers read
+ * `error.request.url`, not this.
+ */
+export class FragmentError extends TypeError {
+  constructor(message: string, readonly resolvedUrl: string) {
+    super(message)
+  }
+}
+
+/**
  * Substitutes `:param` tokens in the path with matching values from params,
  * optionally appends remaining params as a query string.
  *
@@ -180,14 +203,15 @@ export function buildUrl(baseUrl: string, path: string, params: Record<string, u
   // caller as a Result, via execute()'s setup catch — the "never throws"
   // contract is unaffected.
   // -------------------------------------------------------------------------
+  //
+  // DETECTED here, THROWN after Phase 1. Detecting here preserves precedence:
+  // a fragment is wrong for every call, an unfilled `:token` only for this one,
+  // so the fragment must still win when a config is broken both ways. Throwing
+  // later is what lets the error name a substituted URL instead of the raw
+  // template. Moving the throw past Phase 1b would silently flip that order —
+  // there is a test for it.
+  // -------------------------------------------------------------------------
   const fragmentIn = path.includes('#') ? { where: 'path', value: path } : baseUrl.includes('#') ? { where: 'baseUrl', value: baseUrl } : null
-  if (fragmentIn) {
-    const fragment = fragmentIn.value.slice(fragmentIn.value.indexOf('#'))
-    throw new TypeError(
-      `A URL fragment is never sent to the server, so it cannot appear in a ${fragmentIn.where}. ` +
-      `Remove "${fragment}" from "${fragmentIn.value}".`
-    )
-  }
 
   let resolvedPath = path
   const remaining: Record<string, unknown> = {}
@@ -228,6 +252,28 @@ export function buildUrl(baseUrl: string, path: string, params: Record<string, u
       // (either query string serialization or request body)
       remaining[key] = value
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 0b: Throw the fragment refusal detected above
+  // -------------------------------------------------------------------------
+  // Now that substitution has run, the error can name the URL the call was
+  // actually for. Any raw '#' still in `resolvedPath` provably came from the
+  // template, never from a value: `encodeURIComponent` escapes a '#' in a value
+  // to '%23', which is legitimate data and must not be refused.
+  //
+  // The MESSAGE keeps naming the original path or baseUrl. The two fields
+  // answer different questions — the message says what to edit, the URL says
+  // what was called — and collapsing them would name a string that appears
+  // nowhere in the consumer's source.
+  // -------------------------------------------------------------------------
+  if (fragmentIn) {
+    const fragment = fragmentIn.value.slice(fragmentIn.value.indexOf('#'))
+    throw new FragmentError(
+      `A URL fragment is never sent to the server, so it cannot appear in a ${fragmentIn.where}. ` +
+      `Remove "${fragment}" from "${fragmentIn.value}".`,
+      joinUrl(baseUrl, resolvedPath)
+    )
   }
 
   // -------------------------------------------------------------------------
