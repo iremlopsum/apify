@@ -425,10 +425,10 @@ describe('cacheMiddleware', () => {
   it('declines to cache params with hidden state rather than keying them, even when identical', async () => {
     // A class instance keeping its state in a private field has no own
     // enumerable keys, so stableKey cannot see its content and returns null.
-    // A BigInt declines the same way, but a BigInt in a POST body never
-    // reaches the middleware chain: JSON.stringify throws at body
-    // serialization and the call fails before fetch (roadmap §1.4). The
-    // BigInt rule itself is pinned in tests/stable-key.test.ts.
+    // A BigInt declines the same way. In a POST body it never reaches the
+    // middleware chain (JSON.stringify throws at body serialization and the
+    // call fails before fetch, roadmap §1.4), but as a GET query param it
+    // does: see 'declines to cache a BigInt query param' below.
     class Money {
       #cents: number
       constructor(cents: number) { this.#cents = cents }
@@ -449,6 +449,47 @@ describe('cacheMiddleware', () => {
     await api.quote({ price: new Money(100) })
 
     expect(fetchMock.mock.calls.length).toBe(2)
+  })
+
+  it('never serves a GET with [1, undefined] the cache entry for [1, null]', async () => {
+    // The query string keeps these apart (buildUrl writes array items with
+    // String()), so they are different requests and must not share a key.
+    const fetchMock = vi.fn(async (_url: string) => mockJsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const api = createApi({
+      baseUrl: 'https://api.example.com',
+      requests: {
+        items: new Request<{ ids: Array<number | null | undefined> }, { ok: boolean }>({ method: 'GET', path: '/items', middleware: [cache] }),
+      },
+    })
+
+    await api.items({ ids: [1, null] })
+    await api.items({ ids: [1, undefined] })
+
+    expect(fetchMock.mock.calls.length).toBe(2)
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.example.com/items?ids=1&ids=null')
+    expect(fetchMock.mock.calls[1][0]).toBe('https://api.example.com/items?ids=1&ids=undefined')
+  })
+
+  it('declines to cache a BigInt query param, even when identical', async () => {
+    const fetchMock = vi.fn(async (_url: string) => mockJsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const api = createApi({
+      baseUrl: 'https://api.example.com',
+      requests: {
+        get: new Request<{ id: bigint }, { ok: boolean }>({ method: 'GET', path: '/get', middleware: [cache] }),
+      },
+    })
+
+    await api.get({ id: 10n })
+    await api.get({ id: 10n })
+
+    expect(fetchMock.mock.calls.length).toBe(2)
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.example.com/get?id=10')
   })
 
   it('treats { a: undefined } and {} as the same key', async () => {

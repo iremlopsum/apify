@@ -193,7 +193,7 @@ describe('share', () => {
   // at all. This proves the fix: two different FormData payloads make two
   // real requests, and each caller gets its own response.
   // ---------------------------------------------------------------------------
-  it('does not coalesce different FormData payloads (special-body params defeat stableStringify)', async () => {
+  it('does not coalesce different FormData payloads (special-body params cannot be keyed)', async () => {
     const calls: { resolve: (data: unknown) => void }[] = []
     const fn = vi.fn((_u: string, _init: RequestInit) => new Promise<Response>(res => {
       calls.push({ resolve: (data: unknown) => res(new Response(JSON.stringify(data), { status: 200 })) })
@@ -277,9 +277,9 @@ describe('share', () => {
 
   it('declines to coalesce params with hidden state, even identical ones', async () => {
     // Private-field state is invisible to stableKey, so the key is null and
-    // the call never shares. (A BigInt declines too, but a BigInt in a POST
-    // body fails at serialization before fetch, so it cannot be tested here;
-    // tests/stable-key.test.ts pins that rule.)
+    // the call never shares. (A BigInt declines too. In a POST body it fails
+    // at serialization before fetch, so it cannot be observed there; as a GET
+    // query param it can: see the two BigInt tests below.)
     class Money {
       #cents: number
       constructor(cents: number) { this.#cents = cents }
@@ -293,6 +293,33 @@ describe('share', () => {
     const all = Promise.all([api.quote({ price: new Money(100) }), api.quote({ price: new Money(100) })])
     await Promise.resolve()
     expect(f.fn.mock.calls.length).toBe(2)
+    f.calls[0].resolve(); f.calls[1].resolve()
+    await all
+  })
+
+  it('declines to coalesce a BigInt query param, even identical ones', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const api = createApi({
+      baseUrl: 'https://api.example.com',
+      requests: { get: new Request<{ id: bigint }, { ok: number }>({ method: 'GET', path: '/get', share: true }) },
+    })
+    const all = Promise.all([api.get({ id: 10n }), api.get({ id: 10n })])
+    await Promise.resolve()
+    expect(f.fn.mock.calls.length).toBe(2)
+    f.calls[0].resolve(); f.calls[1].resolve()
+    await all
+  })
+
+  it('does not coalesce different BigInt query params', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const api = createApi({
+      baseUrl: 'https://api.example.com',
+      requests: { get: new Request<{ id: bigint }, { ok: number }>({ method: 'GET', path: '/get', share: true }) },
+    })
+    const all = Promise.all([api.get({ id: 10n }), api.get({ id: 20n })])
+    await Promise.resolve()
+    expect(f.fn.mock.calls.length).toBe(2)
+    expect(f.fn.mock.calls.map(c => c[0])).toEqual(['https://api.example.com/get?id=10', 'https://api.example.com/get?id=20'])
     f.calls[0].resolve(); f.calls[1].resolve()
     await all
   })

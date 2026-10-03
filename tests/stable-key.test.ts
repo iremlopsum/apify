@@ -46,7 +46,14 @@ describe('stableKey — unchanged from stableStringify for plain data', () => {
     expect(stableKey(42)).toBe('42')
     expect(stableKey('hello')).toBe('"hello"')
     expect(stableKey(true)).toBe('true')
-    expect(stableKey(NaN)).toBe('null')
+    expect(stableKey(NaN)).toBe('NaN')
+  })
+
+  it('keys non-finite numbers as unquoted tokens, never as null', () => {
+    expect(stableKey({ page: Infinity })).toBe('{"page":Infinity}')
+    expect(stableKey(-Infinity)).toBe('-Infinity')
+    const keys = [{ page: NaN }, { page: Infinity }, { page: -Infinity }, { page: null }].map(stableKey)
+    expect(new Set(keys).size).toBe(4)
   })
 
   it('ignores symbol-keyed properties, as Object.keys does', () => {
@@ -62,7 +69,7 @@ describe('stableKey — unchanged from stableStringify for plain data', () => {
   })
 })
 
-describe('stableKey — JSON.stringify semantics for omitted members (spec D3 rules 3–4, §1.10)', () => {
+describe('stableKey — omitted and undefined members (spec D3 rules 3–5, §1.10)', () => {
   it('drops an undefined member, so { a: undefined } and {} are one key', () => {
     expect(stableKey({ a: undefined })).toBe('{}')
     expect(stableKey({ a: undefined })).toBe(stableKey({}))
@@ -73,40 +80,50 @@ describe('stableKey — JSON.stringify semantics for omitted members (spec D3 ru
     expect(stableKey({ a: null })).not.toBe(stableKey({ a: undefined }))
   })
 
-  it('drops function and symbol members', () => {
-    expect(stableKey({ a: 1, f: () => 1, s: Symbol('x') })).toBe('{"a":1}')
+  it('declines function and symbol members', () => {
+    expect(stableKey({ a: 1, f: () => 1, s: Symbol('x') })).toBeNull()
   })
 
-  it('keys an undefined or function array element as null', () => {
-    expect(stableKey([undefined])).toBe('[null]')
-    expect(stableKey([() => 1])).toBe('[null]')
-    expect(stableKey([undefined])).toBe(stableKey([null]))
+  it('keys an undefined array element as undefined, apart from null; declines a function element', () => {
+    expect(stableKey([undefined])).toBe('[undefined]')
+    expect(stableKey([undefined])).not.toBe(stableKey([null]))
+    expect(stableKey([() => 1])).toBeNull()
   })
 
-  it('keys a sparse array hole as null', () => {
+  it('keys a sparse array hole as undefined, apart from null', () => {
     const sparse: number[] = []
     sparse[0] = 1
     sparse[2] = 3
-    expect(stableKey(sparse)).toBe('[1,null,3]')
+    expect(stableKey(sparse)).toBe('[1,undefined,3]')
+    expect(stableKey(sparse)).not.toBe(stableKey([1, null, 3]))
   })
 })
 
 describe('stableKey — toJSON decides (spec D3 rule 10)', () => {
-  it('keys a Date as its ISO string', () => {
-    expect(stableKey({ since: new Date('2026-01-01T00:00:00.000Z') })).toBe('{"since":"2026-01-01T00:00:00.000Z"}')
+  it('keys a Date as its ISO string, tagged', () => {
+    expect(stableKey({ since: new Date('2026-01-01T00:00:00.000Z') })).toBe('{"since":toJSON("2026-01-01T00:00:00.000Z")}')
   })
 
-  it('keys an invalid Date as null, as the wire carries it', () => {
-    expect(stableKey({ d: new Date(NaN) })).toBe('{"d":null}')
+  it('keys an invalid Date as toJSON(null)', () => {
+    expect(stableKey({ d: new Date(NaN) })).toBe('{"d":toJSON(null)}')
   })
 
   it('keys an object by what its toJSON returns, not its own keys', () => {
-    expect(stableKey({ t: new Named('x') })).toBe('{"t":"tag:x"}')
+    expect(stableKey({ t: new Named('x') })).toBe('{"t":toJSON("tag:x")}')
   })
 
   it('passes the property key to toJSON, as JSON.stringify does', () => {
-    expect(stableKey({ a: { toJSON: (k: string) => k } })).toBe('{"a":"a"}')
-    expect(stableKey({ toJSON: (k: string) => `top:${k}` })).toBe('"top:"')
+    expect(stableKey({ a: { toJSON: (k: string) => k } })).toBe('{"a":toJSON("a")}')
+    expect(stableKey({ toJSON: (k: string) => `top:${k}` })).toBe('toJSON("top:")')
+  })
+
+  it.each<[string, unknown, unknown]>([
+    ['a Date in an array vs its ISO string', { d: [new Date('2026-01-01T00:00:00.000Z')] }, { d: ['2026-01-01T00:00:00.000Z'] }],
+    ['an invalid Date in an array vs null', [new Date(NaN)], [null]],
+    ['a toJSON object vs the string it returns', { t: new Named('x') }, { t: 'tag:x' }],
+  ])('never equates %s: a query string sends them differently', (_label, a, b) => {
+    expect(stableKey(a)).not.toBeNull()
+    expect(stableKey(a)).not.toBe(stableKey(b))
   })
 
   it('declines when toJSON throws', () => {
@@ -145,13 +162,13 @@ describe('stableKey — tagged collections and views (spec D3 rules 12–14)', (
     expect(stableKey(a)).toBe(stableKey(b))
   })
 
-  it('keys an undefined Map key or Set element as null', () => {
-    expect(stableKey(new Set([undefined]))).toBe('Set[null]')
-    expect(stableKey(new Map([[undefined, 1]]))).toBe('Map{null:1}')
+  it('keys an undefined Map key or Set element as undefined', () => {
+    expect(stableKey(new Set([undefined]))).toBe('Set[undefined]')
+    expect(stableKey(new Map([[undefined, 1]]))).toBe('Map{undefined:1}')
   })
 })
 
-describe('stableKey — declines (spec D3 rules 5, 6, 8, 9, 11, 18)', () => {
+describe('stableKey — declines (spec D3 rules 4, 5, 6, 8, 9, 11, 18)', () => {
   it.each<[string, unknown]>([
     ['a BigInt member', { id: 10n }],
     ['a top-level BigInt', 10n],
@@ -168,6 +185,8 @@ describe('stableKey — declines (spec D3 rules 5, 6, 8, 9, 11, 18)', () => {
     ['a nested boxed String', { s: new String('ab') }],
     ['a top-level function', () => 1],
     ['a top-level symbol', Symbol('x')],
+    ['a function member', { f: () => 1 }],
+    ['a symbol member', { s: Symbol('x') }],
   ])('declines %s', (_label, value) => {
     expect(stableKey(value)).toBeNull()
   })
@@ -181,7 +200,7 @@ describe('stableKey — declines (spec D3 rules 5, 6, 8, 9, 11, 18)', () => {
 
   it('does not decline the same object referenced twice as siblings', () => {
     const d = new Date('2026-01-01T00:00:00.000Z')
-    expect(stableKey({ a: d, b: d })).toBe('{"a":"2026-01-01T00:00:00.000Z","b":"2026-01-01T00:00:00.000Z"}')
+    expect(stableKey({ a: d, b: d })).toBe('{"a":toJSON("2026-01-01T00:00:00.000Z"),"b":toJSON("2026-01-01T00:00:00.000Z")}')
   })
 
   it('declines when a getter throws, rather than throwing', () => {

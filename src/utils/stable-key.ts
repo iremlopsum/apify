@@ -10,17 +10,28 @@
  * neither share nor cache. Declining is always safe; handing one caller the
  * response meant for another never is.
  *
+ * The rule: the key never merges two values that any transport keeps apart —
+ * a JSON body or a query string, where `buildUrl` writes array items with
+ * `String()`. Over-separating only costs a share or cache hit; merging hands
+ * one request's response to another.
+ *
  * Keys are built by content, in the order the rules are checked:
  *
  * - `undefined` at the top level → `[undefined]` (a call with no params is
- *   keyable). An `undefined`, function or symbol *member* is dropped and, as
- *   an array element, Map key/value or Set element, becomes `null` — exactly
- *   what `JSON.stringify` puts on the wire. So `{ a: undefined }` and `{}` key
- *   the same.
- * - string, number, boolean → `JSON.stringify` (`NaN` → `null`, as on the wire).
- * - anything with a `toJSON` function → the key of what it returns, called
- *   with the property name as `JSON.stringify` does. This is how a `Date`
- *   keys as its ISO string and a `URL` as its href.
+ *   keyable). An `undefined` *object member* is dropped, since both transports
+ *   omit it, so `{ a: undefined }` and `{}` key the same. As an array element,
+ *   Map key/value or Set element it keys as the unquoted token `undefined`
+ *   (a query string sends `ids=undefined`, not `ids=null`), and so does a
+ *   sparse array hole.
+ * - string, finite number, boolean → `JSON.stringify`. `NaN`, `Infinity` and
+ *   `-Infinity` key as those unquoted tokens, never as `null`: a query string
+ *   sends them as written.
+ * - anything with a `toJSON` function → `toJSON(<key of what it returns>)`,
+ *   called with the property name as `JSON.stringify` does. A `Date` keys as
+ *   `toJSON("2026-01-01T00:00:00.000Z")`, an invalid one as `toJSON(null)`.
+ *   The tag is there because a query string sends `String(date)` — local
+ *   time, or `Invalid Date` — not the ISO string or `null`. If `toJSON`
+ *   returns `undefined` the member is dropped, as JSON does.
  * - `Map` → `Map{k:v,...}` with entries sorted by key; `Set` → `Set[...]` in
  *   insertion order; typed arrays and `DataView` → `Uint8Array[1,2]` etc. The
  *   tag matters: a Map with entry `a: 1` does not send the same bytes as
@@ -29,15 +40,19 @@
  *   object with own enumerable keys is keyed the same way, since that is what
  *   `JSON.stringify` sends for it.
  *
+ * None of the tags can collide with a string, which is always JSON-quoted.
+ *
  * Declined (`null`), at any depth: a BigInt (`JSON.stringify` throws on it);
- * `ArrayBuffer`, `Blob`, `FormData`, `URLSearchParams` (content not readable
- * synchronously, or not representable); a boxed primitive; a circular
- * structure; and any other object with no own enumerable key, whose state is
- * invisible — a class holding its state in private fields, an `Error`, a
- * `Promise`. Before 4.4.3 every one of these keyed as `{}` below the top
- * level, so two different requests shared one response. `isSpecialBody`
- * (`./special-body.js`) answers a different question — whether params can be
- * split into path and query pairs — and is not a keying check.
+ * a function or symbol, wherever it appears (a query string would send its
+ * source text or description); `ArrayBuffer`, `Blob`, `FormData`,
+ * `URLSearchParams` (content not readable synchronously, or not
+ * representable); a boxed primitive; a circular structure; and any other
+ * object with no own enumerable key, whose state is invisible — a class
+ * holding its state in private fields, an `Error`, a `Promise`. Before 4.4.3
+ * every one of these keyed as `{}` below the top level, so two different
+ * requests shared one response. `isSpecialBody` (`./special-body.js`) answers
+ * a different question — whether params can be split into path and query
+ * pairs — and is not a keying check.
  *
  * Never throws: a throwing getter or `toJSON` becomes `null`.
  */
@@ -53,20 +68,21 @@ export function stableKey(value: unknown): string | null {
 
 /**
  * `string` is a key, `null` is decline, `undefined` is "omit this member"
- * (the JSON.stringify treatment of undefined / function / symbol values).
+ * (an `undefined` value, or a `toJSON` that returns one).
  */
 type Visit = string | null | undefined
 
 function visit(value: unknown, key: string, seen: Set<object>): Visit {
   switch (typeof value) {
     case 'undefined':
+      return undefined
     case 'function':
     case 'symbol':
-      return undefined
     case 'bigint':
       return null
-    case 'string':
     case 'number':
+      return Number.isFinite(value) ? JSON.stringify(value) : String(value)
+    case 'string':
     case 'boolean':
       return JSON.stringify(value)
     case 'object':
@@ -81,7 +97,10 @@ function visit(value: unknown, key: string, seen: Set<object>): Visit {
   seen.add(obj)
   try {
     const toJSON = (obj as { toJSON?: unknown }).toJSON
-    if (typeof toJSON === 'function') return visit(toJSON.call(obj, key), key, seen)
+    if (typeof toJSON === 'function') {
+      const inner = visit(toJSON.call(obj, key), key, seen)
+      return typeof inner === 'string' ? `toJSON(${inner})` : inner
+    }
     if (obj instanceof ArrayBuffer || obj instanceof Blob || obj instanceof FormData || obj instanceof URLSearchParams) {
       return null
     }
@@ -140,8 +159,12 @@ function visit(value: unknown, key: string, seen: Set<object>): Visit {
   }
 }
 
-/** An array element, Map key or value, or Set element: an omitted value becomes `null`, as in `JSON.stringify([undefined])`. */
+/**
+ * An array element, Map key or value, or Set element: an omitted value keys as
+ * the token `undefined`, never `null` — a query string sends `ids=undefined`
+ * for it, so it must not share a key with `[null]`.
+ */
 function element(value: unknown, key: string, seen: Set<object>): string | null {
   const s = visit(value, key, seen)
-  return s === undefined ? 'null' : s
+  return s === undefined ? 'undefined' : s
 }
