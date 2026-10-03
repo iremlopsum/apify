@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.4.4] — 2026-10-03
+
+**This package has moved to [`liaise`](https://www.npmjs.com/package/liaise).**
+Docs only — no code changes. The README now says where the library went and how
+to switch; `liaise` 5.0.0 is this same code under its new name. Upgrade notes:
+[MIGRATION.md](https://github.com/iremlopsum/liaise/blob/main/MIGRATION.md#upgrading-to-500).
+
 ## [4.4.3] — 2026-10-03
 
 ### Fixed
@@ -920,6 +927,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.4.4]: https://github.com/iremlopsum/apify/compare/v4.4.3...v4.4.4
 [4.4.3]: https://github.com/iremlopsum/apify/compare/v4.4.2...v4.4.3
 [4.4.2]: https://github.com/iremlopsum/apify/compare/v4.4.1...v4.4.2
 [4.4.1]: https://github.com/iremlopsum/apify/compare/v4.4.0...v4.4.1
