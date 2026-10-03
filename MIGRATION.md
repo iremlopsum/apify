@@ -7,6 +7,15 @@ For the full record of what changed in each release, see [CHANGELOG.md](./CHANGE
 
 ---
 
+## Upgrading to 4.4.4
+
+No action needed — 4.4.4 changes only the README. It marks the end of this
+package: the library continues as **`liaise`**. To move over, follow
+[Upgrading to 5.0.0](https://github.com/iremlopsum/liaise/blob/main/MIGRATION.md#upgrading-to-500)
+in the `liaise` repository.
+
+---
+
 ## Upgrading to 4.4.3
 
 No code changes. Two things you may observe after upgrading.

@@ -1,7 +1,7 @@
 {
   "name": "@iremlopsum/apify",
-  "version": "4.4.3",
-  "description": "Runtime-agnostic, type-safe API client built on standard fetch. Zero dependencies.",
+  "version": "4.4.4",
+  "description": "Moved to 'liaise' — npm install liaise. Same API; this package is no longer maintained.",
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",
@@ -49,7 +49,7 @@
   "bugs": {
     "url": "https://github.com/iremlopsum/apify/issues"
   },
-  "homepage": "https://github.com/iremlopsum/apify#readme",
+  "homepage": "https://github.com/iremlopsum/liaise#readme",
   "keywords": [
     "fetch",
     "api",
