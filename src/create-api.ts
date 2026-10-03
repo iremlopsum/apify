@@ -46,9 +46,9 @@ import { mergeHeaders } from './utils/headers.js'
 import { abortKind, propagatesReason } from './utils/abort-kind.js'
 import { anySignal } from './utils/any-signal.js'
 import { operationBudget, perCallerBudget } from './utils/budget.js'
-import { stableStringify } from './utils/cache.js'
+import { stableKey } from './utils/stable-key.js'
 import { createBackstop } from './utils/backstop.js'
-import { isSpecialBody, isOpaqueParams } from './utils/special-body.js'
+import { isSpecialBody } from './utils/special-body.js'
 import { runSchema } from './utils/validate.js'
 import type { SchemaOutcome } from './utils/validate.js'
 import type { ApiConfig, CallOptions, ErrorResult, Middleware, MiddlewareContext, Result, ResponseType } from './types.js'
@@ -256,8 +256,8 @@ function resolveRequestUrl(
  * agreement test exists to catch. The recompute is identical for identical
  * inputs, so the cache would buy nothing on a path that is already failing.
  * Two cases make the inputs not actually identical, and a cache would not fix
- * either: `stableStringify` sorts keys when building `shareKey`
- * (`src/utils/cache.ts:33`) while `buildUrl` serializes query params in
+ * either: `stableKey` sorts keys when building `shareKey`
+ * (`src/utils/stable-key.ts`) while `buildUrl` serializes query params in
  * `Object.entries` insertion order, so two callers that coalesce into one
  * shared request (an agreeing `shareKey`) can still recompute different query
  * strings; and `params` reaches middleware by reference, so an in-place
@@ -525,7 +525,7 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
        * and on every param value: `shareKey` is `name` plus stringified params.
        * Two caveats to that agreement, neither of which breaks it: `params`
        * reaches middleware by reference, so an in-place mutation there can
-       * make the recompute differ from what Step 4 built; and `stableStringify`
+       * make the recompute differ from what Step 4 built; and `stableKey`
        * sorts keys for `shareKey` while `buildUrl` serializes query params in
        * insertion order, so an agreeing `shareKey` does not guarantee an
        * identical query string. Each caller's URL is still correct for its own
@@ -1308,26 +1308,20 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
       // signal or timeout only changes *who is waiting*, so it does not
       // disable sharing: it is observed for this caller alone, below.
       //
-      // Opaque-body params (FormData, Blob, ArrayBuffer, URLSearchParams) are
-      // excluded too: stableStringify falls through to Object.keys() for any
-      // object, which returns [] for all four of those types regardless of
-      // content, so two calls with genuinely different payloads would
-      // otherwise collide on the same share key, coalesce into one request,
-      // and hand one caller the response to the other's payload — the exact
-      // "security-shaped bug" this doc warns about for per-call headers,
-      // reachable through a different vector. Declining to share is always
-      // safe; corrupting a response never is.
-      //
-      // A raw string is deliberately NOT excluded here (unlike
-      // isSpecialBody, used below for body/URL handling): stableStringify
-      // keys a string correctly, via JSON.stringify, so a string-param
-      // endpoint is soundly coalescable. Excluding it (as 2.2.0 did, sharing
-      // isSpecialBody for this check) silently disabled sharing for such
-      // endpoints — fixed in 2.2.1 by using isOpaqueParams here instead.
+      // The share key is `name|stableKey(params)`. A null key means the
+      // params cannot be keyed soundly — a BigInt, an opaque body type, a
+      // private-state instance, at any depth (see stable-key.ts) — and such
+      // a call never shares: two different payloads must never collide on
+      // one key and hand one caller the response to the other's request.
+      // That is the same "security-shaped bug" this doc warns about for
+      // per-call headers, reachable through a different vector. Declining
+      // to share is always safe; corrupting a response never is. Before
+      // 4.4.3 this was a depth-0 list (isOpaqueParams); 2.2.1 had narrowed it
+      // from isSpecialBody so that string-param endpoints still coalesce.
       //
       // The whole block is wrapped in try/catch for the same reason execute()
       // is: it runs in the bare body of the api method, so anything thrown
-      // here — by isSpecialBody, stableStringify, timeoutSignalFor, or the
+      // here — by isSpecialBody, stableKey, timeoutSignalFor, or the
       // synchronous part of the Promise executor — escapes as a rejection
       // rather than a Result. This is the one region of the request path where
       // "every call returns a Result" would otherwise not be enforced by
@@ -1337,14 +1331,16 @@ export function createApi<TRequests extends Record<string, Request<any, any>>>(
         // Emptiness, not truthiness: `headers: {}` and `middleware: []` are
         // both truthy, and neither changes what is requested, so neither is a
         // reason to decline coalescing.
-        const canShare =
+        // The cheap checks first; the key is only built for a call that could share.
+        const key =
           request.config.share === true &&
           isEmptyHeaders(options.headers) &&
-          (options.middleware === undefined || options.middleware.length === 0) &&
-          !isOpaqueParams(params)
-        if (!canShare) return execute()
+          (options.middleware === undefined || options.middleware.length === 0)
+            ? stableKey(params)
+            : null
+        if (key === null) return execute()
 
-        const shareKey = `${name}|${stableStringify(params)}`
+        const shareKey = `${name}|${key}`
 
         // This caller's own signal and per-call timeout, kept entirely separate
         // from the signal the real fetch runs on. It bounds only whether THIS

@@ -225,6 +225,95 @@ describe('share', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // 4.4.3 (spec 2026-10-03-stable-key-design.md): the share key is built by
+  // content at every depth, and the gate declines on a null key instead of
+  // checking a depth-0 list. Before this, a nested Date, Map, Set, ArrayBuffer
+  // or private-state instance keyed as "{}", so two concurrent calls with
+  // different values coalesced into one request and one caller got the
+  // response to the other's params.
+  // ---------------------------------------------------------------------------
+  it('does not coalesce different nested-Date params', async () => {
+    const calls: { resolve: (data: unknown) => void }[] = []
+    const fn = vi.fn((_u: string, _init: RequestInit) => new Promise<Response>(res => {
+      calls.push({ resolve: (data: unknown) => res(new Response(JSON.stringify(data), { status: 200 })) })
+    }))
+    vi.stubGlobal('fetch', fn)
+
+    const api = createApi({
+      baseUrl: '',
+      requests: { search: new Request<{ since: Date }, { who: string }>({ method: 'POST', path: '/search', share: true }) },
+    })
+
+    const pA = api.search({ since: new Date('2026-01-01T00:00:00.000Z') })
+    const pB = api.search({ since: new Date('2026-02-01T00:00:00.000Z') })
+    await Promise.resolve()
+
+    expect(fn.mock.calls.length).toBe(2)
+
+    calls[0].resolve({ who: 'A' })
+    calls[1].resolve({ who: 'B' })
+
+    const [rA, rB] = await Promise.all([pA, pB])
+    expect(rA.data).toEqual({ who: 'A' })
+    expect(rB.data).toEqual({ who: 'B' })
+  })
+
+  it('coalesces identical nested-Date params', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const api = createApi({
+      baseUrl: '',
+      requests: { search: new Request<{ since: Date }, { ok: number }>({ method: 'POST', path: '/search', share: true }) },
+    })
+    const all = Promise.all([
+      api.search({ since: new Date('2026-01-01T00:00:00.000Z') }),
+      api.search({ since: new Date('2026-01-01T00:00:00.000Z') }),
+    ])
+    await Promise.resolve()
+    expect(f.fn.mock.calls.length).toBe(1)
+    f.calls[0].resolve()
+    const results = await all
+    expect(results.every(r => r.error === null)).toBe(true)
+  })
+
+  it('declines to coalesce params with hidden state, even identical ones', async () => {
+    // Private-field state is invisible to stableKey, so the key is null and
+    // the call never shares. (A BigInt declines too, but a BigInt in a POST
+    // body fails at serialization before fetch, so it cannot be tested here;
+    // tests/stable-key.test.ts pins that rule.)
+    class Money {
+      #cents: number
+      constructor(cents: number) { this.#cents = cents }
+      get amount() { return this.#cents / 100 }
+    }
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const api = createApi({
+      baseUrl: '',
+      requests: { quote: new Request<{ price: Money }, { ok: number }>({ method: 'POST', path: '/quote', share: true }) },
+    })
+    const all = Promise.all([api.quote({ price: new Money(100) }), api.quote({ price: new Money(100) })])
+    await Promise.resolve()
+    expect(f.fn.mock.calls.length).toBe(2)
+    f.calls[0].resolve(); f.calls[1].resolve()
+    await all
+  })
+
+  it('coalesces identical top-level Map params, keyed by content since 4.4.3', async () => {
+    const f = controllable(); vi.stubGlobal('fetch', f.fn)
+    const api = createApi({
+      baseUrl: '',
+      requests: { upload: new Request<Map<string, string>, { ok: number }>({ method: 'POST', path: '/upload', share: true }) },
+    })
+    const all = Promise.all([
+      api.upload(new Map([['payload', 'same']])),
+      api.upload(new Map([['payload', 'same']])),
+    ])
+    await Promise.resolve()
+    expect(f.fn.mock.calls.length).toBe(1)
+    f.calls[0].resolve()
+    await all
+  })
+
+  // ---------------------------------------------------------------------------
   // Finding 2 (post-review): acquire() must not join an entry whose last
   // sharer has already released (refs <= 0) or whose controller is already
   // aborted — that entry is dying but hasn't been cleaned up yet, since
@@ -454,6 +543,7 @@ describe('share', () => {
   // string-param endpoint is soundly coalescable. Narrowed to isOpaqueParams
   // (the four object types only); FormData/Blob/ArrayBuffer/URLSearchParams
   // must still decline to coalesce (already covered by the tests above).
+  // Since 4.4.3 the gate is stableKey() === null, see tests/stable-key.test.ts.
   // ---------------------------------------------------------------------------
   it('coalesces a string-param endpoint (a raw string is soundly keyable, unlike FormData/Blob/etc)', async () => {
     const f = controllable(); vi.stubGlobal('fetch', f.fn)

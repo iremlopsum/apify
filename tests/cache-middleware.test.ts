@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { CacheStore, stableStringify } from '../src/utils/cache.js'
+import { CacheStore } from '../src/utils/cache.js'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
 import { cacheMiddleware } from '../src/built-in-middleware.js'
@@ -13,52 +13,6 @@ function mockJsonResponse(data: unknown, status = 200): Response {
     headers: { 'Content-Type': 'application/json' },
   })
 }
-
-// ---------------------------------------------------------------------------
-// stableStringify
-// ---------------------------------------------------------------------------
-
-describe('stableStringify', () => {
-  it('returns null for null', () => {
-    expect(stableStringify(null)).toBe('null')
-  })
-
-  it('returns [undefined] for undefined', () => {
-    expect(stableStringify(undefined)).toBe('[undefined]')
-  })
-
-  it('distinguishes null and undefined in objects', () => {
-    expect(stableStringify({ a: null })).not.toBe(stableStringify({ a: undefined }))
-  })
-
-  it('sorts object keys alphabetically', () => {
-    expect(stableStringify({ b: 2, a: 1 })).toBe('{"a":1,"b":2}')
-  })
-
-  it('sorts nested object keys', () => {
-    expect(stableStringify({ z: { b: 2, a: 1 }, a: 0 })).toBe('{"a":0,"z":{"a":1,"b":2}}')
-  })
-
-  it('escapes special characters in object keys', () => {
-    expect(stableStringify({ 'a"b': 1 })).toBe('{"a\\"b":1}')
-  })
-
-  it('preserves array element order', () => {
-    expect(stableStringify([3, 1, 2])).toBe('[3,1,2]')
-  })
-
-  it('handles number primitives', () => {
-    expect(stableStringify(42)).toBe('42')
-  })
-
-  it('handles string primitives with quoting', () => {
-    expect(stableStringify('hello')).toBe('"hello"')
-  })
-
-  it('handles boolean primitives', () => {
-    expect(stableStringify(true)).toBe('true')
-  })
-})
 
 // ---------------------------------------------------------------------------
 // CacheStore
