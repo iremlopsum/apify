@@ -15,8 +15,8 @@
 // =============================================================================
 
 import type { Middleware, Result, RetryOptions, RetryInfo } from './types.js'
-import { CacheStore, stableStringify } from './utils/cache.js'
-import { isOpaqueParams } from './utils/special-body.js'
+import { CacheStore } from './utils/cache.js'
+import { stableKey } from './utils/stable-key.js'
 
 // Re-exported so consumers of the `./middleware` entry point can name these
 // types directly (e.g. a shared `onRetry` handler, or a reusable options
@@ -402,21 +402,17 @@ export type CacheMiddleware = Middleware & { clear(): void }
  *
  * **Cache key:**
  *
- * The key is built from `ctx.requestName` and a stable JSON serialization of
- * `ctx.request.params` (object keys sorted recursively so `{ b: 2, a: 1 }`
- * and `{ a: 1, b: 2 }` are treated as the same call). This means the cache
- * key is always derived from the original params object, not the processed URL.
+ * The key is `ctx.requestName` plus `stableKey(ctx.request.params)` — a
+ * content-based key (see `src/utils/stable-key.ts`): object keys sorted,
+ * `undefined` members dropped, `Date` by its ISO string, `Map`, `Set` and
+ * typed arrays by their entries. It is derived from the original params
+ * object, not the processed URL.
  *
- * A call whose params are opaque to the stable serialisation — any value
- * whose own enumerable keys don't distinguish it from another instance
- * (`FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`, `Date`, `Map`, or
- * `Set` — see `isOpaqueParams`) — is never cached and never served from
- * cache: those all collapse to the literal `"{}"`, so caching them could
- * hand one caller the response to a different payload than the one it sent.
- * A raw string is not included in this exclusion — `stableStringify` keys a
- * string correctly, so a string-param endpoint is cached like any other
- * (fixed in 2.2.1; 2.2.0 excluded strings here too, which silently disabled
- * caching for them).
+ * A call whose params cannot be keyed soundly — a BigInt, an `ArrayBuffer`,
+ * `Blob`, `FormData` or `URLSearchParams`, a circular structure, or an object
+ * with no enumerable state, at any depth — is never cached and never served
+ * from cache. Declining is always safe; serving one caller the response to a
+ * different payload never is. A raw string keys fine and is cached normally.
  *
  * **What is cached:**
  *
@@ -493,21 +489,11 @@ export function cacheMiddleware(options?: {
   const debug = options?.debug ?? false
 
   const mw: Middleware = async (ctx, next) => {
-    // Params that are opaque to the stable serialisation (see
-    // isOpaqueParams: FormData, Blob, ArrayBuffer, URLSearchParams, Date,
-    // Map, Set) can't be keyed: stableStringify falls through to
-    // Object.keys() for any object, and Object.keys() returns [] for every
-    // one of them regardless of content, so two genuinely different
-    // payloads collapse onto the identical key `"<name>|{}"`. Whichever
-    // finished first would then be served to the other — a caller uploading
-    // payload B getting back payload A's response. Same collapse `share`
-    // guards against with the same predicate; declining to cache is always
-    // safe, serving the wrong response never is. A raw string is deliberately
-    // NOT included — stableStringify keys it correctly — so string-param
-    // endpoints are cached normally.
-    if (isOpaqueParams(ctx.request.params)) return next()
-
-    const paramsStr = stableStringify(ctx.request.params)
+    // A null key means the params cannot be keyed soundly (see stable-key.ts):
+    // neither cache nor serve. Declining is always safe; serving one caller
+    // the response to a different payload never is.
+    const paramsStr = stableKey(ctx.request.params)
+    if (paramsStr === null) return next()
     const key = `${ctx.requestName}|${paramsStr}`
 
     const cached = store.get<Result<unknown>>(key)

@@ -3,6 +3,7 @@ import { CacheStore, stableStringify } from '../src/utils/cache.js'
 import { createApi } from '../src/create-api.js'
 import { Request } from '../src/request.js'
 import { cacheMiddleware } from '../src/built-in-middleware.js'
+import { createGraphQL, Operation } from '../src/graphql.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -419,6 +420,137 @@ describe('cacheMiddleware', () => {
     expect(fetchMock.mock.calls.length).toBe(2)   // B must reach the network
     expect(rA.data).toEqual({ who: 'A' })
     expect(rB.data).toEqual({ who: 'B' })         // never A's cached response
+  })
+
+  // ---------------------------------------------------------------------------
+  // 4.4.3 (spec 2026-10-03-stable-key-design.md): the key is built by content
+  // at every depth, and declines rather than colliding. Before this, every
+  // value below the top level whose state lives outside Object.keys() keyed
+  // as "{}", so two different requests shared one cache entry.
+  // ---------------------------------------------------------------------------
+  it('never serves one nested-Date payload the response to another', async () => {
+    const bodies = ['A', 'B']
+    let n = 0
+    const fetchMock = vi.fn(async () => mockJsonResponse({ who: bodies[n++] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        search: new Request<{ since: Date }, { who: string }>({ method: 'POST', path: '/search', middleware: [cache] }),
+      },
+    })
+
+    const rA = await api.search({ since: new Date('2026-01-01T00:00:00.000Z') })
+    const rB = await api.search({ since: new Date('2026-02-01T00:00:00.000Z') })
+
+    expect(fetchMock.mock.calls.length).toBe(2)
+    expect(rA.data).toEqual({ who: 'A' })
+    expect(rB.data).toEqual({ who: 'B' })
+  })
+
+  it('serves identical nested-Date params from cache', async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        search: new Request<{ since: Date }, { ok: boolean }>({ method: 'POST', path: '/search', middleware: [cache] }),
+      },
+    })
+
+    await api.search({ since: new Date('2026-01-01T00:00:00.000Z') })
+    await api.search({ since: new Date('2026-01-01T00:00:00.000Z') })
+
+    expect(fetchMock.mock.calls.length).toBe(1)
+  })
+
+  it('declines to cache params with hidden state rather than keying them, even when identical', async () => {
+    // A class instance keeping its state in a private field has no own
+    // enumerable keys, so stableKey cannot see its content and returns null.
+    // A BigInt declines the same way, but a BigInt in a POST body never
+    // reaches the middleware chain: JSON.stringify throws at body
+    // serialization and the call fails before fetch (roadmap §1.4). The
+    // BigInt rule itself is pinned in tests/stable-key.test.ts.
+    class Money {
+      #cents: number
+      constructor(cents: number) { this.#cents = cents }
+      get amount() { return this.#cents / 100 }
+    }
+    const fetchMock = vi.fn(async () => mockJsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        quote: new Request<{ price: Money }, { ok: boolean }>({ method: 'POST', path: '/quote', middleware: [cache] }),
+      },
+    })
+
+    await api.quote({ price: new Money(100) })
+    await api.quote({ price: new Money(100) })
+
+    expect(fetchMock.mock.calls.length).toBe(2)
+  })
+
+  it('treats { a: undefined } and {} as the same key', async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        list: new Request<{ a?: string }, { ok: boolean }>({ method: 'POST', path: '/list', middleware: [cache] }),
+      },
+    })
+
+    await api.list({ a: undefined })
+    await api.list({})
+
+    expect(fetchMock.mock.calls.length).toBe(1)
+  })
+
+  it('caches identical top-level Map params, keyed by content since 4.4.3', async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const api = createApi({
+      baseUrl: '',
+      requests: {
+        upload: new Request<Map<string, string>, { ok: boolean }>({ method: 'POST', path: '/upload', middleware: [cache] }),
+      },
+    })
+
+    await api.upload(new Map([['payload', 'same']]))
+    await api.upload(new Map([['payload', 'same']]))
+
+    expect(fetchMock.mock.calls.length).toBe(1)
+  })
+
+  it('keys GraphQL variables by content too: two nested-Date variables are two fetches', async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({ data: { ok: true } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cache = cacheMiddleware({ ttl: 60_000 })
+    const client = createGraphQL({
+      endpoint: 'https://api.example.com/graphql',
+      operations: {
+        since: new Operation<{ since: Date }, { ok: boolean }>({ operation: 'query ($since: String!) { ok(since: $since) }' }),
+      },
+      middleware: [cache],
+    })
+
+    await client.since({ since: new Date('2026-01-01T00:00:00.000Z') })
+    await client.since({ since: new Date('2026-02-01T00:00:00.000Z') })
+    await client.since({ since: new Date('2026-02-01T00:00:00.000Z') })
+
+    expect(fetchMock.mock.calls.length).toBe(2) // the third call is a hit on the second
   })
 
   it('declines to cache special-body params at all, rather than keying them wrongly', async () => {
