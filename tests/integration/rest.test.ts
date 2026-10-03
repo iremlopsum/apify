@@ -569,3 +569,40 @@ describe('REST — a hung middleware against a real server', () => {
     expect(server.callCounts.get('GET /hello')).toBe(1)
   })
 })
+
+describe('REST — share keys params by content (4.4.3)', () => {
+  it('two different nested-Date payloads make two real requests, each answered with its own body', async () => {
+    const echo = new Request<{ since: Date }, { body: { since: string } }>({
+      method: 'POST',
+      path: '/echo',
+      share: true,
+    })
+    const api = createApi({ baseUrl: server.baseUrl, requests: { echo } })
+    const a = new Date('2026-01-01T00:00:00.000Z')
+    const b = new Date('2026-02-01T00:00:00.000Z')
+
+    const [ra, rb] = await Promise.all([api.echo({ since: a }), api.echo({ since: b })])
+
+    expect(server.callCounts.get('POST /echo')).toBe(2)
+    expect(ra.error).toBeNull()
+    expect(rb.error).toBeNull()
+    expect(ra.data?.body.since).toBe(a.toISOString())
+    expect(rb.data?.body.since).toBe(b.toISOString()) // its own body, never A's
+  })
+
+  it('two identical nested-Date payloads make one real request', async () => {
+    const echo = new Request<{ since: Date }, { body: { since: string } }>({
+      method: 'POST',
+      path: '/echo',
+      share: true,
+    })
+    const api = createApi({ baseUrl: server.baseUrl, requests: { echo } })
+    const d = new Date('2026-01-01T00:00:00.000Z')
+
+    const [ra, rb] = await Promise.all([api.echo({ since: d }), api.echo({ since: d })])
+
+    expect(server.callCounts.get('POST /echo')).toBe(1)
+    expect(ra.data?.body.since).toBe(d.toISOString())
+    expect(rb.data?.body.since).toBe(d.toISOString())
+  })
+})

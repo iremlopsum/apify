@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.4.3] — 2026-10-03
+
+### Fixed
+
+- **`share` and `cacheMiddleware` no longer hand one caller another caller's
+  response when params carry a `Date`, `Map`, `Set`, `ArrayBuffer`, BigInt or
+  a class instance with private state below the top level.** The key that
+  decides whether two calls are the same request fell through to
+  `Object.keys()` for any object, which is empty for all of those, so two
+  different requests keyed as `{}` — or, for a BigInt anywhere, as one shared
+  sentinel. 2.2.1 had closed this at the top level only. The key is now built
+  by content at every depth: anything with `toJSON` by what it returns (a
+  `Date` keys as its ISO string), `Map`, `Set` and typed arrays by their
+  entries, and `undefined` members dropped as `JSON.stringify` drops them. A
+  value that cannot be keyed soundly — a BigInt, an `ArrayBuffer`, `Blob`,
+  `FormData` or `URLSearchParams`, a circular structure, or an object with no
+  enumerable state — now declines at any depth: that call is neither shared
+  nor cached. Two consequences you can observe: calls that were wrongly
+  coalesced or cached together now go out separately, and `{ a: undefined }`
+  and `{}` now share one key. A top-level `Map`, `Set` or `Date` param, which
+  was never shared or cached before, now is, by content. The GraphQL client is
+  covered through `cacheMiddleware` on its variables. See
+  [MIGRATION.md](./MIGRATION.md#upgrading-to-443).
+
+### Internal
+
+- `stableStringify` and `isOpaqueParams` are replaced by one function,
+  `stableKey` (`src/utils/stable-key.ts`), the single source of truth for
+  what `share` and `cacheMiddleware` treat as the same request. Not exported.
+
 ## [4.4.2] — 2026-09-23
 
 ### Fixed
@@ -890,6 +920,7 @@ Initial release of the rewritten client. Reconstructed from the release commit
   `ArrayBuffer` and strings
 - Response parsing as `json`, `text`, `blob`, `arrayBuffer` or `formData`
 
+[4.4.3]: https://github.com/iremlopsum/apify/compare/v4.4.2...v4.4.3
 [4.4.2]: https://github.com/iremlopsum/apify/compare/v4.4.1...v4.4.2
 [4.4.1]: https://github.com/iremlopsum/apify/compare/v4.4.0...v4.4.1
 [4.4.0]: https://github.com/iremlopsum/apify/compare/v4.3.0...v4.4.0

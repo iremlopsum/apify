@@ -8,38 +8,6 @@ interface CacheEntry {
 }
 
 /**
- * Produces a stable JSON string representation with sorted object keys.
- *
- * Object key order in JavaScript is not guaranteed to be consistent, so
- * `{ b: 2, a: 1 }` and `{ a: 1, b: 2 }` could serialize differently with
- * `JSON.stringify`. This function normalises by sorting keys recursively,
- * so both produce `{"a":1,"b":2}`.
- *
- * Array element order is preserved — `[1, 2]` and `[2, 1]` are treated
- * as different values.
- *
- * Never throws — serialization errors (e.g., circular references) return
- * a sentinel string rather than propagating the exception.
- */
-export function stableStringify(value: unknown): string {
-  try {
-    if (value === undefined) return '[undefined]'
-    if (value === null) return 'null'
-    if (Array.isArray(value)) {
-      return `[${value.map(stableStringify).join(',')}]`
-    }
-    if (typeof value === 'object') {
-      const obj = value as Record<string, unknown>
-      const pairs = Object.keys(obj).sort().map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
-      return `{${pairs.join(',')}}`
-    }
-    return JSON.stringify(value)
-  } catch {
-    return `[SERIALIZATION_ERROR:${typeof value}]`
-  }
-}
-
-/**
  * In-memory cache store for `cacheMiddleware`. Stores values by string key
  * with TTL-based expiry and oldest-first eviction when the store is full.
  *

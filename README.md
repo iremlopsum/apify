@@ -837,6 +837,8 @@ const api = createApi({
 
 Caches successful responses in memory, keyed by request name and params. Calls with identical params within the TTL window are served from cache without hitting the network. Each `cacheMiddleware()` call creates an isolated store — different endpoints never share entries.
 
+Params are keyed by content, at every depth: plain data as sorted JSON with `undefined` members dropped (so `{ a: undefined }` and `{}` are one key), anything with `toJSON` by what it returns (a `Date` is its ISO string), and `Map`, `Set` and typed arrays by their entries. A call whose params cannot be keyed soundly — a BigInt, an `ArrayBuffer`, `Blob`, `FormData` or `URLSearchParams`, or an object with no enumerable state such as a class instance holding private fields — is never cached and never served from cache. The rule is the same one `share` uses; see [Sharing](#sharing).
+
 ```ts
 const getUserCache = cacheMiddleware({ ttl: 5 * 60_000, maxSize: 100 })
 
@@ -1062,12 +1064,12 @@ const [a, b] = await Promise.all([
 
 `share` is the sibling of `dedupe`, with the opposite intent: **dedupe cancels** the older call in favor of the newer one, **share joins** the existing call instead of starting a new one. Because the two behaviors contradict each other, setting both on the same `Request` throws at `createApi(...)` time — not at call time — so the mistake surfaces immediately rather than the first time the endpoint is called.
 
-**What counts as "identical":** the request name plus a stable serialization of the params. Two calls with the same params to the same endpoint share; different params (or different endpoints) never do.
+**What counts as "identical":** the request name plus a content-based key of the params — object keys sorted, `undefined` members dropped (so `{ a: undefined }` and `{}` are one key), anything with `toJSON` keyed by what it returns (a `Date` is its ISO string), `Map`, `Set` and typed arrays keyed by their entries. Two calls with the same params to the same endpoint share; different params (or different endpoints) never do.
 
 **What disables sharing for a single call:**
 
 - A per-call `headers` or `middleware` — these change *what* is requested, so handing that caller another caller's response would be a real bug, not just a missed optimization. A call carrying either always gets its own, unshared request.
-- Params that are opaque to the stable serialization — `FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`, `Date`, `Map`, or `Set` — are never coalesced. The stable serialization used to build the share key can't distinguish two different payloads of these types from each other (it falls back to `Object.keys()`, which is empty for all of them), so two different `FormData` uploads would otherwise collide on the same key and one caller could receive the response meant for the other's payload entirely. Declining to share is always safe; handing back the wrong response never is. A raw `string` is not excluded — it stringifies distinguishably, so a string-param endpoint is soundly coalesced like any other.
+- Params that cannot be keyed soundly, at any depth: a BigInt, an `ArrayBuffer`, `Blob`, `FormData` or `URLSearchParams`, a circular structure, or an object with no enumerable state (a class instance keeping its state in private fields, an `Error`). Two different values of these kinds would otherwise risk one key, and one caller could receive the response meant for the other's payload. Declining to share is always safe; handing back the wrong response never is. A `Date`, `Map`, `Set` or typed array is keyed by its content and shares normally, and a raw `string` keys distinguishably, so a string-param endpoint is coalesced like any other.
 
 **What does *not* disable sharing:** a per-call `signal` or `timeout`. These bound *who is still waiting*, not *what is being asked for*, so they're tracked with a per-caller refcount instead: each sharer's own signal/timeout only removes that caller from the wait list. The underlying request keeps running for everyone else, and is only aborted once every sharer — including the one that gave up — has stopped waiting. A sharer that gives up gets an error `Result` (`kind: 'timeout'` or `kind: 'abort'`), reported to `onError` exactly as the identical non-shared call would be — which means a `'timeout'` give-up reports and an `'abort'` give-up does not (see [Error handling with `onError`](#error-handling-with-onerror)).
 
