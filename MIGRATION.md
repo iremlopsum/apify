@@ -7,6 +7,33 @@ For the full record of what changed in each release, see [CHANGELOG.md](./CHANGE
 
 ---
 
+## Upgrading to 4.4.3
+
+No code changes. Two things you may observe after upgrading.
+
+**More requests where there were wrongly fewer.** `share: true` endpoints and
+`cacheMiddleware` keyed params by their enumerable keys. A `Date`, `Map`, `Set`,
+`ArrayBuffer`, BigInt or private-state class instance anywhere below the top
+level therefore made every such call look identical, and one caller could
+receive the response meant for another caller's params. Those calls now key by
+content and go out separately. If request counts rise after upgrading, that is
+the fix working: the previous count was wrong responses, not savings. A value
+that cannot be keyed soundly (a BigInt, an `ArrayBuffer`, `Blob`, `FormData`
+or `URLSearchParams`, an object with no enumerable state) is now never shared
+or cached at any depth, where before only the top level was checked.
+
+**`{ a: undefined }` and `{}` are now the same key.** An `undefined` member is
+dropped, as `JSON.stringify` drops it on the wire, so equivalent calls hit the
+same cache entry and the same in-flight share. There is no way to make
+`undefined` mean "a different request", and the wire never carried one.
+
+One smaller change at the top level only: a `Map`, `Set` or `Date` param was
+previously never shared or cached; it now is, by content, so two identical such
+params coalesce. `FormData`, `Blob`, `ArrayBuffer` and `URLSearchParams` still
+never do.
+
+---
+
 ## Upgrading to 4.4.2
 
 No action is needed for almost everyone. This release makes `timeout` and

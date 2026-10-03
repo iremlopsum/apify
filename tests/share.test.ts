@@ -345,7 +345,7 @@ describe('share', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // C2: isSpecialBody, stableStringify and timeoutSignalFor all run in the bare
+  // C2: isSpecialBody, stableKey and timeoutSignalFor all run in the bare
   // body of the api method, outside execute()'s try/catch — the one region of
   // the request path where "every call returns a Result" was not enforced by
   // construction. A BigInt timeout is the cheapest reachable trigger (TypeScript
@@ -548,7 +548,7 @@ describe('share', () => {
   it('coalesces a string-param endpoint (a raw string is soundly keyable, unlike FormData/Blob/etc)', async () => {
     const f = controllable(); vi.stubGlobal('fetch', f.fn)
     // `Request<TParams extends object, ...>` cannot name `string` itself — a
-    // raw string body is a runtime-only concept (isOpaqueParams operates on
+    // raw string body is a runtime-only concept (the keying check, now stableKey, operates on
     // the erased `object` params createApi actually passes through), so the
     // call site casts past the declared (but here vacuous)
     // `Record<string, never>` params type, the same way the suite already
